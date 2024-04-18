@@ -20,6 +20,7 @@ tcc_c
 tcc_p
 *-tcc
 libtcc*.def
+.slurp*
 
 config*.h
 *_.h
