@@ -14,10 +14,22 @@ SN=1
 SC=1
 
 # Find all relevant source files
-ls -1 configure >.slurp-plan
-ls -1 Makefile* >>.slurp-plan
+echo 'README' >.slurp-plan
+echo 'COPYING' >>.slurp-plan
+echo 'RELICENSING' >>.slurp-plan
+echo 'TODO' >>.slurp-plan
+echo 'USES' >>.slurp-plan
+echo 'VERSION.txt' >>.slurp-plan
+echo 'configure' >>.slurp-plan
+echo 'Makefile' >>.slurp-plan
+echo 'Changelog' >>.slurp-plan
+echo 'CodingStyle' >>.slurp-plan
+echo 'meson.build' >>.slurp-plan
+
 find . -name '*.h' -print >>.slurp-plan
 find . -name '*.c*' -print >>.slurp-plan
+find . -name '*.txt' -print >>.slurp-plan
+
 
 # Generate the index
 SCROLL_BREAK='\x17'

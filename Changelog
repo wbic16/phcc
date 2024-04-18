@@ -1,3 +1,10 @@
+Version 1.0.0:
+Features:
+- Added Phext multi-dimensional input file support
+
+Licensing:
+- TinyCC partly relicensed to MIT license (See RELICENSING file).
+
 version 0.9.28:
 
 User interface:
