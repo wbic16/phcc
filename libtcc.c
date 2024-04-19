@@ -2226,8 +2226,14 @@ PUB_FUNC void tcc_print_stats(TCCState *s1, unsigned total_time)
     if (!total_time)
         total_time = 1;
     fprintf(stderr, "# %d idents, %d lines, %u bytes\n"
+                    "# %d scrolls, %d sections, %d chapters\n"
+                    "# %d books, %d volumes, %d collections\n"
+                    "# %d series, %d shelves, %d libraries\n"
                     "# %0.3f s, %u lines/s, %0.1f MB/s\n",
            total_idents, total_lines, total_bytes,
+           total_scrolls, total_sections, total_chapters,
+           total_books, total_volumes, total_collections,
+           total_series, total_shelves, total_libraries,
            (double)total_time/1000,
            (unsigned)total_lines*1000/total_time,
            (double)total_bytes/1000/total_time);

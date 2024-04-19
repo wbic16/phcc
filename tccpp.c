@@ -2609,7 +2609,115 @@ static void next_nomacro(void)
         }
         break;
 
-    case '\n':
+    case TOK_SCROLL_BREAK:
+        file->scroll_num++;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_SECTION_BREAK:
+        file->section_num++;
+        file->scroll_num = 1;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_CHAPTER_BREAK:
+        file->chapter_num++;
+        file->section_num = 1;
+        file->scroll_num = 1;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_BOOK_BREAK:
+        file->book_num++;
+        file->chapter_num = 1;
+        file->section_num = 1;
+        file->scroll_num = 1;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_VOLUME_BREAK:
+        file->volume_num++;
+        file->book_num = 1;
+        file->chapter_num = 1;
+        file->section_num = 1;
+        file->scroll_num = 1;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_COLLECTION_BREAK:
+        file->collection_num++;
+        file->volume_num = 1;
+        file->book_num = 1;
+        file->chapter_num = 1;
+        file->section_num = 1;
+        file->scroll_num = 1;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_SERIES_BREAK:
+        file->series_num++;
+        file->collection_num = 1;
+        file->volume_num = 1;
+        file->book_num = 1;
+        file->chapter_num = 1;
+        file->section_num = 1;
+        file->scroll_num = 1;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_SHELF_BREAK:
+        file->shelf_num++;
+        file->series_num = 1;
+        file->collection_num = 1;
+        file->volume_num = 1;
+        file->book_num = 1;
+        file->chapter_num = 1;
+        file->section_num = 1;
+        file->scroll_num = 1;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_LIBRARY_BREAK:
+        file->library_num++;
+        file->shelf_num = 1;
+        file->series_num = 1;
+        file->collection_num = 1;
+        file->volume_num = 1;
+        file->book_num = 1;
+        file->chapter_num = 1;
+        file->section_num = 1;
+        file->scroll_num = 1;
+        file->line_num = 1;
+        tok_flags |= TOK_FLAG_BOL;
+        p++;
+        tok = TOK_SCROLL_BREAK;
+        goto keep_tok_flags;
+
+    case TOK_LINEFEED:
         file->line_num++;
         p++;
 maybe_newline:

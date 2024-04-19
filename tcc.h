@@ -629,7 +629,7 @@ typedef struct DLLReference {
 #define TYPE_PARAM     4 /* type declares function parameter */
 #define TYPE_NEST      8 /* nested call to post_type */
 
-#define IO_BUF_SIZE 8192
+#define IO_BUF_SIZE 32768 // 8192
 
 typedef struct BufferedFile {
     uint8_t *buf_ptr;
@@ -647,6 +647,15 @@ typedef struct BufferedFile {
     char *true_filename; /* filename not modified by # line directive */
     unsigned char unget[4];
     unsigned char buffer[1]; /* extra size for CH_EOB char */
+    int scroll_num; /* current scroll */
+    int section_num; /* current section */
+    int chapter_num; /* current chapter */
+    int book_num; /* current book */
+    int volume_num; /* current volume */
+    int collection_num; /* current collection */
+    int series_num; /* current series */
+    int shelf_num; /* current shelf */
+    int library_num; /* current library */
 } BufferedFile;
 
 #define CH_EOB   '\\'       /* end of buffer or '\0' char in file */
@@ -995,6 +1004,15 @@ struct TCCState {
     /* benchmark info */
     int total_idents;
     int total_lines;
+    int total_scrolls;
+    int total_sections;
+    int total_chapters;
+    int total_books;
+    int total_volumes;
+    int total_collections;
+    int total_series;
+    int total_shelves;
+    int total_libraries;
     unsigned int total_bytes;
     unsigned int total_output[4];
 
@@ -1190,8 +1208,17 @@ struct filespec {
 
 #define TOK_HAS_VALUE(t) (t >= TOK_CCHAR && t <= TOK_LINENUM)
 
-#define TOK_EOF       (-1)  /* end of file */
-#define TOK_LINEFEED  10    /* line feed */
+#define TOK_EOF              (-1) /* end of file */
+#define TOK_LINEFEED         0x0A /* line feed */
+#define TOK_SCROLL_BREAK     0x17 /* scroll break */
+#define TOK_SECTION_BREAK    0x18 /* section break */
+#define TOK_CHAPTER_BREAK    0x19 /* chapter break */
+#define TOK_BOOK_BREAK       0x1A /* book break */
+#define TOK_VOLUME_BREAK     0x1C /* volume break */
+#define TOK_COLLECTION_BREAK 0x1D /* collection break */
+#define TOK_SERIES_BREAK     0x1E /* series break */
+#define TOK_SHELF_BREAK      0x1F /* shelf break */
+#define TOK_LIBRARY_BREAK    0x01 /* library break */
 
 /* all identifiers and strings have token above that */
 #define TOK_IDENT 256
@@ -1999,6 +2026,15 @@ static inline void post_sem(TCCSem *p) {
 
 #define total_idents        TCC_STATE_VAR(total_idents)
 #define total_lines         TCC_STATE_VAR(total_lines)
+#define total_scrolls       TCC_STATE_VAR(total_scrolls)
+#define total_sections      TCC_STATE_VAR(total_sections)
+#define total_chapters      TCC_STATE_VAR(total_chapters)
+#define total_books         TCC_STATE_VAR(total_books)
+#define total_volumes       TCC_STATE_VAR(total_volumes)
+#define total_collections   TCC_STATE_VAR(total_collections)
+#define total_series        TCC_STATE_VAR(total_series)
+#define total_shelves       TCC_STATE_VAR(total_shelves)
+#define total_libraries     TCC_STATE_VAR(total_libraries)
 #define total_bytes         TCC_STATE_VAR(total_bytes)
 
 PUB_FUNC void tcc_enter_state(TCCState *s1);
