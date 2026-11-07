@@ -36,6 +36,7 @@ from this file alone.
 | `libtcc.c` | +24 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
+| `include/float.h` | +30 | C11 `<float.h>` completion (F8): adds `FLT_EVAL_METHOD` (2 on i386, whose backend evaluates on the x87 stack; 0 on the other backends), the `FLT`/`DBL`/`LDBL_HAS_SUBNORM` family, the `*_DECIMAL_DIG` family, and the `*_TRUE_MIN` family. Additions only — no upstream line changed. See F8. |
 | `phext/phext.h` | new, +397 | Public header for the phext developer library (F2): every type, constant, and function of the libphext-rs 0.4.1 parity surface, documented. C99, no dependencies beyond libc types. F4 adds the hash-index fields to `phext_scrolls`. |
 | `phext/phext.c` | new, +2,031 | The library implementation (F2), including a scalar XXH3-128 port (from xxhash-rust's const implementation) for scroll checksums. Single translation unit. F4 adds the coordinate hash index behind `phext_map_get`. |
 | `phext/PARITY.md` | new, +268 | The parity audit: all 77 libphext-rs capabilities mapped to their C counterparts, the idiom mapping, divergences D-2…D-6, and the conformance outcome. D-4 superseded annotation added by F4. |
@@ -489,6 +490,68 @@ structure; the fork's intent is carried, never dropped silently).
     go STALE until regenerated; machine #3 (tccelf.c), the
     libtcc1 proof receipts and the assembly listings are
     untouched.
+- **F8 — `include/float.h`: C11 <float.h> completion (2026-11-07).**
+  The benchmark programme's patch queue PQ-5 (task
+  27.6.10/8.6.13/6.6.10): GNU sed 4.10 and GNU grep 3.12 build under
+  phcc and their main suites pass, but `make check` aborted in
+  gnulib-tests compiling `test-float-h.c:28` —
+  `'FLT_EVAL_METHOD' undeclared`. Audit of the shipped header
+  against C11 §5.2.4.2.2 found the gap was the whole post-C89 layer,
+  not the one macro: of the section's required macros, ten were
+  missing — `FLT_EVAL_METHOD` (C99), and the C11 additions
+  `FLT_DECIMAL_DIG`, `DBL_DECIMAL_DIG`, `LDBL_DECIMAL_DIG`,
+  `FLT_TRUE_MIN`, `DBL_TRUE_MIN`, `LDBL_TRUE_MIN`,
+  `FLT_HAS_SUBNORM`, `DBL_HAS_SUBNORM`, `LDBL_HAS_SUBNORM`. All
+  other required macros were present with correct values. The fix
+  is +30 lines, additions only; no upstream line is changed.
+  - *`FLT_EVAL_METHOD` values follow the backends, not the oracle:*
+    x86-64 evaluates float/double in SSE registers, each type in
+    its own format (objdump of the generated code: `mulsd`/`addsd`/
+    `mulss`) → **0**. i386 evaluates on the x87 stack (`fldl`/
+    `fmull`/`faddl` — arithmetic at 80-bit), so float and double
+    are evaluated in the format of long double → **2** (the value
+    gcc also reports for x87 i386). ARM, AArch64, RISC-V and C67
+    execute each FP operation in the operand type's own register
+    format → **0**. Selected by `#if defined __i386__`, so cross
+    compilers serving i386 get 2 and every other target gets 0.
+  - *Remaining values:* `*_DECIMAL_DIG` 9/17, and `LDBL_DECIMAL_DIG`
+    21 (x86 80-bit) / 36 (AArch64/RISC-V quad) / 17 (long double =
+    double branch), beside the pre-existing per-branch
+    `DECIMAL_DIG`; `*_HAS_SUBNORM` 1 — every format the header
+    describes is an IEC 60559 format with gradual underflow;
+    `*_TRUE_MIN` are the smallest positive subnormals (2^-149,
+    2^-1074, and per-branch long-double 2^-16445 / 2^-16494 /
+    2^-1074) written at full decimal precision.
+  - *Deliberately not added:* the C23 macros (`*_IS_IEC_60559`,
+    `*_NORM_MAX`, `*_SNAN`). phcc claims C11, and neither oracle in
+    this environment (gcc 13.3.0, clang 18.1.3) defines them
+    either; gnulib's own test wrapper supplies them when a suite
+    needs them. `*_SNAN` in particular cannot be written truthfully
+    as a header constant in C11 (no literal denotes a NaN; the
+    oracles use `__builtin_nansf`, which phcc does not implement).
+  - *Evidence:* (1) the PQ-5 reproducer (`repro/gnulib-float-h/
+    repro-1.c`) failed before with `'FLT_EVAL_METHOD' undeclared`
+    and now compiles and runs, returning 0 on x86-64; via the
+    preprocessor the value reads 2 under i386-tcc and 0 under
+    x86-64 tcc. (2) A differential probe printing every
+    §5.2.4.2.2 macro (integers directly; float constants as raw bit
+    patterns and `%a`) is **byte-identical under phcc, gcc 13.3.0
+    and clang 18.1.3** — including `FLT_TRUE_MIN` = bits 0x00000001
+    and `DBL_TRUE_MIN` = 0x1, so the literal parser rounds the long
+    decimal spellings to the true subnormals. (3) Fresh phcc builds
+    of sed 4.10 and grep 3.12 with the benchmark recipes
+    (`./configure CC=phcc`, `make -j8`): `make check` now exits 0
+    for both. sed: main suite 64 pass / 0 fail / 11 skip (unchanged)
+    and gnulib-tests, previously aborted at test-float-h, completes
+    222 pass / 0 fail / 65 skip of 287; grep: main suite 107 pass /
+    0 fail / 19 skip / 2 XFAIL (unchanged) and gnulib-tests
+    completes 257 pass / 0 fail / 58 skip of 315. `test-float-h`
+    itself: PASS in both, binary exits 0. (4) Upstream `make test`
+    ALL TESTS PASSED. Note for the phext: this entry changes the
+    Source scroll of `include/float.h`, a shipped header (not one
+    of the §A.3 machine files), so no machine binding moves; its
+    Design view goes STALE on the next phext refresh until
+    regenerated, as with any source change.
 
 ## Maintenance rule
 
