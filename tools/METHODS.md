@@ -43,8 +43,12 @@ a non-empty target directory unless `--force` is given (exit 2).
   if present, else inherited from `--base` (a previous phext); with
   neither, pack aborts. Volume 2 places every file by the established
   placement (Slice 0 §1 Books: Book = module, Chapter = component,
-  Section = file, path-sorted; `tools/**` → Book 10 Chapter 9) and
-  regenerates the placement manifest. Files are enumerated by
+  Section = file, path-sorted; `tools/**` → Book 10 Chapter 9,
+  `README.md` → Book 10 Chapter 1) and regenerates the placement
+  manifest. One placement lives outside Source: `docs/**` → the
+  Docs phase (Collection 9, Volume 2, Book 1 Chapter 1, Section =
+  file) — tree documentation sits in the phase the 6D UML model
+  reserves for it. Files are enumerated by
   `git ls-files` when the tree is a git work tree, else by directory
   walk (mode from the executable bit). A file no placement rule
   covers aborts the pack, by name — nothing is silently dropped.
@@ -72,6 +76,16 @@ Volume 1 source, or a stage-B error.
   (559/559), and the **entire Volume 3** (50,816/50,816 — every index
   scroll and every member payload). The segmentation is a fixed
   point of pack: unpack∘pack loses nothing the tree ever held.
+
+Placement completion (2026-11-07): the placement table predated F2
+and the seal, and a whole-tree pack of the current tree aborted on
+13 unplaceable paths. It now covers the whole tree: 603 files
+placed — the 558 above plus `README.md`, the three `docs/**`
+guides (Docs phase), and the files DevUX added under `examples/**`
+and `tools/**` — with whole-tree pack + both unpack routes
+re-verified at 603/603 byte-identical. The recorded exclusions are
+exactly: `phcc.phext`, `phcc.phext.xz`, `phcc-manifest.tsv` (when
+present), and the eight `phext/**` paths (next paragraph).
 
 ## What is NOT preserved by a pack, and why that is correct
 
@@ -101,9 +115,19 @@ come back:
 Also never packed, by design: `monolith.phext` and `phcc.phext`
 themselves (a phext's bytes *are* the delimiter set — a phext cannot
 byte-exactly contain itself as a scroll; the monolith survives as
-Volume 1), `phcc-manifest.tsv` (unpack's own output, regenerated
-every run), and `.git`. Every exclusion is recorded in the packed
-manifest.
+Volume 1), `phcc.phext.xz` (the generated seal *of* the phext —
+produced from it by `phcc seal`, never packed into it),
+`phcc-manifest.tsv` (unpack's own output, regenerated every run),
+`.git` — and the whole of `phext/**`. The C parity library already
+lives at Source Book 10 Chapter 10 under the builds pass's Sec-14
+placement addendum (Meta Sec 14); pack's path-sort sectioning would
+renumber `phext.c`/`phext.h` off the addendum's Sections 1–2 and
+split each across two addresses at the next merge, so the directory
+is carried by the addendum as one component. (One member,
+`phext/tests/regression-1-helios.phext`, could not be a scroll
+anyway: it is a phext file, and its bytes are delimiters.) Every
+exclusion is recorded in the packed manifest, per file, with its
+reason.
 
 ## Lineage of the code
 
@@ -112,6 +136,7 @@ manifest.
 - unpack vol3: adapted from importer v4 `reassemble.py`.
 - pack stage A: adapted from Slice 0 `import_phcc.py` (placement
   table verbatim; tree enumeration generalised beyond git;
-  `tools/**` placement added).
+  `tools/**` placement added; `README.md` + `docs/**` placements
+  and the seal + `phext/**` named exclusions added 2026-11-07).
 - pack stage B: importers v3/v4 (`import_fn.py`, `import_v4.py`)
   run unmodified.

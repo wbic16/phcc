@@ -12,7 +12,8 @@
 unpack: phext -> normal directory tree (every file SHA-256-verified
 against the in-phext placement manifest before it is written).
 pack:   directory tree -> phext (Slice 0 placement for Volume 2,
-importers v3/v4 member segmentation for Volume 3).
+plus docs/** in the Docs phase (Collection 9); importers v3/v4
+member segmentation for Volume 3).
 build-region: list or wipe the Library-10000 build-artifact region
 (binary build outputs, base64 in-phext; wiped and reset frequently).
 seal/unseal: the working phext is plain text; the xz seal is the

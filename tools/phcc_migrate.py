@@ -25,10 +25,16 @@ What is reused vs adapted (nothing reinvented silently):
     back to the Volume 2 bridge scroll), same verification rules.
   - pack stage A (tree -> Volume 1 + Volume 2 + placement manifest):
     ADAPTED from Slice 0 tools/import_phcc.py (placement table
-    `place()` copied verbatim, plus one extension: tools/** ->
-    Book 10 Chapter 9, and phcc.phext is excluded by name for the
-    same reason monolith.phext was — a phext cannot byte-exactly
-    contain itself). Differences from the original: the tree need
+    `place()` copied verbatim, plus extensions: tools/** -> Book 10
+    Chapter 9; placement completion 2026-11-07 — README.md -> Book 10
+    Chapter 1 (the PATCHES.md precedent), docs/** -> the Docs phase
+    (Collection 9) via place_full(), phcc.phext.xz excluded by name
+    (the generated seal of the phext), and phext/** excluded by name
+    (carried by the Sec-14 placement addendum at Book 10 Chapter 10;
+    pack routing would renumber phext.c/phext.h). phcc.phext is
+    excluded by name for the same reason monolith.phext was — a
+    phext cannot byte-exactly contain itself). Differences from the
+    original: the tree need
     not be a git checkout (plain directory walk, modes from the
     filesystem), and Volume 1 may be inherited from --base instead
     of read from a monolith.phext in the tree.
@@ -229,7 +235,8 @@ def place(path):
     if path.startswith("win32/lib/"): return (9, 4)
     if path.startswith("win32/"): return (9, 5)
     if path in ("Makefile", "configure", "conftest.c", ".gitignore",
-                "slurp.sh", "PATCHES.md", "texi2pod.pl"): return (10, 1)
+                "slurp.sh", "PATCHES.md", "README.md",
+                "texi2pod.pl"): return (10, 1)
     if path.startswith("tests/"):
         if "/" not in path[len("tests/"):]: return (10, 2)
         if path.startswith("tests/tests2/"): return (10, 3)
@@ -243,6 +250,54 @@ def place(path):
     # that now ships in the repo gets Book 10 Chapter 9.
     if path.startswith("tools/"): return (10, 9)
     return None
+
+def place_full(path):
+    """Return (collection, volume, book, chapter) for a path, or None.
+
+    Everything place() covers lives in the Source phase (Collection
+    4), Volume 2 — place_full() just widens its (book, chapter) with
+    that prefix. The one further extension (placement completion,
+    2026-11-07): the project's documentation set, docs/**, goes to
+    the Docs phase (Collection 9) of the 6D UML model — Volume 2
+    (the working volume every phase's current content uses), Book 1
+    (project documentation), Chapter 1 (guides), Section = file,
+    path-sorted: the same file-sectioning idiom as Source, at the
+    smallest scale that fits. Tree documentation belongs in the
+    phase the model reserves for it, not in Source."""
+    if path.startswith("docs/"):
+        return (9, 2, 1, 1)
+    bc = place(path)
+    if bc is None:
+        return None
+    return (4, 2, bc[0], bc[1])
+
+def phext_dir_exclusion(path):
+    """Why a phext/** path is excluded from pack placement (the
+    reason is recorded in the manifest, per file).
+
+    The phext/ C parity library already has its phext home: Source
+    Book 10 Chapter 10, placed by the builds pass's Sec-14 placement
+    addendum (Meta 1.1.1/1.2.10/1.14.1), whose stated rule is
+    "phext/** -> Book 10, Chapter 10". place() must NOT also route
+    the directory: pack assigns Sections by path-sort within a
+    chapter, so routing all eight phext/** files would renumber
+    phext.c/phext.h from the addendum's Sections 1-2 to 3-4 and
+    split each file across two addresses at the next merge. The
+    directory is therefore carried by the addendum as one component
+    and excluded here, by name."""
+    if path in ("phext/phext.c", "phext/phext.h"):
+        return ("carried at Source Book 10 Ch 10 Secs 1-2 by the "
+                "Sec-14 placement addendum (Meta 1.1.1/1.2.10/1.14.1); "
+                "pack routing would renumber it (path-sort among all "
+                "phext/** files puts it at Sec 3-4) and split the "
+                "file across two addresses")
+    if path == "phext/tests/regression-1-helios.phext":
+        return ("a phext file: its bytes ARE phext delimiter bytes "
+                "(0x01/0x17/0x1E present), so it cannot be a scroll "
+                "byte-exactly — the same exclusion as phcc.phext")
+    return ("rides with the phext/ library's Sec-14 addendum "
+            "placement (Source Book 10 Ch 10): the directory is "
+            "carried as one component, not split across two manifests")
 
 BOOK_NAMES = {1: "Driver & public API", 2: "Preprocessor & tokenizer",
               3: "Parser & codegen core", 4: "Assembler",
@@ -263,7 +318,12 @@ One file, whole project. Outer dimensions 1.1.1 throughout.
 - Collection 4 (Source), Volume 2: the phcc tree. Book = module,
   Chapter = component, Section = file (path-sorted within chapter),
   Scroll 1 = file bytes, byte-exact. (Placement: Slice 0 §1 Books,
-  plus tools/** at Book 10 Chapter 9.)
+  plus tools/** at Book 10 Chapter 9 and README.md at Book 10
+  Chapter 1.)
+- Collection 9 (Docs), Volume 2, Book 1, Chapter 1: the project's
+  docs/*.md guides, Section = file (path-sorted within chapter),
+  Scroll 1 = file bytes, byte-exact — tree documentation is placed
+  in the Docs phase of the 6D UML model, not in Source.
 - Collection 4 (Source), Volume 3: member-level segmentation of
   Volume 2 (importer v3 segmentation, importer v4 classification
   refinement) — index scroll + segment scrolls per structured file;
@@ -271,14 +331,22 @@ One file, whole project. Outer dimensions 1.1.1 throughout.
   holds the rebind manifest, layout notes, degradation register.
 - Excluded from placement: monolith.phext and phcc.phext (a phext
   cannot byte-exactly contain itself — its bytes ARE the delimiters),
-  phcc-manifest.tsv (unpack's own output), and .git (not content).
-  Exclusions are recorded in the manifest.
+  phcc.phext.xz (the generated xz seal OF phcc.phext: a seal is
+  produced from the phext, never packed into it), phcc-manifest.tsv
+  (unpack's own output), .git (not content), and phext/** — the C
+  parity library already lives at Book 10 Chapter 10 under the
+  Sec-14 placement addendum, and pack routing would renumber
+  phext.c/phext.h and split them across two addresses (one member,
+  phext/tests/regression-1-helios.phext, could not be a scroll
+  anyway: its bytes are phext delimiters). Exclusions are recorded
+  in the manifest, per file, with reasons.
 """
 
 # files never placed: name -> reason recorded in the manifest
 EXCLUDED = {
     "monolith.phext": "preserved as Volume 1; a phext cannot byte-exactly contain itself as a scroll",
     "phcc.phext": "a phext cannot byte-exactly contain itself as a scroll",
+    "phcc.phext.xz": "the generated seal of phcc.phext (xz of the whole phext, produced by `phcc seal`); a generated artifact is never packed into the phext it seals — unseal regenerates the phext, pack consumes the tree",
     MANIFEST_NAME: "unpack's verification manifest; regenerated on every unpack",
 }
 
@@ -339,22 +407,26 @@ def stage_a(tree, base_phext):
         if path in EXCLUDED:
             excluded.append((path, EXCLUDED[path]))
             continue
-        bc = place(path)
-        if bc is None:
+        if path.startswith("phext/"):
+            excluded.append((path, phext_dir_exclusion(path)))
+            continue
+        pf = place_full(path)
+        if pf is None:
             unplaced.append(path)
         else:
-            by_chapter.setdefault(bc, []).append((path, mode))
+            by_chapter.setdefault(pf, []).append((path, mode))
     if unplaced:
         print("UNPLACED FILES — pack aborted:", *unplaced, sep="\n  ",
               file=sys.stderr)
         raise SystemExit(1)
     manifest_lines = [
         "# phcc placement manifest — phcc pack (phcc_migrate stage A)",
-        "# placement: Slice 0 importer v2 §1 Books (+ tools/** -> Book 10 Ch 9)",
+        "# placement: Slice 0 importer v2 §1 Books (+ tools/** -> Book 10 Ch 9,"
+        " README.md -> Book 10 Ch 1, docs/** -> Docs Collection 9 Vol 2 Book 1 Ch 1)",
         "# columns: path <TAB> coordinate <TAB> sha256 <TAB> size <TAB> git-mode",
     ]
     total = 0
-    for (book, chapter), files in sorted(by_chapter.items()):
+    for prefix, files in sorted(by_chapter.items()):
         for i, (path, mode) in enumerate(files, start=1):
             data = open(os.path.join(tree, path), "rb").read()
             bad = DELIM_SET & set(data)
@@ -362,7 +434,7 @@ def stage_a(tree, base_phext):
                 print(f"DELIMITER BYTES in {path}: "
                       f"{sorted(hex(b) for b in bad)} — aborting", file=sys.stderr)
                 raise SystemExit(1)
-            coord = (1, 1, 1, 4, 2, book, chapter, i, 1)
+            coord = (1, 1, 1) + prefix + (i, 1)
             scrolls[coord] = data
             total += len(data)
             manifest_lines.append(
