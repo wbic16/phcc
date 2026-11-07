@@ -35,7 +35,7 @@ from this file alone.
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +149 / −1 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. |
 | `tcctok.h` | +22 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). |
-| `libtcc.c` | +30 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. |
+| `libtcc.c` | +40 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. |
 | `tccelf.c` | +813 / −13 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -1043,6 +1043,82 @@ structure; the fork's intent is carried, never dropped silently).
     go STALE at the next refresh; `tccasm.c` is bound by no §A.3
     machine; machine #1, machine #3, the libtcc1 proof receipts and
     the assembly listings are untouched.
+- **F14 — libtcc.c: `-l` library search is directory-major, matching
+  GNU ld (2026-11-07).**
+  - *File:* `libtcc.c`, `tcc_add_library()` (+18/−8).
+  - *Change:* swap the two search loops. For each directory of
+    `s->library_paths`, in order, every library form is now tried
+    (`libNAME.so`, then `libNAME.a`; the PE/Mach-O/OpenBSD form
+    lists likewise) before the search moves to the next directory.
+    The `static_link` form subset (archive only) and the
+    `:`-prefixed exact-name path are unchanged.
+  - *Reason:* the old form-major order tried `libNAME.so` in
+    *every* directory before `libNAME.a` in *any*, inverting GNU
+    ld's per-directory search — and `-L` directories precede the
+    system directories in `library_paths`, so the inversion is
+    observable whenever an early directory holds only an archive
+    and a later one holds a shared library of the same name. That
+    is PQ-10: linking OpenSSL 4.1.0's `apps/openssl` with
+    `-L. -lssl -lcrypto` against a no-shared build tree never
+    opened `./libssl.a`/`./libcrypto.a` at all (strace-verified);
+    the search found the system's OpenSSL 3.x shared libraries
+    and bound against them, leaving exactly 128 "unresolved
+    references" — every one of them a symbol present in the local
+    4.1 archives and absent from the system 3.x dynsyms (verified
+    by set difference; GNU ld resolves all 128 from the identical
+    objects and archives). The archive loader was exonerated
+    first: `tcc_load_alacarte` already rescans each archive's
+    index to a fixed point, and the same link with explicit
+    archive paths resolved every symbol under the unfixed
+    compiler. The inversion also silently binds the *wrong*
+    library when no symbol goes missing (see the reproducer:
+    archive answers 42, shared library answers 7; the old search
+    printed 7, GNU ld 42).
+  - *Evidence:* minimal reproducer (near directory archive-only,
+    far directory shared-only) in both its unresolved-symbol and
+    silent-wrong-library forms: fails under the old search,
+    matches GNU ld exactly after the fix; forward-chain,
+    within-archive-circular and backward-cross-archive controls
+    unchanged. OpenSSL 4.1.0, verbatim F10 recipe
+    (`linux-x86_64 no-tests no-asm no-shared`): `apps/openssl`
+    now links and runs — `OpenSSL 4.1.0`, SHA-256 of "abc" equal
+    to the system tool's — with **zero** unresolved references;
+    `build_sw`'s only remaining stop is `providers/legacy.so`'s
+    `--version-script`, which is F10's territory and absent from
+    this change's base by construction. The shared configuration
+    (`no-asm`, shared) shows 0 unresolved references and stops at
+    the same pre-F10 `--version-script=libcrypto.ld` boundary as
+    the unfixed base — no regression. Upstream `make test` ALL
+    TESTS PASSED; conformance spot re-run unchanged at 328/333
+    with the same five documented class-(b) divergences
+    (`a_pp_018`, `b_gnu_009`, `b_gnu_015`, `b_gnu_016`,
+    `b_gnu_020`); zlib 1.4 (`--static`, `make test` OK) and git
+    2.56.0 (benchmark recipe) build and run under the fixed
+    compiler; the fixed sources also self-host (built by the
+    fixed compiler, `make test` ALL TESTS PASSED) and timing is
+    unchanged: self-host build medians of 3 are 0.09 s for both
+    the unfixed and fixed drivers, and the archive-heavy
+    `apps/openssl` link (explicit archive paths, both drivers)
+    medians 0.055 s for both over 5 reps — no rescan was added;
+    the change only reorders the probes of a single `-l` lookup.
+    Note for the phext: this entry changes only the Source scroll
+    of `libtcc.c` (and its Design view), which go STALE at the
+    next refresh. Machine #3 (LINKER RESOLUTION, Design
+    1.1.1/3.2.5/1.2.2) needs **no** change: its events are
+    tccelf.c's, no state, transition, invariant or note in the
+    scroll describes `-l` search order, and extraction from an
+    archive already chosen (ev_load_archive; invariant I10, note
+    N7) behaves exactly as before.
+  - *Related finding, deliberately not fixed here:* archive
+    extraction still triggers only on SHN_UNDEF entries, where
+    GNU ld also extracts a member whose definition satisfies a
+    standing COMMON (reproducer: object with `int shared;` as a
+    common + archive member defining `int shared = 42;` — ld
+    prints 42, phcc prints 0). That is a value-correctness
+    divergence in `tcc_load_alacarte`'s extraction criterion
+    (machine #3 note N7 states tcc's rule), not an
+    unresolved-reference defect; it wants its own queue item and
+    its own machine-description update if pursued.
 
 ## Maintenance rule
 

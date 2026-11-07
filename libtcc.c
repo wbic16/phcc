@@ -1337,15 +1337,25 @@ LIBTCCAPI int tcc_add_library(TCCState *s, const char *libraryname)
     if (*libraryname == ':') {
         libraryname++;
     } else {
-        const char * const *pp = libs;
+        const char * const *pp0 = libs;
+        int i;
         if (s->static_link)
-            pp += sizeof(libs) / sizeof(*libs) - 2; /* only "%s/lib%s.a" */
-        while (*pp) {
-            int ret = tcc_add_library_internal(s, *pp,
-                libraryname, flags, s->library_paths, s->nb_library_paths);
-            if (ret != FILE_NOT_FOUND)
-                return ret;
-            ++pp;
+            pp0 += sizeof(libs) / sizeof(*libs) - 2; /* only "%s/lib%s.a" */
+        /* Search directory by directory, trying every library form
+           within one directory before moving on to the next (the
+           GNU ld order).  The old form-major order tried libNAME.so
+           in *every* directory before libNAME.a in *any*, so a
+           shared library in a later (system) directory silently
+           shadowed the static archive in the -L directory the user
+           named first (PATCHES F14). */
+        for (i = 0; i < s->nb_library_paths; i++) {
+            const char * const *pp;
+            for (pp = pp0; *pp; ++pp) {
+                int ret = tcc_add_library_internal(s, *pp,
+                    libraryname, flags, &s->library_paths[i], 1);
+                if (ret != FILE_NOT_FOUND)
+                    return ret;
+            }
         }
     }
     /* fallback to try file without pre- or sufffix */
