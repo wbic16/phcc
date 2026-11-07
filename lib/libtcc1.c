@@ -427,7 +427,7 @@ long long __ashrdi3(long long a, int b)
         u.s.low = u.s.high >> (b - 32);
         u.s.high = u.s.high >> 31;
     } else if (b != 0) {
-        u.s.low = ((unsigned)u.s.low >> b) | (u.s.high << (32 - b));
+        u.s.low = ((unsigned)u.s.low >> b) | ((unsigned)u.s.high << (32 - b));
         u.s.high = u.s.high >> b;
     }
     return u.ll;
@@ -446,7 +446,7 @@ unsigned long long __lshrdi3(unsigned long long a, int b)
         u.s.low = (unsigned)u.s.high >> (b - 32);
         u.s.high = 0;
     } else if (b != 0) {
-        u.s.low = ((unsigned)u.s.low >> b) | (u.s.high << (32 - b));
+        u.s.low = ((unsigned)u.s.low >> b) | ((unsigned)u.s.high << (32 - b));
         u.s.high = (unsigned)u.s.high >> b;
     }
     return u.ll;

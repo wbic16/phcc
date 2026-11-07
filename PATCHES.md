@@ -32,6 +32,7 @@ from this file alone.
 | `tcc.h` | +39 / −3 | Phext support core declarations (from c27c095): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains nine phext position counters (scroll … library); `TCCState` gains nine matching totals; nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01); `TCC_STATE_VAR` accessors for the nine totals. |
 | `tccpp.c` | +109 / −1 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input and maintains the per-file counters / state totals declared in `tcc.h`. |
 | `libtcc.c` | +6 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. |
+| `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
 
 ## Rebase resolution log (Slice 0, 2026-11-07)
 
@@ -71,6 +72,33 @@ structure; the fork's intent is carried, never dropped silently).
 - **R7 — tccpp.c (same commit)** auto-merged with no manual resolution;
   verified post-rebase: the break-token handling and counters are intact
   (110-line delta replays as +109/−1 against the new base).
+
+## Post-rebase fork changes
+
+- **F1 — lib/libtcc1.c: unsigned cast before high-word left shift in
+  `__ashrdi3` / `__lshrdi3` (2026-11-07).**
+  - *File:* `lib/libtcc1.c`, the `__TINYC__` word-wise bodies of
+    `__ashrdi3` and `__lshrdi3` (i386 runtime helpers).
+  - *Change:* `u.s.high << (32 - b)` → `(unsigned)u.s.high << (32 - b)`
+    in both functions (2 lines). `u.s.high` is `Wtype` = signed `int`;
+    the composed low word needs only its bit pattern, which the
+    unsigned shift supplies with defined behaviour. Matches the cast
+    style already used by every other shift in these bodies and in
+    `__ashldi3`.
+  - *Reason:* by C11 §6.5.7p4, left-shifting a negative signed value
+    is undefined behaviour. The branch runs whenever the 64-bit
+    operand's high word is negative (any negative `__ashrdi3`
+    operand; any `__lshrdi3` operand ≥ 2⁶³) and the shift count is
+    1–31 — the common case, not an edge case.
+  - *Evidence:* found by the Slice 2 Frama-C/WP pilot on this file —
+    Z3 returned a countermodel (goal Failure, not timeout) for the
+    `ensures` of both functions in the WP model
+    (`wp-esc-__lshrdi3.log`, `wp-esc-__ashrdi3.log`, escalation run,
+    Z3 4.8.12). `__ashldi3`, whose shifts are already cast, drew no
+    countermodel and is unchanged. Validation (regression test,
+    upstream suite, WP before/after) is recorded in
+    `~/workspace/phcc-lshrdi3/REPORT.md`. Upstream report is prepared
+    but deliberately not yet sent.
 
 ## Maintenance rule
 
