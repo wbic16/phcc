@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""phcc — the phcc tree/phext migration interface.
+
+    phcc unpack --phext X.phext --out DIR [--from vol2|vol3] [--force]
+    phcc pack   --tree DIR --out Y.phext [--base Z.phext]
+                [--no-vol3] [--ts-python PY]
+
+unpack: phext -> normal directory tree (every file SHA-256-verified
+against the in-phext placement manifest before it is written).
+pack:   directory tree -> phext (Slice 0 placement for Volume 2,
+importers v3/v4 member segmentation for Volume 3).
+
+Thin dispatcher over phcc_migrate.py in the same directory; see
+METHODS.md (repo: tools/METHODS.md) for the invariants, what is not
+preserved and why, and the failure behaviour.
+"""
+import os, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+USAGE = __doc__
+
+
+def main(argv):
+    if len(argv) < 1 or argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0 if argv and argv[0] in ("-h", "--help") else 2
+    sub, rest = argv[0], argv[1:]
+    if sub == "unpack":
+        import phcc_migrate
+        return phcc_migrate.cli(["export"] + rest)
+    if sub == "pack":
+        import phcc_migrate
+        return phcc_migrate.cli(["import"] + rest)
+    print(f"phcc: unknown command '{sub}' (expected: unpack, pack)",
+          file=sys.stderr)
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

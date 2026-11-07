@@ -43,10 +43,46 @@ source tree.
 | `consolidate.py` | The 2026-11-07 lineage consolidation, stage 1: merges A-phases + B-Vol 3 with a full scroll-set diff proof against both inputs. |
 | `compare_views.py` | Consolidation stage 2 audit: classifies every regenerated Design view (byte-identical / own members changed / universe growth only). |
 | `add_provenance.py` | Consolidation stage 3: places the consolidation provenance scroll (Meta, Vol 2, Book 10, Sec 11) and verifies it is the only diff. |
+| `phcc` | The migration interface (below): `phcc unpack` / `phcc pack`. Thin dispatcher over `phcc_migrate.py`. |
+| `phcc_migrate.py` | Migration engine: unpack verifies every file's SHA-256 against the in-phext manifest before writing (Volume 2 scrolls, or Volume 3 segment reassembly); pack = stage A placement (adapted from the Slice 0 importer) + importers v3/v4 run unmodified for Volume 3. |
+
+## Migration: phext ⇄ directory tree
+
+Two commands move the whole project between its one-file form and a
+normal directory tree — byte-exact, or it fails loudly:
+
+```sh
+tools/phcc unpack --phext phcc.phext --out tree/ [--from vol2|vol3] [--force]
+tools/phcc pack   --tree tree/ --out phcc.phext [--base previous.phext]
+```
+
+- `unpack` materialises the 558 files of the in-phext placement
+  manifest, each SHA-256-verified before it is written (exit 1, the
+  file withheld, on any mismatch). `--from vol2` reads each file's
+  whole-bytes Source scroll; `--from vol3` reassembles structured
+  files from their Volume 3 member+gap segments (file-level files
+  ride the Volume 2 bridge). It writes `phcc-manifest.tsv` into the
+  tree as the verification record.
+- `pack` rebuilds the phext from a tree: stage A places Volume 2 by
+  the Slice 0 §1 Books (plus `tools/**` at Book 10 Ch 9) and takes
+  Volume 1 verbatim from the tree's `monolith.phext` or the `--base`
+  phext; stage B runs importers v3/v4 for Volume 3 (needs a Python
+  with tree-sitter: `--ts-python` or `$PHCC_TS_PYTHON`).
+
+Round trips are proven on this corpus: tree→phext→tree is the
+identity for all 558 files, and phext→tree→phext reproduces
+every content scroll byte-identically (Volume 1 319/319, Volume 2
+559/559, Volume 3 50,816/50,816). What a pack does not carry — the
+derived phases (Design views, Tests placements, Proofs, the gate
+verdict) and Meta provenance — and why that is correct: see
+[`tools/METHODS.md`](METHODS.md).
 
 ## Quick checks
 
 ```sh
+tools/phcc unpack --phext phcc.phext --out /tmp/tree          # verified tree
+tools/phcc unpack --phext phcc.phext --out /tmp/tree3 --from vol3
+tools/phcc pack --tree /tmp/tree --base phcc.phext --out /tmp/repacked.phext
 python3 tools/phcc_gate.py phcc.phext                 # report tables
 python3 tools/phcc_gate.py phcc.phext --verdict-out /tmp/check.phext
 sha256sum /tmp/check.phext   # == phcc.phext if the verdict is current
