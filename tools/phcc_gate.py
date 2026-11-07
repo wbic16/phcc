@@ -1,33 +1,35 @@
 #!/usr/bin/env python3
-"""phcc_gate.py — the phcc trace gate, Slice 4: REPORT-ONLY.
+"""phcc_gate.py — the phcc trace gate, GRAND MERGE: REPORT-ONLY.
 
-Extends the Slice 3 gate (v3.0.0, kept byte-compatible in its
-coverage/tier/proof-claims/Design output) with the Slice 4
-machine-conformance section (design §A.3): the preprocessor
-conditional-stack machine scroll (Design phase, tccpp.c's address)
-is re-checked live by tools/check_machine.py; the dynamic trace
-results recorded in the Slice 4 machine register (Meta, Vol 2,
-Book 10, Sec 10) are reported with their SHA-256 binding to the
-machine scroll and the tccpp.c Source scroll re-verified (STALE
-if either hash has moved); regressions filed at tccpp.c's
-Regressions address are counted. D2 is closed as unnecessary
-(Will, 2026-11-07) — the gate stays report-only; conformance is
-reported, it never blocks. D4 likewise: the external gate is the
-architecture.
+Gate v8.0.0 composes the three sibling gate copies that grew on the
+canonical base (646144c7...) into one gate for the merged lineage:
 
-Reads a phcc phext and reports, for Volume 2:
-  (a) per-Book phase coverage: for Books 1-10, the % of Source
-      artifacts with each phase (Collections 1-10) populated at
-      their 5D address (same Volume/Book/Chapter/Section, any
-      Scroll).
-  (b) a tier distribution: "T1-eligible (no receipt yet)" for
-      Tests-populated artifacts, receipt-driven T2/T3 overlay from
-      the Proofs phase (Slice 2), everything else T0.
-  (c) the Design staleness section described above.
-  (d) the Slice 4 machine-conformance section described above.
-  (e) optionally, a VERDICT scroll written into a COPY of the phext
-      (--verdict-out): Meta, Volume 2, Book 10, Ch 1, Sec 9. The
-      verdict is REPORT status; it blocks nothing.
+  chassis: coverage / tiers / proof claims / Design staleness /
+    machine-#1 (Slice 4, preprocessor) / machine-#2 (Slice 5,
+    value stack) — the common core, byte-compatible output with
+    every prior gate since v5.0.0;
+  machine-#3 (Slice 6, linker symbol resolution): section code from
+    gate v6.0.0 (slice6); its machine register sits at Meta Sec 17
+    in the merged lineage (Sec 15 in the Slice 6 lineage — the
+    builds lineage's build register keeps Sec 15; see the note at
+    MACHINE3_REGISTER_COORD);
+  machine-#4 (Slice 7, register allocation): section code from
+    gate v7.0.0 (slice7), verbatim; register at Meta Sec 16;
+  generated assembly (builds pass): section code from gate v6.0.1
+    (builds; canonical binary scrolls), verbatim; build register
+    at Meta Sec 15, listings hash-bound to Source scroll, compiler
+    commit, and the Library-10000 region object.
+
+Sections run in slice order: coverage, tiers, proof claims, Design,
+machine #1, #2, #3, #4, assembly. The verdict is written at Meta,
+Volume 2, Book 10, Ch 1, Sec 19 — the merged lineage's own section,
+continuing the Meta sequence (Secs 14-18: builds addendum, build
+register, Slice 7 machine register, Slice 6 machine register,
+merged register). Historical verdicts (Secs 4, 5, 7, 9, 12) stay
+excluded from coverage, as in every prior gate. D2 is closed as
+unnecessary (Will, 2026-11-07) — the gate stays report-only;
+conformance is reported, it never blocks. D4 likewise: the
+external gate is the architecture.
 
 Determinism: the verdict content contains no timestamps and no
 run-specific data, and its checked-scroll hash list EXCLUDES the
@@ -41,6 +43,7 @@ Prints the tables to stdout; with --verdict-out, also prints the
 verdict scroll's SHA-256.
 """
 import argparse
+import base64
 import os
 import subprocess
 import sys
@@ -49,13 +52,28 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import phext_io
 
-TOOL_VERSION = "phcc_gate.py 4.0.0 (slice4)"
-VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 9, 1)  # Slice 4 verdict: Meta, Vol 2, Book 10, Sec 9
+# Gate v8.0.0 (grand merge, 2026-11-07): composed from gate v6.0.0
+# (slice6), v7.0.0 (slice7) and v6.0.1 (builds) — see the module
+# docstring. The assembly section keeps the v6.0.1 canonical-binary
+# decode ('phext-binary:1:base64' + unwrapped RFC 4648 base64,
+# libphext-rs 0.5 / PR #9; legacy '# phcc-binary 1' scrolls still
+# accepted as a fallback and hashed from their decoded bytes).
+# The verdict exclusion set names exactly the verdict scrolls the
+# merged lineage carries: the historical Slice 1-5 verdicts plus
+# this gate's own. The sibling verdicts (slice6 Sec 14, builds
+# Sec 16, slice7 Sec 17) were NOT carried into the merged file —
+# those sections hold content here (addendum, machine-#4 register,
+# machine-#3 register) and must count as the content they are.
+TOOL_VERSION = "phcc_gate.py 8.0.0 (grand merge: slice6 + slice7 + builds)"
+VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 19, 1)  # Grand-merge verdict: Meta, Vol 2, Book 10, Sec 19
+SLICE5_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 12, 1)  # Slice 5 verdict (never evidence)
+SLICE4_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 9, 1)  # Slice 4 verdict (never evidence)
 SLICE3_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 7, 1)  # Slice 3 verdict (never evidence)
 SLICE2_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 5, 1)  # Slice 2 verdict (never evidence)
 SLICE1_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 4, 1)  # Slice 1 verdict (never evidence)
-ALL_VERDICT_COORDS = (VERDICT_COORD, SLICE3_VERDICT_COORD,
-                      SLICE2_VERDICT_COORD, SLICE1_VERDICT_COORD)
+ALL_VERDICT_COORDS = (VERDICT_COORD, SLICE5_VERDICT_COORD, SLICE4_VERDICT_COORD,
+                      SLICE3_VERDICT_COORD, SLICE2_VERDICT_COORD,
+                      SLICE1_VERDICT_COORD)
 PHASE_NAMES = {1: "Meta", 2: "Requirements", 3: "Design", 4: "Source",
                5: "Tests", 6: "Regressions", 7: "Docs", 8: "Whitepapers",
                9: "Training", 10: "Proofs"}
@@ -106,7 +124,8 @@ def pct(n, d):
 
 def tables_text(per_book, artifacts, gaps, t1_eligible,
                 receipted=None, proof_notes=None, design=None,
-                machine=None):
+                machine=None, machine2=None, machine3=None,
+                machine4=None, assembly=None):
     receipted = receipted or {}
     proof_notes = proof_notes or {}
     design = design or {"checked": 0, "current": [], "stale": []}
@@ -159,14 +178,27 @@ def tables_text(per_book, artifacts, gaps, t1_eligible,
     if machine:
         lines.append("")
         lines.extend(machine)
+    if machine2:
+        lines.append("")
+        lines.extend(machine2)
+    if machine3:
+        lines.append("")
+        lines.extend(machine3)
+    if machine4:
+        lines.append("")
+        lines.extend(machine4)
+    if assembly:
+        lines.append("")
+        lines.extend(assembly)
     return "\n".join(lines)
 
 
 def verdict_text(scrolls, artifacts, per_book, gaps, t1_eligible,
                  receipted=None, proof_notes=None, design=None,
-                 machine=None):
+                 machine=None, machine2=None, machine3=None,
+                 machine4=None, assembly=None):
     lines = []
-    lines.append("# phcc gate verdict - Slice 4")
+    lines.append("# phcc gate verdict - Grand merge (Slice 6 + Slice 7 + builds)")
     lines.append(f"tool: {TOOL_VERSION}")
     lines.append("mode: REPORT-ONLY")
     lines.append("status: REPORT")
@@ -174,7 +206,8 @@ def verdict_text(scrolls, artifacts, per_book, gaps, t1_eligible,
     lines.append(f"artifacts-checked: {len(artifacts)}")
     lines.append("")
     lines.append(tables_text(per_book, artifacts, gaps, t1_eligible,
-                             receipted, proof_notes, design, machine))
+                             receipted, proof_notes, design, machine, machine2,
+                             machine3, machine4, assembly))
     lines.append("")
     lines.append("per-artifact Tests-phase gaps (artifacts with no Tests "
                  "scroll at their 5D address):")
@@ -414,6 +447,392 @@ def machine_section(scrolls, phext_path):
     return lines
 
 
+# ---------------------------------------------------------------------------
+# Slice 5: machine-#2 conformance (design §A.3). Same discipline as
+# the Slice 4 section: the static result is recomputed live by
+# running tools/check_vstack.py on the gate's input phext; the
+# dynamic results are read from the Slice 5 machine register
+# (Meta, Vol 2, Book 10, Sec 13), whose SHA-256 binding to the
+# machine scroll and the tccgen.c Source scroll is re-verified
+# here. Report-only throughout (D2 closed as unnecessary).
+
+MACHINE2_COORD = (1, 1, 1, 3, 2, 3, 1, 1, 2)      # Design, tccgen.c, scroll 2
+MACHINE2_REGISTER_COORD = (1, 1, 1, 1, 2, 10, 1, 13, 1)
+TCCGEN_SRC_COORD = (1, 1, 1, 4, 2, 3, 1, 1, 1)
+
+
+def machine2_section(scrolls, phext_path):
+    lines = ["machine conformance #2 — value stack (Slice 5, design "
+             "§A.3; report-only, flags never block):"]
+    machine = scrolls.get(MACHINE2_COORD)
+    if not machine:
+        lines.append("  machine scroll: absent at "
+                     + phext_io.fmt(MACHINE2_COORD))
+        return lines
+    lines.append(f"  machine scroll: {phext_io.fmt(MACHINE2_COORD)} "
+                 f"(sha256 {phext_io.sha256(machine)[:16]}...)")
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "check_vstack.py")
+    try:
+        r = subprocess.run([sys.executable, checker, phext_path],
+                           capture_output=True, text=True, timeout=600)
+        out = [l for l in r.stdout.splitlines() if l.strip()]
+        counts = next((l for l in out if l.startswith("states:")), "")
+        resolved = next((l for l in out if "resolved against" in l), "")
+        verdict = next((l for l in out
+                        if l.startswith("STATIC CONFORMANCE")), "")
+        lines.append(f"  static (recomputed live by "
+                     f"tools/check_vstack.py): {verdict}")
+        lines.append(f"    {counts}; {resolved}")
+        for l in out:
+            if l.startswith("  VIOLATION:"):
+                lines.append("   " + l)
+    except Exception as e:  # checker unavailable: report, never block
+        lines.append(f"  static: checker could not run ({e})")
+    regressions = sum(
+        1 for c, s in scrolls.items()
+        if c[:8] == (1, 1, 1, 6, 2, 3, 1, 1) and s)
+    reg_text = scrolls.get(MACHINE2_REGISTER_COORD, b"").decode(
+        "utf-8", "replace")
+    if reg_text:
+        kv = _kv(reg_text)
+        bound = (kv.get("machine-sha256") == phext_io.sha256(machine)
+                 and kv.get("source-sha256")
+                 == phext_io.sha256(scrolls.get(TCCGEN_SRC_COORD, b"")))
+        lines.append(f"  dynamic (recorded in machine register "
+                     f"{phext_io.fmt(MACHINE2_REGISTER_COORD)}):")
+        lines.append(f"    authored trace tests: "
+                     f"{kv.get('dynamic-authored', '?')}")
+        lines.append(f"    tests2 corpus: "
+                     f"{kv.get('dynamic-corpus', '?')}")
+        lines.append(f"    tcc: {kv.get('tcc-version', '?')}")
+        lines.append(f"    exit test: {kv.get('exit-test', '?')}")
+        lines.append("  binding: " + (
+            "CURRENT (register machine-sha256 and source-sha256 match "
+            "the scrolls as they stand)" if bound else
+            "STALE (register machine-sha256 or source-sha256 does not "
+            "match the scrolls as they stand; recorded dynamic results "
+            "are not current)"))
+    else:
+        lines.append("  dynamic: no machine register recorded")
+    lines.append(f"  regressions filed at 1.1.1/6.2.3/1.1.N: "
+                 f"{regressions}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Slice 6: machine-#3 conformance (design §A.3). Same discipline
+# as the Slice 4/5 sections: the static result is recomputed
+# live by running tools/check_linker.py on the gate's input
+# phext; the dynamic results are read from the Slice 6 machine
+# register (Meta, Vol 2, Book 10, Sec 17), whose SHA-256 binding
+# to the machine scroll and the tccelf.c Source scroll is
+# re-verified here. Report-only throughout (D2 closed as
+# unnecessary).
+#
+# GRAND MERGE (gate v8): in the Slice 6 lineage this register sat
+# at Meta Sec 15, which the builds lineage had independently
+# claimed for its build register. Content wins by seniority of
+# the register pair (addendum Sec 14 + build register Sec 15);
+# the machine-#3 register moved to Sec 17, byte-identical, and
+# this constant is the only trace of the move.
+
+MACHINE3_COORD = (1, 1, 1, 3, 2, 5, 1, 2, 2)      # Design, tccelf.c, scroll 2
+MACHINE3_REGISTER_COORD = (1, 1, 1, 1, 2, 10, 1, 17, 1)
+TCCELF_SRC_COORD = (1, 1, 1, 4, 2, 5, 1, 2, 1)
+
+
+def machine3_section(scrolls, phext_path):
+    lines = ["machine conformance #3 — linker symbol resolution "
+             "(Slice 6, design §A.3; report-only, flags never "
+             "block):"]
+    machine = scrolls.get(MACHINE3_COORD)
+    if not machine:
+        lines.append("  machine scroll: absent at "
+                     + phext_io.fmt(MACHINE3_COORD))
+        return lines
+    lines.append(f"  machine scroll: {phext_io.fmt(MACHINE3_COORD)} "
+                 f"(sha256 {phext_io.sha256(machine)[:16]}...)")
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "check_linker.py")
+    try:
+        r = subprocess.run([sys.executable, checker, phext_path],
+                           capture_output=True, text=True, timeout=600)
+        out = [l for l in r.stdout.splitlines() if l.strip()]
+        counts = next((l for l in out if l.startswith("states:")), "")
+        resolved = next((l for l in out if "resolved against" in l), "")
+        verdict = next((l for l in out
+                        if l.startswith("STATIC CONFORMANCE")), "")
+        lines.append(f"  static (recomputed live by "
+                     f"tools/check_linker.py): {verdict}")
+        lines.append(f"    {counts}; {resolved}")
+        for l in out:
+            if l.startswith("  VIOLATION:"):
+                lines.append("   " + l)
+    except Exception as e:  # checker unavailable: report, never block
+        lines.append(f"  static: checker could not run ({e})")
+    regressions = sum(
+        1 for c, s in scrolls.items()
+        if c[:8] == (1, 1, 1, 6, 2, 5, 1, 2) and s)
+    reg_text = scrolls.get(MACHINE3_REGISTER_COORD, b"").decode(
+        "utf-8", "replace")
+    if reg_text:
+        kv = _kv(reg_text)
+        bound = (kv.get("machine-sha256") == phext_io.sha256(machine)
+                 and kv.get("source-sha256")
+                 == phext_io.sha256(scrolls.get(TCCELF_SRC_COORD, b"")))
+        lines.append(f"  dynamic (recorded in machine register "
+                     f"{phext_io.fmt(MACHINE3_REGISTER_COORD)}):")
+        lines.append(f"    authored trace tests: "
+                     f"{kv.get('dynamic-authored', '?')}")
+        lines.append(f"    tests2 corpus: "
+                     f"{kv.get('dynamic-corpus', '?')}")
+        lines.append(f"    tcc: {kv.get('tcc-version', '?')}")
+        lines.append(f"    exit test: {kv.get('exit-test', '?')}")
+        lines.append("  binding: " + (
+            "CURRENT (register machine-sha256 and source-sha256 match "
+            "the scrolls as they stand)" if bound else
+            "STALE (register machine-sha256 or source-sha256 does not "
+            "match the scrolls as they stand; recorded dynamic results "
+            "are not current)"))
+    else:
+        lines.append("  dynamic: no machine register recorded")
+    lines.append(f"  regressions filed at 1.1.1/6.2.5/1.2.N: "
+                 f"{regressions}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Slice 7: machine-#4 conformance (design §A.3). Same discipline:
+# the static result is recomputed live by running
+# tools/check_regalloc.py on the gate's input phext (it checks
+# BOTH instances); the dynamic results are read from the Slice 7
+# machine register (Meta, Vol 2, Book 10, Sec 16), whose SHA-256
+# binding to BOTH machine scrolls and to all THREE bounded Source
+# scrolls (tccgen.c core, x86_64-gen.c, arm64-gen.c) is
+# re-verified here. Report-only throughout.
+
+MACHINE4_X64_COORD = (1, 1, 1, 3, 2, 6, 1, 1, 2)   # Design, x86_64-gen.c, scroll 2
+MACHINE4_ARM64_COORD = (1, 1, 1, 3, 2, 6, 4, 1, 2)  # Design, arm64-gen.c, scroll 2
+MACHINE4_REGISTER_COORD = (1, 1, 1, 1, 2, 10, 1, 16, 1)
+X64_SRC_COORD = (1, 1, 1, 4, 2, 6, 1, 1, 1)
+ARM64_SRC_COORD = (1, 1, 1, 4, 2, 6, 4, 1, 1)
+
+
+def machine4_section(scrolls, phext_path):
+    lines = ["machine conformance #4 — register allocation "
+             "(Slice 7, design §A.3; report-only, flags never "
+             "block):"]
+    x64 = scrolls.get(MACHINE4_X64_COORD)
+    arm = scrolls.get(MACHINE4_ARM64_COORD)
+    if not x64 and not arm:
+        lines.append("  machine scrolls: absent at "
+                     + phext_io.fmt(MACHINE4_X64_COORD) + " and "
+                     + phext_io.fmt(MACHINE4_ARM64_COORD))
+        return lines
+    for label, coord, m in (("x86_64", MACHINE4_X64_COORD, x64),
+                            ("arm64", MACHINE4_ARM64_COORD, arm)):
+        if m:
+            lines.append(f"  machine scroll ({label}): "
+                         f"{phext_io.fmt(coord)} "
+                         f"(sha256 {phext_io.sha256(m)[:16]}...)")
+        else:
+            lines.append(f"  machine scroll ({label}): absent at "
+                         f"{phext_io.fmt(coord)}")
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "check_regalloc.py")
+    try:
+        r = subprocess.run([sys.executable, checker, phext_path],
+                           capture_output=True, text=True, timeout=600)
+        out = [l for l in r.stdout.splitlines() if l.strip()]
+        counts = [l for l in out if l.startswith("states:")]
+        resolved = [l for l in out if "resolved against" in l]
+        verdict = next((l for l in out
+                        if l.startswith("STATIC CONFORMANCE")), "")
+        lines.append(f"  static (recomputed live by "
+                     f"tools/check_regalloc.py): {verdict}")
+        for c_line, r_line in zip(counts, resolved):
+            lines.append(f"    {c_line}; {r_line}")
+        for l in out:
+            if l.startswith("  VIOLATION:"):
+                lines.append("   " + l)
+    except Exception as e:  # checker unavailable: report, never block
+        lines.append(f"  static: checker could not run ({e})")
+    regressions = sum(
+        1 for c, s in scrolls.items()
+        if c[:8] == (1, 1, 1, 6, 2, 3, 1, 1) and c[8] >= 6 and s)
+    reg_text = scrolls.get(MACHINE4_REGISTER_COORD, b"").decode(
+        "utf-8", "replace")
+    if reg_text:
+        kv = _kv(reg_text)
+        bound = (
+            kv.get("machine-x64-sha256")
+            == phext_io.sha256(scrolls.get(MACHINE4_X64_COORD, b""))
+            and kv.get("machine-arm64-sha256")
+            == phext_io.sha256(scrolls.get(MACHINE4_ARM64_COORD, b""))
+            and kv.get("source-tccgen-sha256")
+            == phext_io.sha256(scrolls.get(TCCGEN_SRC_COORD, b""))
+            and kv.get("source-x64-sha256")
+            == phext_io.sha256(scrolls.get(X64_SRC_COORD, b""))
+            and kv.get("source-arm64-sha256")
+            == phext_io.sha256(scrolls.get(ARM64_SRC_COORD, b"")))
+        lines.append(f"  dynamic (recorded in machine register "
+                     f"{phext_io.fmt(MACHINE4_REGISTER_COORD)}):")
+        lines.append(f"    authored trace tests: "
+                     f"{kv.get('dynamic-authored', '?')}")
+        lines.append(f"    tests2 corpus: "
+                     f"{kv.get('dynamic-corpus', '?')}")
+        lines.append(f"    tcc: {kv.get('tcc-version', '?')}")
+        lines.append(f"    exit test: {kv.get('exit-test', '?')}")
+        lines.append("  binding: " + (
+            "CURRENT (register machine and source hashes match the "
+            "scrolls as they stand)" if bound else
+            "STALE (register machine or source hash does not match "
+            "the scrolls as they stand; recorded dynamic results "
+            "are not current)"))
+    else:
+        lines.append("  dynamic: no machine register recorded")
+    lines.append(f"  regressions filed by Slice 7 at "
+                 f"1.1.1/6.2.3/1.1.6-8: {regressions}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Builds pass: generated-assembly staleness (Will's rulings, 2026-11-07).
+# The build register (Meta, Vol 2, Book 10, Sec 15) names each generated
+# assembly listing. A listing is a Design scroll whose header binds:
+# the Source scroll's SHA-256, the compiler commit, the region object's
+# raw SHA-256, and the listing body's own SHA-256. Recompute all of
+# them: source or compiler moved -> STALE (report-only, per D2).
+# The Library-10000 object itself is ephemeral: absent (wiped) is a
+# state, not staleness.
+
+BUILD_REGISTER_COORD = (1, 1, 1, 1, 2, 10, 1, 15, 1)
+REGION_LIBRARY = 10000
+
+
+def _kv_head(content):
+    """(header dict, body bytes) split at the first blank line."""
+    head, _sep, body = content.partition(b"\n\n")
+    kv = {}
+    for line in head.decode("utf-8", "replace").splitlines():
+        if ": " in line:
+            k, v = line.split(": ", 1)
+            kv[k.strip()] = v.strip()
+    return kv, body
+
+
+CANONICAL_BINARY_HEADER = b"phext-binary:1:base64"
+LEGACY_BINARY_MAGIC = b"# phcc-binary 1"
+
+
+def decode_binary_scroll(content):
+    """Raw bytes of a binary scroll, or None if undecodable.
+
+    Canonical (libphext-rs 0.5): header line 'phext-binary:1:base64',
+    then unwrapped RFC 4648 base64. Legacy fallback (pre-alignment
+    project format): '# phcc-binary 1' header, blank line, wrapped
+    base64 — decoded and hashed by the caller exactly like the
+    canonical form, never trusted via its header fields.
+    """
+    if content.startswith(CANONICAL_BINARY_HEADER + b"\n"):
+        body = content[len(CANONICAL_BINARY_HEADER) + 1:]
+        try:
+            return base64.b64decode(body, validate=True)
+        except Exception:
+            return None
+    if content.startswith(LEGACY_BINARY_MAGIC):
+        _head, sep, body = content.partition(b"\n\n")
+        if not sep:
+            return None
+        try:
+            return base64.b64decode(b"".join(body.split()), validate=True)
+        except Exception:
+            return None
+    return None
+
+
+def assembly_section(scrolls):
+    lines = []
+    lines.append("generated assembly (builds pass; report-only, flags "
+                 "never block):")
+    region = [c for c in scrolls if c[0] == REGION_LIBRARY]
+    region_bytes = sum(len(scrolls[c]) for c in region)
+    lines.append(f"  build region (Library 10000): {len(region)} scrolls, "
+                 f"{region_bytes} bytes (wipeable; binaries base64)")
+    reg = scrolls.get(BUILD_REGISTER_COORD)
+    if reg is None:
+        lines.append("  no build register recorded (Meta Sec 15 absent) "
+                     "\u2014 no generated assembly in this phext")
+        return lines
+    reg_kv, entries = {}, []
+    for line in reg.decode("utf-8", "replace").splitlines():
+        if line.startswith("assembly\t"):
+            parts = line.split("\t")
+            if len(parts) == 5:
+                entries.append(parts[1:])
+        elif ": " in line and not line.startswith("#"):
+            k, v = line.split(": ", 1)
+            reg_kv[k.strip()] = v.strip()
+    lines.append(f"  build register: {phext_io.fmt(BUILD_REGISTER_COORD)} "
+                 f"(compiler-commit {reg_kv.get('compiler-commit')}; "
+                 f"host {reg_kv.get('build-host')}; "
+                 f"built-at {reg_kv.get('built-at')})")
+    current = stale = 0
+    for coord_s, artifact, src_s, target in entries:
+        coord = phext_io.parse_coord(coord_s)
+        src_coord = phext_io.parse_coord(src_s)
+        content = scrolls.get(coord)
+        if content is None:
+            lines.append(f"  STALE\t{coord_s}\t{artifact} {target}: "
+                         f"assembly scroll absent")
+            stale += 1
+            continue
+        kv, body = _kv_head(content)
+        problems = []
+        if kv.get("kind") != "assembly":
+            problems.append("header kind is not 'assembly'")
+        if kv.get("listing-sha256") != _sha(body):
+            problems.append("listing body hash mismatch")
+        src_bytes = scrolls.get(src_coord)
+        if src_bytes is None or kv.get("source-sha256") != _sha(src_bytes):
+            problems.append("source changed since listing was generated")
+        if kv.get("compiler-commit") != reg_kv.get("compiler-commit"):
+            problems.append("compiler changed since listing was generated")
+        obj_note = "object not referenced"
+        obj_coord = None
+        if kv.get("object-region-scroll"):
+            try:
+                obj_coord = phext_io.parse_coord(kv["object-region-scroll"])
+            except Exception:
+                obj_coord = None
+        if obj_coord is not None:
+            obj_scroll = scrolls.get(obj_coord)
+            if obj_scroll is None:
+                obj_note = "object absent (region wiped)"
+            else:
+                raw = decode_binary_scroll(obj_scroll)
+                if raw is None:
+                    problems.append("region object is not a decodable "
+                                    "binary scroll")
+                elif _sha(raw) != kv.get("object-sha256"):
+                    problems.append("region object hash does not match "
+                                    "the listing's binding")
+                else:
+                    obj_note = "object present, binding current"
+        if problems:
+            stale += 1
+            lines.append(f"  STALE\t{coord_s}\t{artifact} {target}: "
+                         + "; ".join(problems))
+        else:
+            current += 1
+            lines.append(f"  CURRENT\t{coord_s}\t{artifact} {target} "
+                         f"({obj_note})")
+    lines.append(f"  assembly listings checked: {len(entries)}; "
+                 f"CURRENT {current}; STALE {stale}")
+    return lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("phext")
@@ -429,13 +848,19 @@ def main():
     proof_notes = {src: n for src, (_t, n) in receipt_overlay.items()}
     design = parse_design_views(scrolls)
     machine = machine_section(scrolls, a.phext)
+    machine2 = machine2_section(scrolls, a.phext)
+    machine3 = machine3_section(scrolls, a.phext)
+    machine4 = machine4_section(scrolls, a.phext)
+    assembly = assembly_section(scrolls)
     if not a.quiet:
         print(f"gate input: {a.phext}")
         print(tables_text(per_book, artifacts, gaps, t1_eligible,
-                          receipted, proof_notes, design, machine))
+                          receipted, proof_notes, design, machine, machine2,
+                          machine3, machine4, assembly))
     if a.verdict_out:
         verdict = verdict_text(scrolls, artifacts, per_book, gaps, t1_eligible,
-                               receipted, proof_notes, design, machine)
+                               receipted, proof_notes, design, machine, machine2,
+                               machine3, machine4, assembly)
         out = dict(scrolls)
         out[VERDICT_COORD] = verdict
         blob = phext_io.implode(out)

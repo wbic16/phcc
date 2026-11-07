@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""phcc — the phcc tree/phext migration interface.
+"""phcc — the phcc tree/phext migration + build-artifact interface.
 
     phcc unpack --phext X.phext --out DIR [--from vol2|vol3] [--force]
     phcc pack   --tree DIR --out Y.phext [--base Z.phext]
                 [--no-vol3] [--ts-python PY]
+    phcc build-region list --phext X.phext
+    phcc build-region wipe --phext X.phext --out Y.phext [--force]
+    phcc seal   --phext X.phext [--out X.phext.xz] [--force]
+    phcc unseal --sealed X.phext.xz [--out X.phext] [--force]
 
 unpack: phext -> normal directory tree (every file SHA-256-verified
 against the in-phext placement manifest before it is written).
 pack:   directory tree -> phext (Slice 0 placement for Volume 2,
 importers v3/v4 member segmentation for Volume 3).
+build-region: list or wipe the Library-10000 build-artifact region
+(binary build outputs, base64 in-phext; wiped and reset frequently).
+seal/unseal: the working phext is plain text; the xz seal is the
+persistence/publish form only (see tools/README.md).
 
-Thin dispatcher over phcc_migrate.py in the same directory; see
-METHODS.md (repo: tools/METHODS.md) for the invariants, what is not
-preserved and why, and the failure behaviour.
+Thin dispatcher over phcc_migrate.py / phcc_builds.py in the same
+directory; see METHODS.md (repo: tools/METHODS.md) for the migration
+invariants, what is not preserved and why, and the failure behaviour.
 """
 import os, sys
 
@@ -33,8 +41,11 @@ def main(argv):
     if sub == "pack":
         import phcc_migrate
         return phcc_migrate.cli(["import"] + rest)
-    print(f"phcc: unknown command '{sub}' (expected: unpack, pack)",
-          file=sys.stderr)
+    if sub in ("build-region", "seal", "unseal"):
+        import phcc_builds
+        return phcc_builds.cli([sub] + rest)
+    print(f"phcc: unknown command '{sub}' (expected: unpack, pack, "
+          f"build-region, seal, unseal)", file=sys.stderr)
     print(USAGE, file=sys.stderr)
     return 2
 
