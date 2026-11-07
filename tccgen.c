@@ -7859,6 +7859,7 @@ static void init_putz(init_params *p, unsigned long c, int size)
 #define DIF_HAVE_ELEM 4
 #define DIF_CLEAR     8
 #define DIF_DIRTY     16
+#define DIF_DISCARD   32
 
 /* delete relocations for specified range c ... c + size. Unfortunatly
    in very special cases, relocations may occur unordered */
@@ -7951,6 +7952,37 @@ static Sym *decl_next_field(CType *type, Sym *f)
     return NULL;
 }
 
+/* F15 (PQ-11): parse one excess initializer element -- an element
+   beyond the end of its container.  C11 6.7.9p2 makes providing a
+   value for an object not contained in the entity being initialized
+   a constraint violation; gcc and clang diagnose it with a warning
+   at the default level and discard the element.  So warn (once per
+   excess element, like gcc; not at all in the DIF_SIZE_ONLY pass,
+   which runs first -- the real pass warns) and parse the element
+   against the would-be element type with DIF_DISCARD set and code
+   generation suppressed.  The element is fully parsed -- identifiers
+   resolve, nested designators are validated against the element
+   type, excess elements nested inside it are diagnosed the same
+   way -- but it is never evaluated, never conversion- or
+   constant-checked, and nothing is stored: exactly the oracles'
+   treatment.  A pre-parsed element (DIF_HAVE_ELEM, possible only
+   when an elided empty container is entered) is simply dropped. */
+static void decl_excess(init_params *p, CType *elem_type,
+                        unsigned long c, int flags, const char *kind)
+{
+    if (!(flags & DIF_SIZE_ONLY))
+        tcc_warning("excess elements in %s initializer", kind);
+    if (flags & DIF_HAVE_ELEM) {
+        vpop();
+    } else {
+        int ncw_prev = nocode_wanted;
+        ++nocode_wanted;
+        decl_initializer(p, elem_type, c,
+                         (flags & ~(DIF_FIRST | DIF_DIRTY)) | DIF_DISCARD);
+        nocode_wanted = ncw_prev;
+    }
+}
+
 /* t is the array or struct type. c is the array or struct
    address. cur_field is the pointer to the current
    field, for arrays the 'c' member contains the current start
@@ -8040,8 +8072,13 @@ static int decl_designator(init_params *p, CType *type, unsigned long c,
 	    index = (*cur_field)->c;
             s = type->ref;
             decl_design_flex(p, s, index);
-            if (index >= s->c)
-                tcc_error("too many initializers");
+            if (index >= s->c) {
+                /* F15 (PQ-11): positional element past the end of
+                   the array: excess, warn and discard (a designated
+                   index out of bounds above is still an error). */
+                decl_excess(p, pointed_type(type), c, flags, "array");
+                return al;
+            }
             type = pointed_type(type);
             elem_size = type_size(type, &align);
             c += index * elem_size;
@@ -8051,8 +8088,25 @@ static int decl_designator(init_params *p, CType *type, unsigned long c,
 	    while (f && (f->v & SYM_FIRST_ANOM) &&
 		   is_integer_btype(f->type.t & VT_BTYPE))
 	        *cur_field = f = f->next;
-            if (!f)
-                tcc_error("too many initializers");
+            if (!f) {
+                /* F15 (PQ-11): positional element past the last
+                   field: excess, warn and discard -- except that a
+                   brace group here is an error in gcc ("extra brace
+                   group at end of initializer"); clang accepts it
+                   with the excess warning.  We follow gcc.  The
+                   discarded element is parsed against the last
+                   field's type (an int for a field-less struct). */
+                CType *et = &int_type;
+                Sym *lf;
+                if (tok == '{')
+                    tcc_error("extra brace group at end of initializer");
+                for (lf = type->ref->next; lf; lf = lf->next)
+                    et = &lf->type;
+                decl_excess(p, et, c, flags,
+                            type->ref->type.t == VT_UNION
+                            ? "union" : "struct");
+                return al;
+            }
             /* The cursor may name a member of an anonymous
                struct/union (set by an earlier designator); then
                f->c is relative to that aggregate, so the offset
@@ -8073,14 +8127,15 @@ static int decl_designator(init_params *p, CType *type, unsigned long c,
     /* Using designators the same element can be initialized more
        than once.  In that case we need to delete possibly already
        existing relocations. */
-    if (!(flags & DIF_SIZE_ONLY) && (c - corig < al || (flags & DIF_DIRTY))) {
+    if (!(flags & (DIF_SIZE_ONLY | DIF_DISCARD))
+        && (c - corig < al || (flags & DIF_DIRTY))) {
         decl_design_delrels(p->sec, c, elem_size * nb_elems);
         flags &= ~DIF_CLEAR; /* mark stack dirty too */
     }
 
     decl_initializer(p, type, c, flags & ~(DIF_FIRST | DIF_DIRTY));
 
-    if (!(flags & DIF_SIZE_ONLY) && nb_elems > 1) {
+    if (!(flags & (DIF_SIZE_ONLY | DIF_DISCARD)) && nb_elems > 1) {
         Sym aref = {0};
         CType t1;
         int i;
@@ -8415,7 +8470,11 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
         int ncw_prev = nocode_wanted;
         if ((flags & DIF_SIZE_ONLY) && !p->sec)
             ++nocode_wanted;
-	parse_init_elem(!p->sec ? EXPR_ANY : EXPR_CONST);
+	/* F15: a discarded element gets no constantness check
+	   either, so parse it as a general expression even in a
+	   static initializer. */
+	parse_init_elem(!p->sec || (flags & DIF_DISCARD)
+                        ? EXPR_ANY : EXPR_CONST);
         nocode_wanted = ncw_prev;
         flags |= DIF_HAVE_ELEM;
     }
@@ -8475,7 +8534,7 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
             }
 
             decl_design_flex(p, s, len);
-            if (!(flags & DIF_SIZE_ONLY)) {
+            if (!(flags & (DIF_SIZE_ONLY | DIF_DISCARD))) {
                 int nb = n, ch;
                 if (len < nb)
                     nb = len;
@@ -8523,7 +8582,7 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
 
           do_init_list:
             /* zero memory once in advance */
-            if (!(flags & (DIF_CLEAR | DIF_SIZE_ONLY | DIF_DIRTY))) {
+            if (!(flags & (DIF_CLEAR | DIF_SIZE_ONLY | DIF_DIRTY | DIF_DISCARD))) {
                 init_putz(p, c, n*size1);
                 flags |= DIF_CLEAR;
             }
@@ -8549,7 +8608,10 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
 		       there): advance within that aggregate and pop
 		       back out when it is exhausted.  For a direct
 		       field this is f->next, and NULL for a union,
-		       exactly as before.  */
+		       exactly as before.  (F15: decl_next_field also
+		       maps NULL to NULL, so the cursor stays exhausted
+		       after an excess element and any further elements
+		       of this list are excess too.)  */
 		    f = decl_next_field(type, f);
 		    if (no_oblock && f == NULL)
 		        break;
@@ -8592,6 +8654,15 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
           skip(';');
         next();
         decl_initializer(p, type, c, flags & ~DIF_HAVE_ELEM);
+        /* F15 (PQ-11): further elements in a scalar's brace list
+           are excess; warn and discard each (a trailing comma
+           alone is fine). */
+        while (tok == ',') {
+            next();
+            if (tok == '}')
+                break;
+            decl_excess(p, type, c, flags & ~DIF_HAVE_ELEM, "scalar");
+        }
         skip('}');
 
     } else one_elem: if ((flags & DIF_SIZE_ONLY)) {
@@ -8606,6 +8677,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
             vpop();
         else
             skip_or_save_block(NULL);
+
+    } else if (flags & DIF_DISCARD) {
+        /* F15 (PQ-11): a discarded excess element.  Parse it fully
+           -- with EXPR_ANY even for static initializers, so that no
+           constantness or conversion check applies, as in gcc and
+           clang -- and drop the value.  The caller raised
+           nocode_wanted, so nothing is evaluated or emitted. */
+        if (flags & DIF_HAVE_ELEM)
+            vpop();
+        else {
+            parse_init_elem(EXPR_ANY);
+            vpop();
+        }
 
     } else {
 	if (!(flags & DIF_HAVE_ELEM)) {

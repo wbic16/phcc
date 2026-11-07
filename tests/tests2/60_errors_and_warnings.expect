@@ -188,7 +188,7 @@ bar  : 3 ; 3
 60_errors_and_warnings.c:394: error: duplicate member 'd'
 
 [test_conflicting_array_definition]
-60_errors_and_warnings.c:399: error: too many initializers
+60_errors_and_warnings.c:399: warning: excess elements in array initializer
 
 [test_incompatible_local_redef]
 60_errors_and_warnings.c:406: error: incompatible redefinition of 'localfunctype'

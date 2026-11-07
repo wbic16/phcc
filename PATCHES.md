@@ -31,12 +31,13 @@ from this file alone.
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
 | `tcc.h` | +57 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
-| `tccgen.c` | +237 / −6 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. |
+| `tccgen.c` | +331 / −16 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +149 / −1 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. |
 | `tcctok.h` | +22 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). |
 | `libtcc.c` | +40 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. |
 | `tccelf.c` | +813 / −13 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. |
+| `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
 | `include/float.h` | +30 | C11 `<float.h>` completion (F8): adds `FLT_EVAL_METHOD` (2 on i386, whose backend evaluates on the x87 stack; 0 on the other backends), the `FLT`/`DBL`/`LDBL_HAS_SUBNORM` family, the `*_DECIMAL_DIG` family, and the `*_TRUE_MIN` family. Additions only — no upstream line changed. See F8. |
@@ -1119,6 +1120,112 @@ structure; the fork's intent is carried, never dropped silently).
     (machine #3 note N7 states tcc's rule), not an
     unresolved-reference defect; it wants its own queue item and
     its own machine-description update if pursued.
+- **F15 — excess initializers warn and discard (PQ-11)
+  (2026-11-07).** Upstream errors `too many initializers` on any
+  initializer element beyond the end of its container. C11
+  6.7.9p2 makes the provision of a value for an object not
+  contained in the entity being initialized a constraint
+  violation, and both oracles turn it into a *warning* at the
+  default level (it is an error only under `-pedantic-errors`,
+  a mode tcc does not have): the excess element is parsed and
+  discarded, the kept elements are unaffected. Recorded as a
+  pre-existing plain-aggregate divergence during F11 and left
+  out of F11's scope; the FFmpeg sighting that motivated it
+  (`libswscale/format.c:977`, seen in F12's logs) was in fact
+  F11's designated-cursor defect, not this one — F15 closes the
+  divergence itself, and the stacked verification below keeps
+  the attribution straight.
+  - *Oracle boundary map* (measured, gcc 13.3.0 + clang 18.1.3
+    on aletheia-core, 44 differential probes; `-std=c11` ≡
+    default for gcc on every probe): warn + discard for
+    positional excess in arrays (including after designators),
+    structs/unions past the last field, empty structs,
+    zero-length arrays, scalar brace lists (`int x = {1, 2};`),
+    compound literals, and per-container inside nested lists —
+    an inner list's excess never stops the outer containers
+    from continuing. Discarded elements are fully *parsed*
+    (an undeclared identifier inside one still errors; nested
+    designators are validated) but are never *evaluated* (a
+    side-effecting excess element's counter stays 0 in both
+    oracles — the common belief that gcc evaluates them is
+    false), never conversion-checked (a string literal for an
+    `int` slot warns only), and never constant-checked (a
+    function call in a static excess element warns only).
+    Still errors in both oracles, and still errors here:
+    designated index out of bounds, range-designator overrun,
+    unknown field designator; the flexible-array-member growth
+    case warns in neither oracle and does not warn here
+    (the check reads the bound after `decl_design_flex`).
+  - *Mechanism* (`tccgen.c`, +94/−10): a new `DIF_DISCARD`
+    flag and a `decl_excess()` helper at the two exhaustion
+    points of `decl_designator` (array `index >= s->c`;
+    struct/union with the field cursor exhausted) and in the
+    scalar brace branch of `decl_initializer`. The helper
+    warns once per excess element (`tcc_warning("excess
+    elements in %s initializer", kind)` — gcc's exact text;
+    the `DIF_SIZE_ONLY` sizing pass does not warn, the real
+    pass does) and parses the element against its would-be
+    type with `nocode_wanted` raised and `DIF_DISCARD` set:
+    `one_elem` parses the expression as `EXPR_ANY` (so no
+    constantness or conversion check fires) and drops it;
+    container elements recurse through the same machinery, so
+    excess surfaces at every nesting level; the four store
+    paths (relocation deletion, range copy, array string
+    store, `init_putz`) are suppressed under the flag. The
+    string-initializer length rule is a different rule and is
+    untouched. The list loop's field advance is NULL-guarded:
+    after an excess element the cursor stays exhausted.
+  - *Oracle splits, gcc followed both times:* (1) a brace
+    group as the excess element of an exhausted struct/union
+    is a hard error in gcc (`extra brace group at end of
+    initializer`) and only a warning in clang — phcc errors;
+    arrays warn in both. (2) gcc validates designators inside
+    a discarded brace group against the would-be element type
+    (an unknown-field designator inside one errors); clang
+    does not — phcc's recursive parse validates, like gcc.
+    Warning *counts*: phcc matches gcc exactly (once per
+    excess element, including inside discarded groups), except
+    on scalar-brace probes where gcc's higher count includes
+    its separate "braces around scalar initializer" warning —
+    a class tcc has never emitted, pre-existing and outside
+    PQ-11 — and on the extra-brace-group probes, where phcc
+    errors directly without gcc's preceding redundant excess
+    warning (same accept/reject outcome).
+  - *Evidence:* the 44-probe differential family passes in
+    full against the fixed compiler — exit status, error
+    presence, warning presence, run output and stored values
+    identical to the oracle consensus on every probe (the base
+    compiler errored on all but the two no-warning cases).
+    `make test`: one expectation legitimately changed —
+    `tests/tests2/60_errors_and_warnings.expect`,
+    `test_conflicting_array_definition` (`extern int array[2];
+    int array[] = {1, 2, 3};`) expected the old hard error;
+    both oracles emit the new warning text verbatim and
+    accept, so the expectation was updated in this commit —
+    after which ALL TESTS PASSED. `tcctest.c` carries no
+    initializer-error expectation (its only "too many" is a
+    diagnostic-name string). Conformance spot re-run (333
+    probes): **unchanged, 328/333 three-way**, the diverging
+    set exactly the documented baseline five — no conformance
+    probe covered excess initializers, so no classification
+    moved. FFmpeg: on an F11+F15 stack (F11's `5fe697aa`
+    cherry-picked onto this base, F15 applied over it; the
+    three overlap hunks resolve by keeping both helpers,
+    putting F15's exhaustion branch ahead of F11's
+    `decl_cumofs` accounting, and keeping F11's
+    `decl_next_field` advance, which maps NULL to NULL),
+    `libswscale/format.o` builds under the benchmark recipe
+    (configure rc=0, make rc=0); F11's designated-anonymous
+    reproducer exits 0 with correct values, F11's 14 probes
+    pass 14/14, and F15's 44 probes pass unchanged on the
+    stack — the two fixes compose. Note for the phext: this
+    entry changes the Source scroll of `tccgen.c` and its
+    Volume 3 segmentation (new member `decl_excess`), so on
+    the next phext refresh the bindings for machines #2 and
+    #4 (tccgen.c), the `tccgen.c` Design view, and the gate
+    verdict go STALE until regenerated; machines #1 and #3,
+    the libtcc1 proof receipts, the assembly listings, and the
+    Library-10000 binary region are untouched.
 
 ## Maintenance rule
 
