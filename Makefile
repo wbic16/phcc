@@ -236,6 +236,16 @@ $(X)tccpp.o : $(TCCDEFS_H)
 $(X)libtcc.o : DEFINES += -DONE_SOURCE=0
 $(CROSS_TARGET)-tcc.o : DEFINES += -DONE_SOURCE=0
 endif
+
+# phext developer library (F2), linked into libtcc since F3: in
+# ONE_SOURCE builds libtcc.c includes phext/phext.c directly; in
+# multi-object builds it is one more object from the same single
+# translation unit.
+ifneq ($(ONE_SOURCE),yes)
+LIBTCC_OBJ += $(X)phext.o
+$(X)phext.o : phext/phext.c phext/phext.h
+	$S$(CC) -o $@ -c $< $(addsuffix ,$(DEFINES) $(CFLAGS))
+endif
 # native tcc always made from tcc.o and libtcc.[so|a]
 tcc.o : DEFINES += -DONE_SOURCE=0
 

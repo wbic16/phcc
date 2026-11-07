@@ -62,6 +62,24 @@
 #ifdef TCC_TARGET_MACHO
 #include "tccmacho.c"
 #endif
+/* The phext library (F2/F3) goes LAST in this block, once tcc.h has
+   been parsed (via tccpp.c): its header pulls in libc headers, which
+   must not precede tcc.h's _GNU_SOURCE/_DARWIN_C_SOURCE defines.
+   It is also an ordinary libc consumer of malloc/free/realloc, while
+   tcc.h #defines those names to use_tcc_* poison symbols (core code
+   must use the tcc_* allocators; a stray libc call is a deliberate
+   link error). So lift the poisons for the library's single file
+   and restore them, verbatim from tcc.h, immediately afterwards. */
+#undef free
+#undef malloc
+#undef realloc
+#undef strdup
+#include "phext/phext.c"
+#define free(p) use_tcc_free(p)
+#define malloc(s) use_tcc_malloc(s)
+#define realloc(p, s) use_tcc_realloc(p, s)
+#undef strdup
+#define strdup(s) use_tcc_strdup(s)
 #endif /* ONE_SOURCE */
 
 #include "tcc.h"

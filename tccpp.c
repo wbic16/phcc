@@ -2609,8 +2609,14 @@ static void next_nomacro(void)
         }
         break;
 
+    /* phext breaks (F3): the coordinate arithmetic is the phext
+       library's (phext/phext.h) — each phext_coordinate_*_break call
+       advances its own component and resets every lower component
+       to 1, exactly the transitions the 2024 seed's nine per-file
+       counters implemented by hand. Every break still surfaces to
+       the parser as the single TOK_SCROLL_BREAK token. */
     case TOK_SCROLL_BREAK:
-        file->scroll_num++;
+        phext_coordinate_scroll_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;
@@ -2618,8 +2624,7 @@ static void next_nomacro(void)
         goto keep_tok_flags;
 
     case TOK_SECTION_BREAK:
-        file->section_num++;
-        file->scroll_num = 1;
+        phext_coordinate_section_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;
@@ -2627,9 +2632,7 @@ static void next_nomacro(void)
         goto keep_tok_flags;
 
     case TOK_CHAPTER_BREAK:
-        file->chapter_num++;
-        file->section_num = 1;
-        file->scroll_num = 1;
+        phext_coordinate_chapter_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;
@@ -2637,10 +2640,7 @@ static void next_nomacro(void)
         goto keep_tok_flags;
 
     case TOK_BOOK_BREAK:
-        file->book_num++;
-        file->chapter_num = 1;
-        file->section_num = 1;
-        file->scroll_num = 1;
+        phext_coordinate_book_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;
@@ -2648,11 +2648,7 @@ static void next_nomacro(void)
         goto keep_tok_flags;
 
     case TOK_VOLUME_BREAK:
-        file->volume_num++;
-        file->book_num = 1;
-        file->chapter_num = 1;
-        file->section_num = 1;
-        file->scroll_num = 1;
+        phext_coordinate_volume_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;
@@ -2660,12 +2656,7 @@ static void next_nomacro(void)
         goto keep_tok_flags;
 
     case TOK_COLLECTION_BREAK:
-        file->collection_num++;
-        file->volume_num = 1;
-        file->book_num = 1;
-        file->chapter_num = 1;
-        file->section_num = 1;
-        file->scroll_num = 1;
+        phext_coordinate_collection_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;
@@ -2673,13 +2664,7 @@ static void next_nomacro(void)
         goto keep_tok_flags;
 
     case TOK_SERIES_BREAK:
-        file->series_num++;
-        file->collection_num = 1;
-        file->volume_num = 1;
-        file->book_num = 1;
-        file->chapter_num = 1;
-        file->section_num = 1;
-        file->scroll_num = 1;
+        phext_coordinate_series_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;
@@ -2687,14 +2672,7 @@ static void next_nomacro(void)
         goto keep_tok_flags;
 
     case TOK_SHELF_BREAK:
-        file->shelf_num++;
-        file->series_num = 1;
-        file->collection_num = 1;
-        file->volume_num = 1;
-        file->book_num = 1;
-        file->chapter_num = 1;
-        file->section_num = 1;
-        file->scroll_num = 1;
+        phext_coordinate_shelf_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;
@@ -2702,15 +2680,7 @@ static void next_nomacro(void)
         goto keep_tok_flags;
 
     case TOK_LIBRARY_BREAK:
-        file->library_num++;
-        file->shelf_num = 1;
-        file->series_num = 1;
-        file->collection_num = 1;
-        file->volume_num = 1;
-        file->book_num = 1;
-        file->chapter_num = 1;
-        file->section_num = 1;
-        file->scroll_num = 1;
+        phext_coordinate_library_break(&file->phext_coord);
         file->line_num = 1;
         tok_flags |= TOK_FLAG_BOL;
         p++;

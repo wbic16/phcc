@@ -25,6 +25,11 @@
 #define _DARWIN_C_SOURCE
 #include "config.h"
 
+/* the phext developer library (phext/, see F2 in PATCHES.md): the
+   preprocessor's phext position tracking (F3) uses its coordinate
+   machinery, so the tree carries one phext implementation, not two */
+#include "phext/phext.h"
+
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -646,16 +651,20 @@ typedef struct BufferedFile {
     char filename[1024];    /* filename */
     char *true_filename; /* filename not modified by # line directive */
     unsigned char unget[4];
+    phext_coordinate phext_coord; /* current phext coordinate: advanced by
+                                     the phext library's *_break functions
+                                     (F3). BufferedFile is tcc_mallocz'd, so
+                                     this starts at 0.0.0/0.0.0/0.0.0 exactly
+                                     as the 2024 seed's nine counters did,
+                                     and the library transitions (increment
+                                     own component, reset lowers to 1)
+                                     reproduce the seed's numbering exactly.
+                                     NOTE: this field must stay BEFORE
+                                     buffer[]: everything after buffer[]
+                                     overlaps the file bytes read into it
+                                     (the seed's counters sat there, in the
+                                     blast radius of the input itself). */
     unsigned char buffer[1]; /* extra size for CH_EOB char */
-    int scroll_num; /* current scroll */
-    int section_num; /* current section */
-    int chapter_num; /* current chapter */
-    int book_num; /* current book */
-    int volume_num; /* current volume */
-    int collection_num; /* current collection */
-    int series_num; /* current series */
-    int shelf_num; /* current shelf */
-    int library_num; /* current library */
 } BufferedFile;
 
 #define CH_EOB   '\\'       /* end of buffer or '\0' char in file */
@@ -1210,15 +1219,15 @@ struct filespec {
 
 #define TOK_EOF              (-1) /* end of file */
 #define TOK_LINEFEED         0x0A /* line feed */
-#define TOK_SCROLL_BREAK     0x17 /* scroll break */
-#define TOK_SECTION_BREAK    0x18 /* section break */
-#define TOK_CHAPTER_BREAK    0x19 /* chapter break */
-#define TOK_BOOK_BREAK       0x1A /* book break */
-#define TOK_VOLUME_BREAK     0x1C /* volume break */
-#define TOK_COLLECTION_BREAK 0x1D /* collection break */
-#define TOK_SERIES_BREAK     0x1E /* series break */
-#define TOK_SHELF_BREAK      0x1F /* shelf break */
-#define TOK_LIBRARY_BREAK    0x01 /* library break */
+#define TOK_SCROLL_BREAK     PHEXT_SCROLL_BREAK     /* scroll break */
+#define TOK_SECTION_BREAK    PHEXT_SECTION_BREAK    /* section break */
+#define TOK_CHAPTER_BREAK    PHEXT_CHAPTER_BREAK    /* chapter break */
+#define TOK_BOOK_BREAK       PHEXT_BOOK_BREAK       /* book break */
+#define TOK_VOLUME_BREAK     PHEXT_VOLUME_BREAK     /* volume break */
+#define TOK_COLLECTION_BREAK PHEXT_COLLECTION_BREAK /* collection break */
+#define TOK_SERIES_BREAK     PHEXT_SERIES_BREAK     /* series break */
+#define TOK_SHELF_BREAK      PHEXT_SHELF_BREAK      /* shelf break */
+#define TOK_LIBRARY_BREAK    PHEXT_LIBRARY_BREAK    /* library break */
 
 /* all identifiers and strings have token above that */
 #define TOK_IDENT 256
