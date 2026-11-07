@@ -960,6 +960,8 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
 #if defined TCC_TARGET_MACHO
     tcc_free(s1->install_name);
 #endif
+    /* dynarray_reset frees the strings as well as the array */
+    dynarray_reset(&s1->version_scripts, &s1->nb_version_scripts);
     dynarray_reset(&s1->files, &s1->nb_files);
     dynarray_reset(&s1->target_deps, &s1->nb_target_deps);
     dynarray_reset(&s1->pragma_libs, &s1->nb_pragma_libs);
@@ -1502,6 +1504,10 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
             s->section_align = strtoul(o.arg, &end, 16);
         } else if (link_option(&o, "soname=|install_name=")) {
             tcc_set_str(&s->soname, o.arg);
+        } else if (link_option(&o, "version-script=")) {
+            /* several scripts are merged, as with GNU ld */
+            dynarray_add(&s->version_scripts, &s->nb_version_scripts,
+                         tcc_strdup(o.arg));
         } else if (!!(r = link_option(&o, "?whole-archive"))) {
             SET_OR_CLEAR(s->filetype, AFF_WHOLE_ARCHIVE);
         } else if (link_option(&o, "znodelete")) {

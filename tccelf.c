@@ -41,6 +41,12 @@ struct sym_version {
 #define dt_verneednum       s1->dt_verneednum
 #define versym_section      s1->versym_section
 #define verneed_section     s1->verneed_section
+#define dt_verdefnum        s1->dt_verdefnum
+#define verdef_section      s1->verdef_section
+
+#ifndef ELF_OBJ_ONLY
+static void vscript_free(TCCState *s1); /* defined with the version-script code below */
+#endif
 
 /* special flag to indicate that the section should not be linked to the other ones */
 #define SHF_PRIVATE 0x80000000
@@ -148,6 +154,8 @@ ST_FUNC void tccelf_delete(TCCState *s1)
     }
     tcc_free(sym_versions);
     tcc_free(sym_to_version);
+    vscript_free(s1);
+    tcc_free(s1->dynsym_version);
 #endif
 
     /* free all sections */
@@ -601,19 +609,32 @@ version_add (TCCState *s1)
     ElfW(Verneed) *vn = NULL;
     Section *symtab;
     int sym_index, end_sym, nb_versions = 2, nb_entries = 0;
+    int first_verneed;
     ElfW(Half) *versym;
     const char *name;
 
     if (0 == nb_sym_versions)
         return;
-    versym_section = new_section(s1, ".gnu.version", SHT_GNU_versym, SHF_ALLOC);
-    versym_section->sh_entsize = sizeof(ElfW(Half));
-    versym_section->link = s1->dynsym;
+    /* version definitions (version_def_add, called just before) take
+       the low indices; needed versions are allocated after them */
+    if (s1->verdef_next_index > nb_versions)
+        nb_versions = s1->verdef_next_index;
+    /* a verneed section is generated only when at least one needed
+       version was actually allocated above this baseline */
+    first_verneed = nb_versions;
+    if (!versym_section) {
+        versym_section = new_section(s1, ".gnu.version", SHT_GNU_versym, SHF_ALLOC);
+        versym_section->sh_entsize = sizeof(ElfW(Half));
+        versym_section->link = s1->dynsym;
+    }
 
     /* add needed symbols */
     symtab = s1->dynsym;
     end_sym = symtab->data_offset / sizeof (ElfSym);
-    versym = section_ptr_add(versym_section, end_sym * sizeof(ElfW(Half)));
+    if (versym_section->data_offset)
+        versym = (ElfW(Half) *)versym_section->data;
+    else
+        versym = section_ptr_add(versym_section, end_sym * sizeof(ElfW(Half)));
     for (sym_index = 1; sym_index < end_sym; ++sym_index) {
         int dllindex, verndx;
         sym = &((ElfW(Sym) *)symtab->data)[sym_index];
@@ -627,11 +648,14 @@ version_add (TCCState *s1)
                Whereas version '1' for example for 'signal' in an exe defeats
                bcheck's signal_redir. */
             && (sym->st_shndx == SHN_UNDEF || (s1->output_type & TCC_OUTPUT_EXE))
+            /* an index >= 2 already here belongs to a version
+               definition: the defined version wins */
+            && versym[sym_index] < 2
             ) {
             if (!sym_versions[verndx].out_index)
               sym_versions[verndx].out_index = nb_versions++;
             versym[sym_index] = sym_versions[verndx].out_index;
-        } else {
+        } else if (!versym[sym_index]) {
             versym[sym_index] = 1; /* (*global*) */
         }
         //printf("SYM %d %s\n", versym[sym_index], name);
@@ -639,7 +663,7 @@ version_add (TCCState *s1)
     /* generate verneed section, but not when it will be empty.  Some
        dynamic linkers look at their contents even when DTVERNEEDNUM and
        section size is zero.  */
-    if (nb_versions > 2) {
+    if (nb_versions > first_verneed) {
         verneed_section = new_section(s1, ".gnu.version_r",
                                       SHT_GNU_verneed, SHF_ALLOC);
         verneed_section->link = s1->dynsym->link;
@@ -692,6 +716,740 @@ version_add (TCCState *s1)
     dt_verneednum = nb_entries;
 }
 #endif /* ndef ELF_OBJ_ONLY */
+
+#ifndef ELF_OBJ_ONLY
+/* ------------------------------------------------------------------------- */
+/* --version-script support (PATCHES F10; benchmark patch-queue item PQ-3).
+ *
+ * The driver records each --version-script=FILE in the state (libtcc.c);
+ * the scripts are parsed here, at output time, and applied in the linker's
+ * own order (machine #3): input symbols are first resolved by
+ * set_elf_sym() as usual; only then does the script (a) demote defined
+ * symbols it localizes in the output symbol table, (b) tag the symbols
+ * the export paths (export_global_syms / bind_libs_dynsyms) put into
+ * .dynsym with their version node, and (c) emit .gnu.version /
+ * .gnu.version_d next to the existing VERNEED machinery, sharing one
+ * version-index space (verdef indices are allocated first).
+ *
+ * Matching follows GNU ld (all rules below verified against GNU ld
+ * outputs on the same scripts):
+ *  - an exact (non-wildcard) name in a node's global list assigns the
+ *    symbol to that node; if several nodes list it, the first one wins;
+ *  - an exact name in any local list localizes the symbol;
+ *  - otherwise the LAST node whose global wildcard matches assigns;
+ *  - otherwise a matching local wildcard in any node localizes;
+ *  - otherwise the symbol stays a plain global.
+ * A pattern string used both as global and as local anywhere in the
+ * combined script is an error ("duplicate expression"), as is an
+ * anonymous node combined with other nodes, a duplicated version name,
+ * or a dependency on an undefined version.  Supported grammar: named
+ * and anonymous nodes, global:/local: lists, wildcards (* ? [...],
+ * including POSIX character classes), extern "C"/"C++" blocks (their
+ * symbols join the enclosing list; C++ demangling is not attempted --
+ * phcc never emits mangled names), one dependency name after '}'.
+ * Anything else is a hard error, never a silent ignore. */
+
+struct vpattern {
+    char *pat;          /* pattern text (owned by the node) */
+    int wildcard;       /* pat uses '*', '?' or '[' */
+};
+
+struct vnode {
+    char *name;         /* version name, NULL for the anonymous node */
+    char *parent;       /* dependency version name, or NULL */
+    struct vpattern **globals;
+    int nb_globals;
+    struct vpattern **locals;
+    int nb_locals;
+};
+
+/* Pattern-string table entry: for literal (non-wildcard) strings this
+   carries the match data; for every string it records whether it was
+   seen as global and/or as local (for the duplicate-expression rule). */
+struct vstr {
+    const char *str;    /* points into a struct vpattern */
+    int glob_node;      /* node of first literal global use, -1 if none */
+    int has_global;
+    int has_local;
+    int local_lit;      /* literal string used in a local list */
+};
+
+struct vscript {
+    struct vnode **nodes;
+    int nb_nodes;
+    int nb_named;       /* nodes with a name: these need a VERDEF */
+    struct vstr *tab;   /* open-addressing table by pattern string */
+    int tab_size;       /* power of two, 0 = not built */
+};
+
+/* ---------------- version-script glob matching ---------------- */
+
+/* Test one character against a [...] class starting at p (p points at
+   '[').  On success return a pointer past ']' and set *matched; return
+   NULL if the class is malformed.  Supports ranges, '!'/'^' negation
+   and POSIX classes ([:alpha:] and friends). */
+static const char *vscript_class(const char *p, unsigned char c, int *matched)
+{
+    int neg = 0, ok = 0, first = 1;
+    p++;
+    if (*p == '!' || *p == '^') {
+        neg = 1;
+        p++;
+    }
+    while (*p && (*p != ']' || first)) {
+        if (p[0] == '[' && p[1] == ':') {
+            const char *e = strstr(p + 2, ":]");
+            if (e) {
+                /* POSIX character class, ASCII tests (no locale) */
+                size_t n = e - (p + 2);
+                int known = 1, m = 0;
+                if (n == 5 && !memcmp(p + 2, "alpha", 5))
+                    m = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+                else if (n == 5 && !memcmp(p + 2, "digit", 5))
+                    m = c >= '0' && c <= '9';
+                else if (n == 5 && !memcmp(p + 2, "alnum", 5))
+                    m = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
+                        || (c >= 'A' && c <= 'Z');
+                else if (n == 5 && !memcmp(p + 2, "upper", 5))
+                    m = c >= 'A' && c <= 'Z';
+                else if (n == 5 && !memcmp(p + 2, "lower", 5))
+                    m = c >= 'a' && c <= 'z';
+                else if (n == 6 && !memcmp(p + 2, "xdigit", 6))
+                    m = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                        || (c >= 'A' && c <= 'F');
+                else if (n == 5 && !memcmp(p + 2, "space", 5))
+                    m = c == ' ' || (c >= '\t' && c <= '\r');
+                else if (n == 5 && !memcmp(p + 2, "blank", 5))
+                    m = c == ' ' || c == '\t';
+                else if (n == 5 && !memcmp(p + 2, "cntrl", 5))
+                    m = c < 0x20 || c == 0x7f;
+                else if (n == 5 && !memcmp(p + 2, "print", 5))
+                    m = c >= 0x20 && c < 0x7f;
+                else if (n == 5 && !memcmp(p + 2, "graph", 5))
+                    m = c > 0x20 && c < 0x7f;
+                else if (n == 5 && !memcmp(p + 2, "punct", 5))
+                    m = (c >= 0x20 && c < 0x7f)
+                        && !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
+                             || (c >= 'A' && c <= 'Z'));
+                else
+                    known = 0;
+                if (!known)
+                    return NULL; /* unknown class: malformed */
+                if (m)
+                    ok = 1;
+                p = e + 2;
+                first = 0;
+                continue;
+            }
+        }
+        if (p[1] == '-' && p[2] && p[2] != ']') {
+            if (c >= (unsigned char)p[0] && c <= (unsigned char)p[2])
+                ok = 1;
+            p += 3;
+        } else {
+            if (c == (unsigned char)*p)
+                ok = 1;
+            p++;
+        }
+        first = 0;
+    }
+    if (*p != ']')
+        return NULL;
+    *matched = neg ? !ok : ok;
+    return p + 1;
+}
+
+static int vscript_glob_match(const char *pat, const char *str)
+{
+    const char *p = pat, *s = str;
+    const char *retry_p = NULL, *retry_s = NULL;
+    while (*s) {
+        if (*p == '*') {
+            retry_p = ++p;
+            retry_s = s;
+            continue;
+        }
+        if (*p == '?') {
+            p++;
+            s++;
+            continue;
+        }
+        if (*p == '[') {
+            int m = 0;
+            const char *np = vscript_class(p, (unsigned char)*s, &m);
+            if (np && m) {
+                p = np;
+                s++;
+                continue;
+            }
+            if (!np && *s == '[') {
+                p++;
+                s++;
+                continue;
+            }
+        } else if (*p == *s) {
+            p++;
+            s++;
+            continue;
+        }
+        if (retry_p) {
+            p = retry_p;
+            s = ++retry_s;
+            continue;
+        }
+        return 0;
+    }
+    while (*p == '*')
+        p++;
+    return *p == '\0';
+}
+
+/* ---------------- pattern-string table ---------------- */
+
+static struct vstr *vscript_tab_find(struct vscript *vs, const char *str,
+                                     int insert)
+{
+    unsigned h;
+    if (!vs->tab_size)
+        return NULL;
+    h = elf_hash((const unsigned char *)str) & (vs->tab_size - 1);
+    while (vs->tab[h].str) {
+        if (!strcmp(vs->tab[h].str, str))
+            return &vs->tab[h];
+        h = (h + 1) & (vs->tab_size - 1);
+    }
+    if (!insert)
+        return NULL;
+    vs->tab[h].str = str;
+    vs->tab[h].glob_node = -1;
+    return &vs->tab[h];
+}
+
+static void vscript_tab_add(TCCState *s1, struct vscript *vs,
+                            struct vpattern *vp, int is_global, int node)
+{
+    struct vstr *e = vscript_tab_find(vs, vp->pat, 1);
+    if (is_global) {
+        if (e->has_local)
+            tcc_error_noabort("duplicate expression `%s' in version information",
+                      vp->pat);
+        if (!vp->wildcard && e->glob_node < 0)
+            e->glob_node = node; /* first literal global wins */
+        e->has_global = 1;
+    } else {
+        if (e->has_global)
+            tcc_error_noabort("duplicate expression `%s' in version information",
+                      vp->pat);
+        if (!vp->wildcard)
+            e->local_lit = 1;
+        e->has_local = 1;
+    }
+}
+
+/* verdicts: >= 0 is a node ordinal, VS_PLAIN / VS_LOCAL otherwise */
+#define VS_PLAIN (-1)
+#define VS_LOCAL (-2)
+
+static int vscript_verdict(TCCState *s1, const char *name)
+{
+    struct vscript *vs = s1->vscript;
+    struct vstr *e;
+    int i, j, node;
+
+    if (!vs || !vs->nb_nodes)
+        return VS_PLAIN;
+    e = vscript_tab_find(vs, name, 0);
+    if (e) {
+        if (e->glob_node >= 0)
+            return vs->nodes[e->glob_node]->name ? e->glob_node : VS_PLAIN;
+        if (e->local_lit)
+            return VS_LOCAL;
+    }
+    node = -1;
+    for (i = 0; i < vs->nb_nodes; i++)
+        for (j = 0; j < vs->nodes[i]->nb_globals; j++)
+            if (vs->nodes[i]->globals[j]->wildcard
+                && vscript_glob_match(vs->nodes[i]->globals[j]->pat, name))
+                node = i; /* last matching node wins */
+    if (node >= 0)
+        return vs->nodes[node]->name ? node : VS_PLAIN;
+    for (i = 0; i < vs->nb_nodes; i++)
+        for (j = 0; j < vs->nodes[i]->nb_locals; j++)
+            if (vs->nodes[i]->locals[j]->wildcard
+                && vscript_glob_match(vs->nodes[i]->locals[j]->pat, name))
+                return VS_LOCAL;
+    return VS_PLAIN;
+}
+
+/* ---------------- lexer ---------------- */
+
+enum { VT_EOF = 0, VT_NAME, VT_STR, VT_LBRACE, VT_RBRACE, VT_SEMI, VT_COLON };
+
+struct vlexer {
+    const char *p;
+    const char *fname;
+    int line;
+    int tok;
+    int failed;         /* a syntax error was reported: unwind parsing */
+    char *text;         /* owned; token text for VT_NAME / VT_STR */
+};
+
+static void vscript_syntax(TCCState *s1, struct vlexer *lx)
+{
+    tcc_error_noabort("%s:%d: syntax error in VERSION script",
+                      lx->fname, lx->line);
+    lx->failed = 1;
+}
+
+static void vlex_next(TCCState *s1, struct vlexer *lx)
+{
+    const char *p = lx->p;
+    int c;
+
+    tcc_free(lx->text);
+    lx->text = NULL;
+    for (;;) {
+        c = (unsigned char)*p;
+        if (c == '\n') {
+            lx->line++;
+            p++;
+        } else if (c == ' ' || c == '\t' || c == '\r'
+                   || c == '\f' || c == '\v') {
+            p++;
+        } else if (c == '#') {
+            while (*p && *p != '\n')
+                p++;
+        } else if (c == '/' && p[1] == '*') {
+            p += 2;
+            while (*p && !(p[0] == '*' && p[1] == '/')) {
+                if (*p == '\n')
+                    lx->line++;
+                p++;
+            }
+            if (*p)
+                p += 2;
+        } else if (c == '/' && p[1] == '/') {
+            while (*p && *p != '\n')
+                p++;
+        } else {
+            break;
+        }
+    }
+    lx->p = p;
+    c = (unsigned char)*p;
+    if (!c) {
+        lx->tok = VT_EOF;
+    } else if (c == '{') {
+        lx->tok = VT_LBRACE;
+        lx->p = p + 1;
+    } else if (c == '}') {
+        lx->tok = VT_RBRACE;
+        lx->p = p + 1;
+    } else if (c == ';') {
+        lx->tok = VT_SEMI;
+        lx->p = p + 1;
+    } else if (c == ':') {
+        lx->tok = VT_COLON;
+        lx->p = p + 1;
+    } else if (c == '"') {
+        const char *q = p + 1;
+        while (*q && *q != '"' && *q != '\n')
+            q++;
+        if (*q != '"')
+            vscript_syntax(s1, lx);
+        lx->text = tcc_malloc(q - p);
+        memcpy(lx->text, p + 1, q - p - 1);
+        lx->text[q - p - 1] = '\0';
+        lx->tok = VT_STR;
+        lx->p = q + 1;
+    } else {
+        const char *q = p;
+        while (*q && !strchr(" \t\r\n\f\v;{}:\"", *q)
+               && *q != '#'
+               && !(q[0] == '/' && (q[1] == '*' || q[1] == '/')))
+            q++;
+        if (q == p)
+            vscript_syntax(s1, lx);
+        lx->text = tcc_malloc(q - p + 1);
+        memcpy(lx->text, p, q - p);
+        lx->text[q - p] = '\0';
+        lx->tok = VT_NAME;
+        lx->p = q;
+    }
+}
+
+/* kind of the token after the current one (lexer state preserved) */
+static int vlex_peek(TCCState *s1, struct vlexer *lx)
+{
+    const char *save_p = lx->p;
+    int save_line = lx->line, save_tok = lx->tok, tok;
+    char *save_text = lx->text;
+    lx->text = NULL;
+    vlex_next(s1, lx);
+    tok = lx->tok;
+    tcc_free(lx->text);
+    lx->p = save_p;
+    lx->line = save_line;
+    lx->tok = save_tok;
+    lx->text = save_text;
+    return tok;
+}
+
+/* ---------------- parser ---------------- */
+
+static void vnode_add_pattern(struct vnode *node, int is_global,
+                              const char *pat)
+{
+    struct vpattern *vp = tcc_malloc(sizeof(*vp));
+    vp->pat = tcc_strdup(pat);
+    vp->wildcard = strpbrk(pat, "*?[") != NULL;
+    if (is_global)
+        dynarray_add(&node->globals, &node->nb_globals, vp);
+    else
+        dynarray_add(&node->locals, &node->nb_locals, vp);
+}
+
+static void vscript_parse_node(TCCState *s1, struct vlexer *lx)
+{
+    struct vscript *vs = s1->vscript;
+    struct vnode *node = tcc_mallocz(sizeof(*node));
+    int cur = 0; /* 0 = no list yet, 1 = global, 2 = local */
+
+    if (lx->tok == VT_NAME) {
+        node->name = tcc_strdup(lx->text);
+        vlex_next(s1, lx);
+    }
+    if (lx->tok != VT_LBRACE)
+        vscript_syntax(s1, lx);
+    vlex_next(s1, lx);
+    while (!lx->failed && lx->tok != VT_RBRACE) {
+        if (lx->tok == VT_SEMI) {
+            vlex_next(s1, lx);
+            continue;
+        }
+        if (lx->tok != VT_NAME)
+            vscript_syntax(s1, lx);
+        if (lx->failed)
+            break;
+        if ((!strcmp(lx->text, "global") || !strcmp(lx->text, "local"))
+            && vlex_peek(s1, lx) == VT_COLON) {
+            cur = lx->text[0] == 'g' ? 1 : 2;
+            vlex_next(s1, lx);
+            vlex_next(s1, lx); /* eat ':' */
+            continue;
+        }
+        if (!strcmp(lx->text, "extern") && vlex_peek(s1, lx) == VT_STR) {
+            if (!cur) {
+                tcc_error_noabort("%s:%d: 'extern' in VERSION script without "
+                          "preceding 'global:' or 'local:'",
+                          lx->fname, lx->line);
+                lx->failed = 1;
+                break;
+            }
+            vlex_next(s1, lx);
+            vlex_next(s1, lx); /* eat the language string */
+            if (lx->tok != VT_LBRACE)
+                vscript_syntax(s1, lx);
+            vlex_next(s1, lx);
+            while (!lx->failed && lx->tok != VT_RBRACE) {
+                if (lx->tok == VT_SEMI) {
+                    vlex_next(s1, lx);
+                    continue;
+                }
+                if (lx->tok != VT_NAME)
+                    vscript_syntax(s1, lx);
+                vnode_add_pattern(node, cur == 1, lx->text);
+                vlex_next(s1, lx);
+            }
+            vlex_next(s1, lx); /* eat '}' */
+            continue;
+        }
+        if (!cur) {
+            tcc_error_noabort("%s:%d: symbol '%s' in VERSION script without "
+                      "preceding 'global:' or 'local:'",
+                      lx->fname, lx->line, lx->text);
+            lx->failed = 1;
+            break;
+        }
+        vnode_add_pattern(node, cur == 1, lx->text);
+        vlex_next(s1, lx);
+    }
+    vlex_next(s1, lx); /* eat '}' */
+    if (lx->tok == VT_NAME) {
+        node->parent = tcc_strdup(lx->text);
+        vlex_next(s1, lx);
+    }
+    if (lx->tok == VT_SEMI)
+        vlex_next(s1, lx);
+    else if (lx->tok != VT_EOF)
+        vscript_syntax(s1, lx);
+    dynarray_add(&vs->nodes, &vs->nb_nodes, node);
+    if (node->name)
+        vs->nb_named++;
+}
+
+static void vscript_validate(TCCState *s1)
+{
+    struct vscript *vs = s1->vscript;
+    int i, j, total;
+
+    if (vs->nb_nodes > 1) {
+        for (i = 0; i < vs->nb_nodes; i++)
+            if (!vs->nodes[i]->name)
+                tcc_error_noabort("anonymous version tag cannot be combined "
+                          "with other version tags in version script");
+    }
+    for (i = 0; i < vs->nb_nodes; i++) {
+        if (vs->nodes[i]->name)
+            for (j = 0; j < i; j++)
+                if (vs->nodes[j]->name
+                    && !strcmp(vs->nodes[i]->name, vs->nodes[j]->name))
+                    tcc_error_noabort("duplicate version tag '%s' in version script",
+                              vs->nodes[i]->name);
+        if (vs->nodes[i]->parent) {
+            for (j = 0; j < vs->nb_nodes; j++)
+                if (vs->nodes[j]->name
+                    && !strcmp(vs->nodes[i]->parent, vs->nodes[j]->name))
+                    break;
+            if (j == vs->nb_nodes)
+                tcc_error_noabort("unable to find version dependency '%s'",
+                          vs->nodes[i]->parent);
+        }
+    }
+    total = 0;
+    for (i = 0; i < vs->nb_nodes; i++)
+        total += vs->nodes[i]->nb_globals + vs->nodes[i]->nb_locals;
+    vs->tab_size = 16;
+    while (vs->tab_size < total * 2)
+        vs->tab_size <<= 1;
+    vs->tab = tcc_mallocz(vs->tab_size * sizeof(struct vstr));
+    for (i = 0; i < vs->nb_nodes; i++) {
+        for (j = 0; j < vs->nodes[i]->nb_globals; j++)
+            vscript_tab_add(s1, vs, vs->nodes[i]->globals[j], 1, i);
+        for (j = 0; j < vs->nodes[i]->nb_locals; j++)
+            vscript_tab_add(s1, vs, vs->nodes[i]->locals[j], 0, i);
+    }
+}
+
+static void vscript_parse(TCCState *s1)
+{
+    struct vscript *vs = tcc_mallocz(sizeof(*vs));
+    int f;
+
+    s1->vscript = vs;
+    for (f = 0; f < s1->nb_version_scripts; f++) {
+        const char *fname = s1->version_scripts[f];
+        FILE *fp = fopen(fname, "rb");
+        char *buf = NULL;
+        size_t len = 0, cap = 0;
+        struct vlexer lx;
+        if (!fp) {
+            tcc_error_noabort("cannot open version script file '%s'", fname);
+            continue;
+        }
+        for (;;) {
+            size_t n;
+            if (len + 4096 + 1 > cap) {
+                cap = cap ? cap * 2 : 8192;
+                buf = tcc_realloc(buf, cap);
+            }
+            n = fread(buf + len, 1, 4096, fp);
+            len += n;
+            if (n < 4096)
+                break;
+        }
+        fclose(fp);
+        buf[len] = '\0';
+        lx.p = buf;
+        lx.fname = fname;
+        lx.line = 1;
+        lx.tok = VT_EOF;
+        lx.failed = 0;
+        lx.text = NULL;
+        vlex_next(s1, &lx);
+        while (!lx.failed && lx.tok != VT_EOF)
+            vscript_parse_node(s1, &lx);
+        tcc_free(lx.text);
+        tcc_free(buf);
+        if (s1->nb_errors)
+            return;
+    }
+    vscript_validate(s1);
+}
+
+static void vscript_free(TCCState *s1)
+{
+    struct vscript *vs = s1->vscript;
+    int i, j;
+    if (!vs)
+        return;
+    for (i = 0; i < vs->nb_nodes; i++) {
+        struct vnode *node = vs->nodes[i];
+        /* free the owned strings; dynarray_reset frees the pattern
+           structs and the arrays themselves */
+        for (j = 0; j < node->nb_globals; j++)
+            tcc_free(node->globals[j]->pat);
+        for (j = 0; j < node->nb_locals; j++)
+            tcc_free(node->locals[j]->pat);
+        tcc_free(node->name);
+        tcc_free(node->parent);
+        dynarray_reset(&node->globals, &node->nb_globals);
+        dynarray_reset(&node->locals, &node->nb_locals);
+    }
+    dynarray_reset(&vs->nodes, &vs->nb_nodes);
+    tcc_free(vs->tab);
+    tcc_free(vs);
+    s1->vscript = NULL;
+}
+
+/* ---------------- application ---------------- */
+
+/* Demote every defined symbol the script localizes to STB_LOCAL in the
+   output symbol table.  Runs after all input files and the runtime are
+   loaded but before the linker creates its own symbols (_end & friends
+   are added later and stay exempt, as with GNU ld).  The export paths
+   then skip localized symbols by their ordinary STB_LOCAL test, so no
+   set_elf_sym branch changes order or gains a case. */
+static void vscript_apply_local(TCCState *s1)
+{
+    ElfW(Sym) *sym;
+    const char *name;
+
+    if (!s1->vscript)
+        return;
+    for_each_elem(symtab_section, 1, sym, ElfW(Sym)) {
+        if (sym->st_shndx == SHN_UNDEF
+            || ELFW(ST_BIND)(sym->st_info) == STB_LOCAL)
+            continue;
+        name = (char *)symtab_section->link->data + sym->st_name;
+        if (vscript_verdict(s1, name) == VS_LOCAL)
+            sym->st_info = ELFW(ST_INFO)(STB_LOCAL,
+                                         ELFW(ST_TYPE)(sym->st_info));
+    }
+}
+
+static void vscript_set_dynsym_version(TCCState *s1, int dynindex, int node)
+{
+    if (dynindex >= s1->nb_dynsym_version) {
+        int n = dynindex + 16, o = s1->nb_dynsym_version;
+        s1->dynsym_version = tcc_realloc(s1->dynsym_version,
+                                         n * sizeof(int));
+        memset(s1->dynsym_version + o, 0, (n - o) * sizeof(int));
+        s1->nb_dynsym_version = n;
+    }
+    s1->dynsym_version[dynindex] = node + 1;
+}
+
+/* GNU ld exports one absolute symbol per named version node. */
+static void vscript_add_version_symbols(TCCState *s1)
+{
+    struct vscript *vs = s1->vscript;
+    int i, dynindex;
+
+    if (!vs || !vs->nb_named)
+        return;
+    for (i = 0; i < vs->nb_nodes; i++) {
+        if (!vs->nodes[i]->name)
+            continue;
+        dynindex = set_elf_sym(s1->dynsym, 0, 0,
+                               ELFW(ST_INFO)(STB_GLOBAL, STT_OBJECT), 0,
+                               SHN_ABS, vs->nodes[i]->name);
+        vscript_set_dynsym_version(s1, dynindex, i);
+    }
+}
+
+/* Emit .gnu.version_d (and .gnu.version, unless the VERNEED pass below
+   creates it) for the script's named nodes.  Runs immediately before
+   version_add(): verdef indices start at 2 (1 is the base definition,
+   named after the soname or the output file) and version_add() is told
+   via s1->verdef_next_index to allocate VERNEED indices after them,
+   so both share one index space exactly as in GNU ld output. */
+static void version_def_add(TCCState *s1, const char *filename)
+{
+    struct vscript *vs = s1->vscript;
+    Section *dynstr;
+    ElfW(Verdef) *vd;
+    ElfW(Verdaux) *va;
+    const char *base;
+    int i, end_sym, cnt;
+    unsigned long ofs;
+
+    if (!vs || !vs->nb_named || !s1->dynsym)
+        return;
+    dynstr = s1->dynsym->link;
+    end_sym = (int)(s1->dynsym->data_offset / sizeof(ElfW(Sym)));
+
+    if (!versym_section) {
+        ElfW(Half) *versym;
+        int v;
+        versym_section = new_section(s1, ".gnu.version", SHT_GNU_versym,
+                                     SHF_ALLOC);
+        versym_section->sh_entsize = sizeof(ElfW(Half));
+        versym_section->link = s1->dynsym;
+        versym = section_ptr_add(versym_section,
+                                 end_sym * sizeof(ElfW(Half)));
+        for (i = 1; i < end_sym; i++) {
+            v = i < s1->nb_dynsym_version ? s1->dynsym_version[i] : 0;
+            versym[i] = v ? (ElfW(Half))(v + 1) : 1; /* ordinal+1 -> index */
+        }
+    }
+    s1->verdef_next_index = 2 + vs->nb_named;
+
+    base = s1->soname;
+    if (!base) {
+        base = filename ? strrchr(filename, '/') : NULL;
+        base = base ? base + 1 : (filename ? filename : "a.out");
+    }
+    verdef_section = new_section(s1, ".gnu.version_d", SHT_GNU_verdef,
+                                 SHF_ALLOC);
+    verdef_section->link = dynstr;
+    cnt = 0;
+    /* base definition: index 1, named after the file itself */
+    ofs = section_add(verdef_section,
+                      sizeof(ElfW(Verdef)) + sizeof(ElfW(Verdaux)), 1);
+    vd = (ElfW(Verdef) *)(verdef_section->data + ofs);
+    vd->vd_version = 1;
+    vd->vd_flags = VER_FLG_BASE;
+    vd->vd_ndx = 1;
+    vd->vd_cnt = 1;
+    vd->vd_hash = elf_hash((const unsigned char *)base);
+    vd->vd_aux = sizeof(ElfW(Verdef));
+    vd->vd_next = sizeof(ElfW(Verdef)) + sizeof(ElfW(Verdaux));
+    va = (ElfW(Verdaux) *)(vd + 1);
+    va->vda_name = put_elf_str(dynstr, base);
+    va->vda_next = 0;
+    cnt++;
+    for (i = 0; i < vs->nb_nodes; i++) {
+        struct vnode *node = vs->nodes[i];
+        int naux = node->parent ? 2 : 1;
+        int entsize = (int)(sizeof(ElfW(Verdef))
+                            + naux * sizeof(ElfW(Verdaux)));
+        if (!node->name)
+            continue;
+        ofs = section_add(verdef_section, entsize, 1);
+        vd = (ElfW(Verdef) *)(verdef_section->data + ofs);
+        vd->vd_version = 1;
+        vd->vd_flags = 0;
+        vd->vd_ndx = (ElfW(Half))(i + 2); /* all nodes are named here */
+        vd->vd_cnt = naux;
+        vd->vd_hash = elf_hash((const unsigned char *)node->name);
+        vd->vd_aux = sizeof(ElfW(Verdef));
+        vd->vd_next = entsize;
+        va = (ElfW(Verdaux) *)(vd + 1);
+        va->vda_name = put_elf_str(dynstr, node->name);
+        va->vda_next = node->parent ? (ElfW(Word))sizeof(ElfW(Verdaux)) : 0;
+        if (node->parent) {
+            va[1].vda_name = put_elf_str(dynstr, node->parent);
+            va[1].vda_next = 0;
+        }
+        cnt++;
+    }
+    vd->vd_next = 0; /* terminate the chain on the last entry */
+    verdef_section->sh_info = cnt;
+    dt_verdefnum = cnt;
+}
+#endif /* ndef ELF_OBJ_ONLY */
+
 
 /* catch .tbss also */
 static int IS_BSS(TCCState *s1, int ndx)
@@ -2165,9 +2923,16 @@ static void bind_libs_dynsyms(TCCState *s1)
         dynsym_index = find_elf_sym(s1->dynsymtab_section, name);
         if (sym->st_shndx != SHN_UNDEF) {
             if (ELFW(ST_BIND)(sym->st_info) != STB_LOCAL
-                && (dynsym_index || s1->rdynamic))
-                set_elf_sym(s1->dynsym, sym->st_value, sym->st_size,
-                            sym->st_info, 0, sym->st_shndx, name);
+                && (dynsym_index || s1->rdynamic)) {
+                int dynindex = set_elf_sym(s1->dynsym, sym->st_value,
+                            sym->st_size, sym->st_info, 0, sym->st_shndx,
+                            name);
+                if (s1->vscript) {
+                    int v = vscript_verdict(s1, name);
+                    if (v >= 0)
+                        vscript_set_dynsym_version(s1, dynindex, v);
+                }
+            }
         } else if (dynsym_index) {
             esym = (ElfW(Sym) *)s1->dynsymtab_section->data + dynsym_index;
             if (esym->st_shndx == SHN_UNDEF) {
@@ -2195,6 +2960,11 @@ static void export_global_syms(TCCState *s1)
 				   sym->st_info, 0, sym->st_shndx, name);
 	    index = sym - (ElfW(Sym) *) symtab_section->data;
             get_sym_attr(s1, index, 1)->dyn_index = dynindex;
+            if (s1->vscript && sym->st_shndx != SHN_UNDEF) {
+                int v = vscript_verdict(s1, name);
+                if (v >= 0)
+                    vscript_set_dynsym_version(s1, dynindex, v);
+            }
         }
     }
 }
@@ -2607,11 +3377,18 @@ static void fill_dynamic(TCCState *s1, struct dyn_inf *dyninf)
     }
     put_dt(dynamic, DT_RELCOUNT, 0);
 #endif
-    if (versym_section && verneed_section) {
-	/* The dynamic linker can not handle VERSYM without VERNEED */
+    if (versym_section && (verneed_section || verdef_section)) {
+	/* The dynamic linker can not handle VERSYM without VERNEED
+	   or VERDEF */
         put_dt(dynamic, DT_VERSYM, versym_section->sh_addr);
-        put_dt(dynamic, DT_VERNEED, verneed_section->sh_addr);
-        put_dt(dynamic, DT_VERNEEDNUM, dt_verneednum);
+        if (verneed_section) {
+            put_dt(dynamic, DT_VERNEED, verneed_section->sh_addr);
+            put_dt(dynamic, DT_VERNEEDNUM, dt_verneednum);
+        }
+        if (verdef_section) {
+            put_dt(dynamic, DT_VERDEF, verdef_section->sh_addr);
+            put_dt(dynamic, DT_VERDEFNUM, dt_verdefnum);
+        }
     }
     s = have_section(s1, ".preinit_array");
     if (s && s->data_offset) {
@@ -3040,9 +3817,19 @@ static int elf_output_file(TCCState *s1, const char *filename)
     dyninf.note = create_bsd_note_section (s1, ".note.tag", "FreeBSD");
 #endif
 
+    if (s1->nb_version_scripts && !s1->vscript) {
+        vscript_parse(s1);
+        if (s1->nb_errors)
+            goto the_end;
+    }
+
         /* if linking, also link in runtime libraries (libc, libgcc, etc.) */
         tcc_add_runtime(s1);
 	resolve_common_syms(s1);
+	/* the version script localizes here, before any symbol is
+	   exported or any linker symbol is created */
+	if (s1->vscript)
+	    vscript_apply_local(s1);
 
         if (!s1->static_link) {
             if (file_type & TCC_OUTPUT_EXE) {
@@ -3083,10 +3870,12 @@ static int elf_output_file(TCCState *s1, const char *filename)
 	    /* fill with initial data */
 	    tcc_eh_frame_hdr(s1, 0);
 #endif
+	    vscript_add_version_symbols(s1);
 	    dyninf.gnu_hash = create_gnu_hash(s1);
         } else {
             build_got_entries(s1, 0);
         }
+	version_def_add (s1, filename);
 	version_add (s1);
 
     textrel = set_sec_sizes(s1);
@@ -3222,7 +4011,18 @@ static int elf_output_obj(TCCState *s1, const char *filename)
 
 LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
 {
+    TCCState *s1 = s;
     s->nb_errors = 0;
+    if (s->nb_version_scripts) {
+        int ok = 0;
+#if !defined TCC_TARGET_PE && !defined TCC_TARGET_MACHO
+        ok = s->output_type == TCC_OUTPUT_EXE
+            || s->output_type == TCC_OUTPUT_DLL;
+#endif
+        if (!ok)
+            return tcc_error_noabort("--version-script is only supported "
+                "when linking an ELF executable or shared library");
+    }
     if (s->test_coverage)
         tcc_tcov_add_file(s, filename);
     if (s->output_type == TCC_OUTPUT_OBJ)

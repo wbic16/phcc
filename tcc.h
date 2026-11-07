@@ -834,6 +834,8 @@ struct TCCState {
     char *init_symbol; /* symbols to call at load-time (not used currently) */
     char *fini_symbol; /* symbols to call at unload-time (not used currently) */
     char *mapfile; /* create a mapfile (not used currently) */
+    char **version_scripts; /* --version-script=FILE (may be repeated) */
+    int nb_version_scripts;
 
     /* output type, see TCC_OUTPUT_XXX */
     int output_type;
@@ -989,6 +991,13 @@ struct TCCState {
     int dt_verneednum;
     Section *versym_section;
     Section *verneed_section;
+    /* version definitions from --version-script (see tccelf.c) */
+    int dt_verdefnum;
+    Section *verdef_section;
+    int verdef_next_index; /* first version index not used by a verdef */
+    int *dynsym_version; /* dynsym index -> version node ordinal + 1 (0 = none) */
+    int nb_dynsym_version;
+    struct vscript *vscript; /* parsed --version-script files */
 #endif
 
 #ifdef TCC_IS_NATIVE

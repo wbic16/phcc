@@ -29,13 +29,14 @@ from this file alone.
 | `slurp`-era versioning: `VERSION` | 1 line changed | Upstream `VERSION` (0.9.28rc) set to `1.0.0` — the fork's version identity from commit "Forking to v1.0". See rebase resolution R3. |
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
-| `tcc.h` | +48 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. |
+| `tcc.h` | +57 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
 | `tccgen.c` | +148 / −1 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +127 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). |
 | `tcctok.h` | +22 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). |
-| `libtcc.c` | +24 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. |
+| `libtcc.c` | +30 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. |
+| `tccelf.c` | +813 / −13 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
 | `include/float.h` | +30 | C11 `<float.h>` completion (F8): adds `FLT_EVAL_METHOD` (2 on i386, whose backend evaluates on the x87 stack; 0 on the other backends), the `FLT`/`DBL`/`LDBL_HAS_SUBNORM` family, the `*_DECIMAL_DIG` family, and the `*_TRUE_MIN` family. Additions only — no upstream line changed. See F8. |
@@ -620,6 +621,100 @@ structure; the fork's intent is carried, never dropped silently).
     Design views go STALE until regenerated; neither file is bound
     by a §A.3 state machine, and the libtcc1 proof receipts and
     assembly listings are untouched.
+- **F10 — `--version-script` support (2026-11-07).** PQ-3 from the
+  benchmark programme: the link driver rejected
+  `--version-script=<file>` outright ("unsupported linker option"),
+  which stopped OpenSSL's provider/libcrypto link steps. The option
+  is now implemented with real GNU ld semantics, not swallowed.
+  - *Grammar subset (the common subset real projects use):* named
+    version nodes and the anonymous node; `global:` / `local:`
+    symbol lists; literal names and glob patterns (`*`, `?`,
+    `[...]` including POSIX classes); quoted names; `extern "C"` /
+    `extern "C++"` language blocks (symbols join the enclosing
+    list); one version dependency per node (`NODE { … } PARENT;`);
+    comments (`/* */`, `//`, `#`); multiple `--version-script`
+    files merge. Errors, all hard (no output file, exit 1, GNU's
+    own wordings): syntax error with file:line; a pattern string
+    appearing in both a global and a local list anywhere
+    ("duplicate expression"); an anonymous node combined with any
+    other node; a dependency on an undefined node; an unreadable
+    script file; and a script requested for a non-link output
+    (`-c`, `-r`, object/PE/Mach-O) — never silently ignored.
+  - *Matching precedence* (each rule established against GNU ld
+    empirically before implementation): (1) exact literal in a
+    global list — first such node wins; (2) exact literal in any
+    local list — local beats wildcard global; (3) wildcard globals
+    — last matching node wins; (4) wildcard local in any node —
+    local; (5) otherwise plain global (versym 1). Symbols are not
+    implicitly localized.
+  - *Application, composed with machine #3 (LINKER RESOLUTION):*
+    `set_elf_sym`'s branch order is untouched. The script is parsed
+    at the top of `elf_output_file`; localization is a demote pass
+    over the output symtab after `resolve_common_syms` and before
+    `build_got`, demoting binding to STB_LOCAL in `.symtab` (so
+    linker-created symbols added later stay exempt, as with GNU
+    ld); version verdicts are recorded at the two existing export
+    points (`export_global_syms` for DLLs, `bind_libs_dynsyms` for
+    executables), keyed by dynsym index; the ABS version symbols
+    for named nodes are added just before `create_gnu_hash` so the
+    existing gnu-hash dynsym sort permutes their versym entries
+    with everything else. Dynsym names stay plain — readelf's
+    `name@@VER` rendering comes from VERSYM+VERDEF, as in GNU
+    output, so no hash-table format changes. VERDEF layout matches
+    GNU ld byte-for-byte on the probe corpus: entry 1 is the BASE
+    definition (SONAME if given, else the output basename), named
+    nodes follow in script order at indices 2, 3, … — all of them,
+    even with zero matching symbols — a dependency becomes an extra
+    verdaux, and `vd_hash` is the SysV elf_hash of the node name.
+    The versym index space is shared with VERNEED, definitions
+    allocated first; `version_add` was adjusted to allocate needed
+    versions after them, to never overwrite a definition's versym
+    entry, and to generate `.gnu.version_r` only when a needed
+    version was actually allocated (an empty verneed section with
+    a DT_VERNEED tag is rejected by glibc's loader — the guard
+    counts from the post-definition baseline, not from 2).
+  - *Evidence:* a 15-case probe corpus (named nodes with
+    dependency, wildcard assignment and ordering, literal-vs-
+    wildcard precedence both directions, local `*` inside a named
+    node, empty nodes, extern blocks, anonymous node, merged
+    scripts, a symbol named in a `global:` list but undefined,
+    executables with named scripts with and without
+    `--export-dynamic`) compared **byte-for-byte** against GNU ld
+    (dynsym bindings/types/version assignment, the full VERDEF
+    table, the DT tag set): all match; the only tolerated
+    differences are pre-existing tcc traits outside the version
+    observables (crt/UND surface, `name@plt` dynsym pseudo-entries,
+    NOTYPE on undefined imports). A consumer programme linked
+    against a phcc-built versioned library — by gcc and by phcc —
+    runs: direct versioned references resolve, the localized symbol
+    is absent from `dlsym`, `dlvsym` finds the symbol under its
+    node and not under the sibling node. OpenSSL 4.1.0 (benchmark
+    tree, verbatim recipe `linux-x86_64 no-tests no-asm no-shared`,
+    CC = this build): the previous failure point,
+    `providers/legacy.so` with `-Wl,--version-script=providers/
+    legacy.ld`, now links, exporting exactly `OSSL_provider_init`
+    as the script directs (gcc's legacy.so exports the same single
+    symbol); the build then stops at `apps/openssl` with
+    unresolved references to libcrypto functions — reproduced
+    identically with the pre-F10 baseline compiler, a separate
+    pre-existing archive-resolution limitation, not this change.
+    With `no-asm` and shared libraries the same tree builds
+    **completely**: `libcrypto.so.4`'s VERDEF is byte-identical to
+    the gcc build's (BASE + OPENSSL_4.0.0 + OPENSSL_4.1.0 with
+    parent), 5,693 OPENSSL-versioned defined exports in both,
+    zero defined-global leaks past `libcrypto.ld`'s lists, and the
+    resulting `apps/openssl` runs (SHA-256 digest verified against
+    the system tool). Upstream `make test` ALL TESTS PASSED;
+    conformance spot re-run unchanged at 328/333 with the same five
+    documented class-(b) divergences. Note for the phext: this
+    entry changes the Source scrolls of `tccelf.c`, `tcc.h` and
+    `libtcc.c`, so on the next phext refresh the binding for
+    machine #3 (tccelf.c — its documented resolution order is
+    unchanged; the demote pass and the export-point recording
+    compose after it and must be added to the machine's
+    description), the `tccelf.c` Design view, and the gate verdict
+    go STALE until regenerated; machines #1, #2 and #4 are
+    untouched.
 
 ## Maintenance rule
 
