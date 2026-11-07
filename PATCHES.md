@@ -33,6 +33,8 @@ from this file alone.
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
 | `tccgen.c` | +148 / −1 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
+| `tccasm.c` | +127 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). |
+| `tcctok.h` | +22 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). |
 | `libtcc.c` | +24 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -552,6 +554,72 @@ structure; the fork's intent is carried, never dropped silently).
     of the §A.3 machine files), so no machine binding moves; its
     Design view goes STALE on the next phext refresh until
     regenerated, as with any source change.
+- **F9 — tccasm.c / tcctok.h: the assembler accepts the CFI directive
+  family (2026-11-07).** PQ-2 of the benchmark patch queue.
+  - *Files:* `tccasm.c` (+127), `tcctok.h` (+22).
+  - *Change:* 22 `DEF_ASMDIR` tokens (`cfi_startproc`, `cfi_endproc`,
+    `cfi_sections`, `cfi_def_cfa`, `cfi_def_cfa_offset`,
+    `cfi_def_cfa_register`, `cfi_offset`, `cfi_rel_offset`,
+    `cfi_adjust_cfa_offset`, `cfi_register`, `cfi_restore`,
+    `cfi_undefined`, `cfi_same_value`, `cfi_return_column`,
+    `cfi_negate_ra_state`, `cfi_personality`, `cfi_lsda`,
+    `cfi_signal_frame`, `cfi_remember_state`, `cfi_restore_state`,
+    `cfi_escape`, `cfi_label`) and matching cases in
+    `asm_parse_directive`, with two operand helpers (`asm_cfi_reg`,
+    `asm_cfi_name`). Before this change every CFI directive was
+    `error: unknown opcode '.cfi_startproc'` — the first blocker in
+    all 42 of OpenSSL's perlasm files.
+  - *Semantics chosen — accept and ignore, stated plainly:* operands
+    are parsed and shape-validated, then the unwind data is
+    **dropped**; no `.eh_frame` content is emitted for assembler
+    input. TCC builds `.eh_frame` only from its own C-level debug
+    info (`tccdbg.c`), and that path is unaffected — C-level unwind
+    behaviour is unchanged. Emitting real FDEs from directives was
+    rejected: it needs a CFA state machine plus an `.eh_frame`
+    writer inside the assembler, a large and error-prone surface
+    producing data no TCC consumer reads. Consequence, also plainly:
+    exception unwinding *through hand-written assembler frames*
+    assembled by phcc has no CFI — the same limitation as any
+    assembler input TCC accepted before, now without the hard error.
+  - *Validation level:* operand kind (register = `[%]name` or DWARF
+    number; offsets are full asm integer expressions, signs
+    included), operand count, comma placement and end-of-line are
+    all enforced; `.cfi_escape` operands must fit a byte;
+    `.cfi_startproc` admits only the bare form or `simple`.
+    Register names are checked for kind, not for existence on the
+    target — the value is not emitted, so a misspelt name in a
+    dropped annotation cannot corrupt output. A CFI directive TCC
+    does not implement (e.g. `.cfi_def_cfa_expression`) still errors
+    as an unknown opcode; nothing is silently misparsed.
+  - *Evidence:* the PQ-2 reproducer (perlasm-shaped, from
+    `~/workspace/phcc-bench/repro/openssl/repro-1.s`) and a torture
+    file exercising every implemented directive: both assemble under
+    phcc with `.text` bytes **identical to GAS**, link under both
+    TCC's linker and GNU ld, and run with identical output
+    (`repro=0 torture=7 simple=3`). Eight malformed-input cases
+    (bad `simple` operand, missing register, missing comma,
+    out-of-range `.cfi_escape` byte, missing operand, truncated
+    `.cfi_personality`, unimplemented directive, trailing junk) all
+    error with precise messages. Upstream `make test` ALL TESTS
+    PASSED; conformance corpus spot re-run unchanged (328/333,
+    diverge set `[a_pp_018, b_gnu_009, b_gnu_015, b_gnu_016,
+    b_gnu_020]`, 0 oracle splits). OpenSSL 4.1.0 (benchmark recipe,
+    `Configure linux-x86_64 no-tests`, `make -j8 build_sw`): the
+    CFI blocker is eliminated in all 42 perlasm files — each file
+    now advances to its *next* blocker, classified with verified
+    minimal reproducers in `~/workspace/phcc-pq2/repro-next/`:
+    `.section …, #alloc` flag syntax (22 files, first error),
+    the PQ-8 SSE opcode/register cluster (`movdqu`, `movdqa`,
+    `pinsrw`, `xorps`, `pshufd`; `%xmm8`–`%xmm15` missing from the
+    register table), `.comm` unimplemented (x86_64cpuid.s), and
+    the base-less SIB operand `(,reg,scale)` (x86_64-gf2m.s).
+    Full OpenSSL completion remains bounded by those items and by
+    PQ-3 (`--version-script`). Note for the phext: this entry
+    changes the Source scrolls of `tccasm.c` and `tcctok.h`, so on
+    the next phext refresh those files' Volume 3 segmentations and
+    Design views go STALE until regenerated; neither file is bound
+    by a §A.3 state machine, and the libtcc1 proof receipts and
+    assembly listings are untouched.
 
 ## Maintenance rule
 

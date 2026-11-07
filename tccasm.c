@@ -508,6 +508,51 @@ static void pop_section(TCCState *s1)
     use_section1(s1, prev);
 }
 
+/* CFI directive operands (F9): parsed and shape-validated, then discarded.
+   TCC builds .eh_frame only from its own C-level debug info (tccdbg.c);
+   unwind annotations in hand-written assembler carry no information the
+   code generator can use, so -- like GAS sources assembled for a consumer
+   that ignores them -- they are accepted and dropped.  Malformed operands
+   are still errors: nothing here may silently derail the token stream.
+   Register operands are checked for kind ([%]name or DWARF number), not
+   for existence on the target, since the value is not emitted. */
+static void asm_cfi_reg(TCCState *s1)
+{
+    if (tok == '%')
+        next();
+    if (tok == TOK_PPNUM) {
+        /* DWARF register number (aarch64/riscv compiler output) */
+        next();
+        return;
+    }
+    if (tok >= TOK_IDENT) {
+        next();
+        return;
+    }
+    tcc_error("register expected in .cfi directive");
+}
+
+static void asm_cfi_name(TCCState *s1)
+{
+    /* a symbol name, possibly dotted (DW.ref.__gxx_personality_v0),
+       a local label (.Lfoo), or 0 for "none" (.cfi_personality) */
+    if (tok == TOK_PPNUM) {
+        next();
+        return;
+    }
+    if (tok == '.')
+        next();
+    if (tok < TOK_IDENT)
+        tcc_error("symbol expected in .cfi directive");
+    next();
+    while (tok == '.') {
+        next();
+        if (tok < TOK_IDENT)
+            tcc_error("symbol expected in .cfi directive");
+        next();
+    }
+}
+
 static void asm_parse_directive(TCCState *s1, int global)
 {
     int n, offset, v, size, tok1, c;
@@ -1057,6 +1102,88 @@ static void asm_parse_directive(TCCState *s1, int global)
 	    next();
 	}
 	break;
+    /* CFI directives: accepted, operands validated, data dropped (F9) */
+    case TOK_ASMDIR_cfi_startproc:
+        next();
+        if (tok >= TOK_IDENT) {
+            if (strcmp(get_tok_str(tok, NULL), "simple"))
+                tcc_error("invalid .cfi_startproc operand '%s'",
+                          get_tok_str(tok, NULL));
+            next();
+        }
+        break;
+    case TOK_ASMDIR_cfi_endproc:
+    case TOK_ASMDIR_cfi_remember_state:
+    case TOK_ASMDIR_cfi_restore_state:
+    case TOK_ASMDIR_cfi_negate_ra_state:
+        next();
+        break;
+    case TOK_ASMDIR_cfi_sections:
+        next();
+        for(;;) {
+            if (tok == TOK_STR || tok >= TOK_IDENT)
+                next();
+            else
+                tcc_error("section name expected in .cfi_sections");
+            if (tok != ',')
+                break;
+            next();
+        }
+        break;
+    case TOK_ASMDIR_cfi_def_cfa:
+    case TOK_ASMDIR_cfi_offset:
+    case TOK_ASMDIR_cfi_rel_offset:
+        next();
+        asm_cfi_reg(s1);
+        skip(',');
+        asm_int_expr(s1);
+        break;
+    case TOK_ASMDIR_cfi_register:
+        next();
+        asm_cfi_reg(s1);
+        skip(',');
+        asm_cfi_reg(s1);
+        break;
+    case TOK_ASMDIR_cfi_def_cfa_register:
+    case TOK_ASMDIR_cfi_restore:
+    case TOK_ASMDIR_cfi_undefined:
+    case TOK_ASMDIR_cfi_same_value:
+    case TOK_ASMDIR_cfi_return_column:
+        next();
+        asm_cfi_reg(s1);
+        break;
+    case TOK_ASMDIR_cfi_def_cfa_offset:
+    case TOK_ASMDIR_cfi_adjust_cfa_offset:
+        next();
+        asm_int_expr(s1);
+        break;
+    case TOK_ASMDIR_cfi_personality:
+    case TOK_ASMDIR_cfi_lsda:
+        next();
+        asm_int_expr(s1);
+        skip(',');
+        asm_cfi_name(s1);
+        break;
+    case TOK_ASMDIR_cfi_signal_frame:
+        next();
+        if (tok != ';' && tok != TOK_LINEFEED && tok != TOK_EOF)
+            asm_cfi_reg(s1);
+        break;
+    case TOK_ASMDIR_cfi_escape:
+        next();
+        for(;;) {
+            n = asm_int_expr(s1);
+            if (n < 0 || n > 255)
+                tcc_error(".cfi_escape operand %d out of byte range", n);
+            if (tok != ',')
+                break;
+            next();
+        }
+        break;
+    case TOK_ASMDIR_cfi_label:
+        next();
+        asm_cfi_name(s1);
+        break;
     default:
         tcc_error("unknown assembler directive '.%s'", get_tok_str(tok, NULL));
         break;
