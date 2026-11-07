@@ -31,6 +31,18 @@ unnecessary (Will, 2026-11-07) — the gate stays report-only;
 conformance is reported, it never blocks. D4 likewise: the
 external gate is the architecture.
 
+Gate v8.1.0 (F5 refresh, 2026-11-07) adds ONE section to v8.0.0:
+the conformance section (conformance programme design §6),
+checking the Tests Book 11 placement (probe hashes against the
+slice-1 manifest, divergence classifications complete, class-(a)
+cross-references, the MSVC manual-attestation field). Every prior
+section's logic is byte-identical to v8.0.0 (splice proof in the
+refresh workdir). The refresh re-bound the tccpp.c/tccgen.c
+Source scrolls to the F5 fix (commit e399b212), so the machine
+sections' live checkers and register bindings re-verify against
+the new source; the verdict moves to Meta Sec 20, and the
+grand-merge verdict (Sec 19) joins the historical exclusion set.
+
 Determinism: the verdict content contains no timestamps and no
 run-specific data, and its checked-scroll hash list EXCLUDES the
 verdict scroll's own coordinate — so re-running the gate on a phext
@@ -64,14 +76,18 @@ import phext_io
 # Sec 16, slice7 Sec 17) were NOT carried into the merged file —
 # those sections hold content here (addendum, machine-#4 register,
 # machine-#3 register) and must count as the content they are.
-TOOL_VERSION = "phcc_gate.py 8.0.0 (grand merge: slice6 + slice7 + builds)"
-VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 19, 1)  # Grand-merge verdict: Meta, Vol 2, Book 10, Sec 19
+# Gate v8.1.0: the grand-merge verdict (Sec 19) joins the set as
+# history; this gate's verdict sits at Sec 20.
+TOOL_VERSION = "phcc_gate.py 8.1.0 (F5 refresh: source re-bind + conformance section)"
+VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 20, 1)  # F5-refresh verdict: Meta, Vol 2, Book 10, Sec 20
+GRAND_MERGE_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 19, 1)  # Gate v8.0.0 verdict (never evidence)
 SLICE5_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 12, 1)  # Slice 5 verdict (never evidence)
 SLICE4_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 9, 1)  # Slice 4 verdict (never evidence)
 SLICE3_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 7, 1)  # Slice 3 verdict (never evidence)
 SLICE2_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 5, 1)  # Slice 2 verdict (never evidence)
 SLICE1_VERDICT_COORD = (1, 1, 1, 1, 2, 10, 1, 4, 1)  # Slice 1 verdict (never evidence)
-ALL_VERDICT_COORDS = (VERDICT_COORD, SLICE5_VERDICT_COORD, SLICE4_VERDICT_COORD,
+ALL_VERDICT_COORDS = (VERDICT_COORD, GRAND_MERGE_VERDICT_COORD,
+                      SLICE5_VERDICT_COORD, SLICE4_VERDICT_COORD,
                       SLICE3_VERDICT_COORD, SLICE2_VERDICT_COORD,
                       SLICE1_VERDICT_COORD)
 PHASE_NAMES = {1: "Meta", 2: "Requirements", 3: "Design", 4: "Source",
@@ -125,7 +141,7 @@ def pct(n, d):
 def tables_text(per_book, artifacts, gaps, t1_eligible,
                 receipted=None, proof_notes=None, design=None,
                 machine=None, machine2=None, machine3=None,
-                machine4=None, assembly=None):
+                machine4=None, assembly=None, conformance=None):
     receipted = receipted or {}
     proof_notes = proof_notes or {}
     design = design or {"checked": 0, "current": [], "stale": []}
@@ -190,15 +206,18 @@ def tables_text(per_book, artifacts, gaps, t1_eligible,
     if assembly:
         lines.append("")
         lines.extend(assembly)
+    if conformance:
+        lines.append("")
+        lines.extend(conformance)
     return "\n".join(lines)
 
 
 def verdict_text(scrolls, artifacts, per_book, gaps, t1_eligible,
                  receipted=None, proof_notes=None, design=None,
                  machine=None, machine2=None, machine3=None,
-                 machine4=None, assembly=None):
+                 machine4=None, assembly=None, conformance=None):
     lines = []
-    lines.append("# phcc gate verdict - Grand merge (Slice 6 + Slice 7 + builds)")
+    lines.append("# phcc gate verdict - F5 refresh + conformance placement (gate v8.1.0)")
     lines.append(f"tool: {TOOL_VERSION}")
     lines.append("mode: REPORT-ONLY")
     lines.append("status: REPORT")
@@ -207,7 +226,7 @@ def verdict_text(scrolls, artifacts, per_book, gaps, t1_eligible,
     lines.append("")
     lines.append(tables_text(per_book, artifacts, gaps, t1_eligible,
                              receipted, proof_notes, design, machine, machine2,
-                             machine3, machine4, assembly))
+                             machine3, machine4, assembly, conformance))
     lines.append("")
     lines.append("per-artifact Tests-phase gaps (artifacts with no Tests "
                  "scroll at their 5D address):")
@@ -833,6 +852,215 @@ def assembly_section(scrolls):
     return lines
 
 
+# ---------------------------------------------------------------------------
+# Conformance programme (design §6): report-only section, added in
+# gate v8.1.0 — the only new section logic in this gate version.
+# Checks the Tests Book 11 placement:
+#   (i)   the manifest and results scrolls (Ch 9 Secs 3/4, verbatim)
+#         hash to the slice-1 run bindings the receipt names, and
+#         every placed probe scroll's bytes hash to the value the
+#         manifest records for it (cross-checked against its
+#         per-probe record);
+#   (ii)  every currently-divergent probe record carries a
+#         classification in {(a), (b), (c)} with evidence;
+#   (iii) class-(a) records cross-reference a fix commit and a
+#         Regression scroll that exists;
+#   (iv)  the MSVC attestation field is well-formed: NOT ATTESTED,
+#         or ATTESTED with designated signer + date + in-scope
+#         manifest hash. The automated gate can only ever REPORT
+#         this column (design §4); it never attests.
+# Verdict vocabulary (design §6): CURRENT (no current divergences),
+# STALE (a binding moved), DIVERGENT-CLASSIFIED (divergences exist,
+# all classified — reported, not hidden), UNCLASSIFIED (a divergence
+# without classification; refuses CURRENT). Report-only throughout.
+
+CONF_RECEIPT_COORD = (1, 1, 1, 5, 2, 11, 9, 1, 1)
+CONF_ATTEST_COORD = (1, 1, 1, 5, 2, 11, 9, 2, 1)
+CONF_MANIFEST_COORD = (1, 1, 1, 5, 2, 11, 9, 3, 1)
+CONF_RESULTS_COORD = (1, 1, 1, 5, 2, 11, 9, 4, 1)
+CONF_MANIFEST_SHA256 = "c6eebb8a0146406373cb8bf9578455586148c696340f3b9b04c6dcbf63539cbb"
+CONF_RESULTS_SHA256 = "b3c23baef07298f7b9dea32475533f4bc59666f8814595c112daa3463027cf97"
+
+
+def conformance_section(scrolls):
+    import json as _json
+    lines = ["conformance (phcc conformance programme, design §6; "
+             "report-only, flags never block):"]
+    receipt_b = scrolls.get(CONF_RECEIPT_COORD)
+    if receipt_b is None:
+        lines.append("  run receipt: absent at "
+                     + phext_io.fmt(CONF_RECEIPT_COORD)
+                     + " — no conformance corpus placed")
+        return lines
+    receipt = receipt_b.decode("utf-8", "replace")
+    rkv = _kv(receipt)
+    problems = []
+
+    # (i) run bindings: manifest / results scrolls vs the receipt
+    man_b = scrolls.get(CONF_MANIFEST_COORD)
+    res_b = scrolls.get(CONF_RESULTS_COORD)
+    man_ok = (man_b is not None
+              and phext_io.sha256(man_b) == CONF_MANIFEST_SHA256
+              and rkv.get("manifest-sha256") == CONF_MANIFEST_SHA256)
+    res_ok = (res_b is not None
+              and phext_io.sha256(res_b) == CONF_RESULTS_SHA256
+              and rkv.get("results-sha256") == CONF_RESULTS_SHA256)
+    lines.append(f"  run receipt: {phext_io.fmt(CONF_RECEIPT_COORD)} "
+                 f"(slice 1 run 2 + F5 verification re-run)")
+    lines.append(f"  manifest: sha256 {CONF_MANIFEST_SHA256[:16]}... "
+                 f"({'MATCH' if man_ok else 'MISMATCH'} — scroll "
+                 f"{phext_io.fmt(CONF_MANIFEST_COORD)} verbatim, "
+                 f"receipt-named value agrees)")
+    lines.append(f"  results: sha256 {CONF_RESULTS_SHA256[:16]}... "
+                 f"({'MATCH' if res_ok else 'MISMATCH'} — scroll "
+                 f"{phext_io.fmt(CONF_RESULTS_COORD)} verbatim, "
+                 f"receipt-named value agrees)")
+    if not man_ok:
+        problems.append("STALE: manifest scroll hash or receipt-named "
+                        "manifest hash does not match the run binding")
+    if not res_ok:
+        problems.append("STALE: results scroll hash or receipt-named "
+                        "results hash does not match the run binding")
+
+    # per-probe records (Ch 9 Sec 1, Scrolls 2+)
+    records = {}
+    for coord, content in scrolls.items():
+        if coord[:8] == (1, 1, 1, 5, 2, 11, 9, 1) and coord[8] >= 2 \
+                and content.startswith(
+                    b"# phcc conformance probe record"):
+            kv = _kv(content.decode("utf-8", "replace"))
+            if kv.get("probe"):
+                records[kv["probe"]] = (content.decode("utf-8", "replace"),
+                                        kv)
+    placed = sum(1 for c, s in scrolls.items()
+                 if c[:6] == (1, 1, 1, 5, 2, 11) and c[6] in (1, 2, 3)
+                 and c[8] >= 2 and s)
+    hash_ok = 0
+    agree = resolved = divergent = unclassified = 0
+    class_count = {"(a)": 0, "(b)": 0, "(c)": 0}
+    if man_b is not None:
+        try:
+            manifest = _json.loads(man_b.decode("utf-8"))
+        except Exception:
+            manifest = None
+            problems.append("STALE: manifest scroll is not parseable JSON")
+    else:
+        manifest = None
+    if manifest is not None:
+        for e in manifest:
+            name = e["name"]
+            rec = records.get(name)
+            if rec is None:
+                problems.append(f"missing per-probe record: {name}")
+                continue
+            text, kv = rec
+            try:
+                pcoord = phext_io.parse_coord(kv.get("coordinate", ""))
+            except Exception:
+                pcoord = None
+            body = scrolls.get(pcoord) if pcoord else None
+            if body is not None and phext_io.sha256(body) == e["sha256"] \
+                    and kv.get("probe-sha256") == e["sha256"]:
+                hash_ok += 1
+            else:
+                problems.append(f"probe hash mismatch: {name}")
+            cur = kv.get("current", "")
+            if cur.startswith("agree (divergence resolved"):
+                agree += 1
+                resolved += 1
+            elif cur == "agree":
+                agree += 1
+            elif cur == "divergent-classified":
+                cls = kv.get("classification", "")
+                head = cls[:3]
+                if head in class_count and "evidence:" in text:
+                    class_count[head] += 1
+                    divergent += 1
+                else:
+                    unclassified += 1
+                    problems.append(
+                        f"UNCLASSIFIED divergence: {name} "
+                        f"(classification {cls!r})")
+            else:
+                unclassified += 1
+                problems.append(f"UNCLASSIFIED: record for {name} has "
+                                f"no readable current status")
+            # (iii) class-(a) cross-references (open or resolved)
+            if kv.get("classification", "").startswith("(a)"):
+                if "fix:" not in text:
+                    problems.append(f"class-(a) record lacks a fix "
+                                    f"cross-reference: {name}")
+                m = re.search(r"Regressions (\d+\.\d+\.\d+/\d+\.\d+\.\d+/"
+                              r"\d+\.\d+\.\d+)", text)
+                if not m or not scrolls.get(
+                        phext_io.parse_coord(m.group(1))):
+                    problems.append(f"class-(a) record's Regression "
+                                    f"scroll missing: {name}")
+    lines.append(f"  corpus: {placed} probe scrolls placed in Tests "
+                 f"Book 11 (Ch 1 Tier A / Ch 2 Tier B / Ch 3 Tier C); "
+                 f"probe hashes verified against the manifest: "
+                 f"{hash_ok}/{len(manifest) if manifest else 0}")
+    lines.append(f"  per-probe records: {len(records)} "
+                 f"(Ch 9 Sec 1, Scrolls 2..)")
+    lines.append(f"  three-way agreement (current): {agree}/"
+                 f"{len(manifest) if manifest else 0} "
+                 f"({resolved} class-(a) divergences resolved by F5 "
+                 f"commit e399b212 and counted as agreeing)")
+    lines.append(f"  divergences: {divergent} current, all "
+                 f"classified ((a) open {class_count['(a)']}, "
+                 f"(b) {class_count['(b)']}, (c) {class_count['(c)']}); "
+                 f"unclassified: {unclassified}")
+
+    # (iv) MSVC attestation field
+    att_b = scrolls.get(CONF_ATTEST_COORD)
+    if att_b is None:
+        problems.append("MSVC attestation scroll absent at "
+                        + phext_io.fmt(CONF_ATTEST_COORD))
+        lines.append("  MSVC: MANUAL — attestation scroll ABSENT")
+    else:
+        att = att_b.decode("utf-8", "replace")
+        if "mode: manual-attestation" not in att:
+            problems.append("MSVC attestation scroll lacks "
+                            "'mode: manual-attestation'")
+        if "status: NOT ATTESTED" in att:
+            lines.append("  MSVC: MANUAL — NOT ATTESTED (attestation "
+                         f"scroll {phext_io.fmt(CONF_ATTEST_COORD)}; "
+                         "designated signer Will Bickford; scope = "
+                         "manifest sha256 + phcc commit 94898ff9; the "
+                         "runner never writes this column)")
+        elif "status: ATTESTED" in att:
+            akv = _kv(att)
+            if akv.get("signer") and akv.get("date") and \
+                    CONF_MANIFEST_SHA256 in att:
+                lines.append(f"  MSVC: MANUAL — ATTESTED "
+                             f"({akv.get('signer')}, {akv.get('date')}; "
+                             f"scope in-manifest)")
+            else:
+                problems.append("MSVC attestation claims ATTESTED "
+                                "without signer + date + in-scope "
+                                "manifest hash")
+                lines.append("  MSVC: MANUAL — ATTESTED (MALFORMED)")
+        else:
+            problems.append("MSVC attestation scroll has no readable "
+                            "status")
+            lines.append("  MSVC: MANUAL — status unreadable")
+    for p in problems:
+        lines.append(f"  {p}")
+    if unclassified:
+        status = "UNCLASSIFIED (a divergence lacks classification; " \
+                 "the section refuses CURRENT)"
+    elif problems:
+        status = "STALE (a conformance binding moved; see above)"
+    elif divergent:
+        status = ("DIVERGENT-CLASSIFIED (divergences exist, all "
+                  "classified — reported, not hidden)")
+    else:
+        status = "CURRENT (receipt matches the placed corpus; no " \
+                 "current divergences)"
+    lines.append(f"  status: {status}")
+    return lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("phext")
@@ -852,15 +1080,16 @@ def main():
     machine3 = machine3_section(scrolls, a.phext)
     machine4 = machine4_section(scrolls, a.phext)
     assembly = assembly_section(scrolls)
+    conformance = conformance_section(scrolls)
     if not a.quiet:
         print(f"gate input: {a.phext}")
         print(tables_text(per_book, artifacts, gaps, t1_eligible,
                           receipted, proof_notes, design, machine, machine2,
-                          machine3, machine4, assembly))
+                          machine3, machine4, assembly, conformance))
     if a.verdict_out:
         verdict = verdict_text(scrolls, artifacts, per_book, gaps, t1_eligible,
                                receipted, proof_notes, design, machine, machine2,
-                               machine3, machine4, assembly)
+                               machine3, machine4, assembly, conformance)
         out = dict(scrolls)
         out[VERDICT_COORD] = verdict
         blob = phext_io.implode(out)
