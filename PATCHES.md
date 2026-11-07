@@ -33,6 +33,11 @@ from this file alone.
 | `tccpp.c` | +109 / −1 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input and maintains the per-file counters / state totals declared in `tcc.h`. |
 | `libtcc.c` | +6 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
+| `phext/phext.h` | new, +380 | Public header for the phext developer library (F2): every type, constant, and function of the libphext-rs 0.4.1 parity surface, documented. C99, no dependencies beyond libc types. |
+| `phext/phext.c` | new, +1,921 | The library implementation (F2), including a scalar XXH3-128 port (from xxhash-rust's const implementation) for scroll checksums. Single translation unit. |
+| `phext/PARITY.md` | new, +233 | The parity audit: all 77 libphext-rs capabilities mapped to their C counterparts, the idiom mapping, divergences D-2…D-6, and the conformance outcome. |
+| `phext/README.md` | new, +54 | Library overview, build/test instructions (including the phcc dogfood invocation), and the idiom-mapping summary. |
+| `phext/tests/` | new, +2,042 | The conformance suite: `test_phext.c` (+1,853) — libphext-rs's own test_lib.rs / test_phokenize.rs / regressions.rs ported case-for-case; `Makefile` (+22); the two regression-1 fixtures (helios phext + message text, +167 lines between them). |
 
 ## Rebase resolution log (Slice 0, 2026-11-07)
 
@@ -99,6 +104,45 @@ structure; the fork's intent is carried, never dropped silently).
     upstream suite, WP before/after) is recorded in
     `~/workspace/phcc-lshrdi3/REPORT.md`. Upstream report is prepared
     but deliberately not yet sent.
+
+- **F2 — phext/: libphext-rs API-parity developer library (2026-11-07).**
+  - *Files:* new top-level `phext/` directory — `phext.h`, `phext.c`,
+    `PARITY.md`, `README.md`, and `tests/` (harness, Makefile, regression
+    fixtures). Additive only: no existing compiler file is touched by
+    this change (PATCHES.md itself aside).
+  - *Change:* a C99 port of libphext-rs **v0.4.1** (`src/phext.rs`), so a
+    C developer gets everything the Rust crate gives a Rust developer:
+    9-dimensional coordinates (1-based, **no upper bound** — the 999 cap
+    was removed upstream in 0.4.0), scroll fetch / insert / replace /
+    remove, phokenize, explode / implode, merge / subtract, expand /
+    contract, normalize, range replace, next_scroll iteration, textmap /
+    navmap / manifest, index / offset, and XXH3-128 scroll checksums.
+    The audit found **77 capabilities — 26 constants, 7 types, 17
+    Coordinate-surface items, 27 free functions — and all 77 have C
+    counterparts** (full matrix in `phext/PARITY.md`).
+  - *Idioms and divergences:* Rust `String` → `phext_buffer` out-params;
+    `HashMap` → coordinate-sorted `phext_scrolls` with
+    `phext_map_get`/`phext_map_insert`; `Result`/panics → `phext_status`
+    return codes, never UB on bad input. Recorded divergences: D-2 strict
+    coordinate parse returns `PHEXT_EFORMAT`/`PHEXT_ENUMBER` where Rust's
+    `TryFrom` panics on non-numeric/overflowing components; D-3 the C API
+    is byte-oriented and does not validate UTF-8 (byte-identical on valid
+    UTF-8); D-4 the map is sorted (Rust's is unordered; `implode` output
+    identical); D-5 scroll-summary display truncation at byte 4; D-6 the
+    lenient `to_coordinate` wraps on overflow like Rust release builds.
+  - *Relation to the seed phext surface:* the preprocessor's nine break
+    tokens and per-level counters (`tcc.h`/`tccpp.c`) are unchanged and
+    stay independent. Wiring those counters to this library is a named
+    follow-on (F3-candidate), deliberately not done here.
+  - *Evidence:* libphext-rs's own tests ported to C with the same vectors
+    and expected values (49 + 8 + 1 test functions): **163,831 checks, 0
+    failures under gcc, and 163,831 checks, 0 failures compiled by the
+    freshly built phcc itself** (aletheia-core; phcc's own `make test`
+    also passes). Differential fuzz against a Rust reference driver on
+    libphext-rs 0.4.1: **40,000 randomized cases, 0 divergences** on
+    defined behaviour (the only Rust panics are the D-2 parse class).
+    Run via `phext/tests/Makefile` (`make test`, or
+    `make CC=../../tcc TCCFLAGS=-B../.. test` for the dogfood build).
 
 ## Maintenance rule
 
