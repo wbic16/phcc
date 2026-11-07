@@ -570,6 +570,25 @@ static void dwarf_reloc(Section *s, int sym, int rel)
     put_elf_reloca(symtab_section, s, s->data_offset, rel, sym, 0);
 }
 
+/* As dwarf_reloc, but with the addend recorded in the relocation entry
+   itself.  A RELA consumer resolves a relocation from r_addend alone and
+   ignores the contents of the relocated field, so a value that has to
+   reach the final link (such as an FDE's PC Begin offset into .text)
+   must travel in the entry; keeping it only in the field makes every
+   such relocation resolve as if the addend were zero.  On REL targets
+   the addend lives in the field contents instead (put_elf_reloca
+   rejects one), so the entry is emitted as in dwarf_reloc and the
+   caller keeps the value in the field. */
+static void dwarf_reloca(Section *s, int sym, int rel, addr_t addend)
+{
+    TCCState *s1 = s->s1;
+#if SHT_RELX == SHT_RELA
+    put_elf_reloca(symtab_section, s, s->data_offset, rel, sym, addend);
+#else
+    put_elf_reloca(symtab_section, s, s->data_offset, rel, sym, 0);
+#endif
+}
+
 static void free_str(struct dwarf_str_hash **str)
 {
     int i;
@@ -890,17 +909,21 @@ static void tcc_debug_frame_end(TCCState *s1, int size)
     dwarf_data4(eh_frame_section,
 		fde_start - s1->eh_start + 4); // CIE Pointer
 #if defined TCC_TARGET_I386
-    dwarf_reloc(eh_frame_section, eh_section_sym, R_386_PC32);
+    dwarf_reloca(eh_frame_section, eh_section_sym, R_386_PC32, func_ind);
 #elif defined TCC_TARGET_X86_64
-    dwarf_reloc(eh_frame_section, eh_section_sym, R_X86_64_PC32);
+    dwarf_reloca(eh_frame_section, eh_section_sym, R_X86_64_PC32, func_ind);
 #elif defined TCC_TARGET_ARM
-    dwarf_reloc(eh_frame_section, eh_section_sym, R_ARM_REL32);
+    dwarf_reloca(eh_frame_section, eh_section_sym, R_ARM_REL32, func_ind);
 #elif defined TCC_TARGET_ARM64
-    dwarf_reloc(eh_frame_section, eh_section_sym, R_AARCH64_PREL32);
+    dwarf_reloca(eh_frame_section, eh_section_sym, R_AARCH64_PREL32, func_ind);
 #elif defined TCC_TARGET_RISCV64
-    dwarf_reloc(eh_frame_section, eh_section_sym, R_RISCV_32_PCREL);
+    dwarf_reloca(eh_frame_section, eh_section_sym, R_RISCV_32_PCREL, func_ind);
 #endif
+#if SHT_RELX == SHT_RELA
+    dwarf_data4(eh_frame_section, 0); // PC Begin (offset in reloc addend)
+#else
     dwarf_data4(eh_frame_section, func_ind); // PC Begin
+#endif
     dwarf_data4(eh_frame_section, size); // PC Range
     dwarf_data1(eh_frame_section, 0); // Augmentation Length
 #if defined TCC_TARGET_I386

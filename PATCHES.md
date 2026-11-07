@@ -32,6 +32,7 @@ from this file alone.
 | `tcc.h` | +48 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). |
 | `tccgen.c` | +148 / −1 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. |
+| `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `libtcc.c` | +24 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -340,6 +341,64 @@ structure; the fork's intent is carried, never dropped silently).
     files' Design views go STALE until regenerated; machine #3
     (tccelf.c), the libtcc1 proof receipts and the assembly
     listings are untouched.
+
+- **F6 — `.eh_frame` FDE PC Begin travels in the relocation addend
+  (2026-11-07).** Patch-queue item PQ-1 from the benchmark pass
+  (tasks 37.5.7/6.5.9/5.5.9 and 27.6.10/8.6.13/6.6.10): GNU ld
+  rejected every phcc object containing ≥2 functions with
+  `.eh_frame_hdr refers to overlapping FDEs` / `final link failed:
+  bad value` — blocking zlib's default (shared) build and, by
+  construction, any GNU-ld link of phcc objects (the normal case
+  for autotools shared libraries). Root cause, established from
+  the source and from the emitted bytes: in `tccdbg.c`,
+  `tcc_debug_frame_end()` emitted each FDE's PC Begin relocation
+  through `dwarf_reloc()`, which hardcodes addend 0 in
+  `put_elf_reloca()`, and wrote the function's `.text` offset
+  (`func_ind`) into the field contents — the REL convention. On
+  RELA targets (all 64-bit targets) a consumer resolves a
+  relocation from `r_addend` alone and ignores the field contents,
+  so every FDE's initial location resolved as if its function
+  started at `.text + 0` (`readelf --debug-dump=frames`: two
+  functions, both `pc=0..size`; gcc's are contiguous). phcc's own
+  linker never noticed: it builds `.eh_frame_hdr` after applying
+  the same relocations and performs no overlap validation, so its
+  executables silently carried the same wrong FDE addresses.
+  Fix: a new `dwarf_reloca()` beside `dwarf_reloc()` records the
+  addend in the relocation entry on RELA targets; on REL targets
+  it degrades to `dwarf_reloc()` (`put_elf_reloca` rejects an
+  addend there, and the field-contents convention is the correct
+  one). `tcc_debug_frame_end()` now passes `func_ind` as the
+  addend on all five targets (i386, x86_64, arm, arm64, riscv64)
+  and writes 0 in the PC Begin field on RELA (`func_ind` on REL)
+  — structurally identical to gas/gcc output, whose addends read
+  `.text + <function offset>` over zeroed fields. Evidence: the
+  PQ-1 reproducer (two trivial functions) now links under GNU ld
+  as both an executable and a shared object and runs correctly;
+  `readelf` shows FDE ranges contiguous and per-function correct
+  (`0..0x1d`, `0x1d..0x3f`; a three-function case gives
+  `0..0x12`, `0x12..0x63`, `0x63..0xa9`), and the relocation
+  addends match gcc's pattern. zlib 1.4 builds under phcc with
+  the benchmark's verbatim recipes **both** ways — default
+  (`libz.so.1.4` produced; the step that failed before) and
+  `--static` — and `make test` reports "zlib test OK" in both.
+  Upstream `make test` ALL TESTS PASSED; a self-host build (phcc
+  built by the fixed phcc) builds and passes ALL TESTS PASSED,
+  and in a phcc-linked executable the FDEs now sit at the real
+  function addresses. Conformance corpus re-run: 328/333
+  three-way agreement, the diverge set identical to the post-F5
+  baseline (the five documented class-(b) probes) — no
+  classification changed. Companion finding, deliberately NOT
+  fixed here: phcc objects still lack `.note.GNU-stack` (a GNU
+  ld warning that rides along in the same logs). That section is
+  an object-writer concern in `tccelf.c`, a separate code path
+  from FDE emission in `tccdbg.c`; it wants its own entry and
+  its own decision. Note for the phext: this entry changes the
+  Source scroll of `tccdbg.c` only (and adds one member,
+  `dwarf_reloca`) — on the next phext refresh, `tccdbg.c`'s
+  Design view and Volume 3 segmentation go STALE until
+  regenerated. `tccelf.c` is untouched, so machine #3's binding
+  stays CURRENT, as do the libtcc1 proof receipts, the assembly
+  listings, and the Library-10000 build region.
 
 ## Maintenance rule
 
