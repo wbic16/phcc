@@ -43,6 +43,15 @@ static int nb_sym_pools;
 
 static Sym *all_cleanups, *pending_gotos;
 static int local_scope;
+/* 'aligned' attribute carried by the type named in a sizeof/_Alignof
+   type-id (snapshotted in unary() before type_decl can overwrite it);
+   consumed by the _Alignof handler, which cannot see it in the CType */
+static int sotype_aligned;
+/* 'aligned' attribute contributed by the typedef merged in the most
+   recent parse_btype() call (0 if none); struct_decl reads it to tell
+   type-carried alignment apart from declarator attributes, which
+   parse_btype's own attribute cases merge into the same AttributeDef */
+static int typedef_aligned;
 ST_DATA char debug_modes;
 
 ST_DATA SValue *vtop;
@@ -4486,9 +4495,14 @@ static void struct_decl(CType *type, int u)
 {
     int v, c, size, align, flexible;
     int bit_size, bsize, bt, ut;
+    int btype_aligned, btype_da;
     Sym *s, *ss, **ps;
     AttributeDef ad, ad1;
     CType type1, btype;
+    /* fields with a declarator-side 'aligned' attribute (and its value),
+       for the post-brace 'packed' correction after the member loop */
+    Sym **da_f = NULL;
+    int *da_v = NULL, nb_da = 0, sz_da = 0;
 
     memset(&ad, 0, sizeof ad);
     next();
@@ -4581,6 +4595,7 @@ do_decl:
                     break;
             }
             skip('}');
+            parse_attribute(&ad);
 
             if (bt) {
                 t.t = bt;
@@ -4590,7 +4605,25 @@ do_decl:
 
             /* set integral type of the enum */
             t.t = VT_INT;
-            if (nl >= 0) {
+            if (ad.a.packed) {
+                /* attribute packed: the smallest integer type which can
+                   hold all enumerator values, as with gcc: unsigned if
+                   no value is negative, signed otherwise */
+                if (nl >= 0) {
+                    if (pl == (unsigned char)pl)
+                        t.t = VT_BYTE;
+                    else if (pl == (unsigned short)pl)
+                        t.t = VT_SHORT;
+                    else if (pl != (unsigned)pl)
+                        t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
+                    t.t |= VT_UNSIGNED;
+                } else if (nl == (signed char)nl && pl == (signed char)pl) {
+                    t.t = VT_BYTE;
+                } else if (nl == (short)nl && pl == (short)pl) {
+                    t.t = VT_SHORT;
+                } else if (pl != (int)pl || nl != (int)nl)
+                    t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
+            } else if (nl >= 0) {
                 if (pl != (unsigned)pl)
                     t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
                 t.t |= VT_UNSIGNED;
@@ -4600,6 +4633,12 @@ do_decl:
             /* set type for enum members */
             for (ss = s->next; ss; ss = ss->next) {
                 ll = ss->enum_val;
+                if (ad.a.packed) {
+                    /* every enumerator gets the packed enum type */
+                    ss->type.t = (ss->type.t & ~(VT_BTYPE|VT_LONG|VT_UNSIGNED))
+                        | (t.t & (VT_BTYPE|VT_LONG|VT_UNSIGNED));
+                    continue;
+                }
                 if (ll == (int)ll) /* default is int if it fits */
                     continue;
                 if (t.t & VT_UNSIGNED) {
@@ -4626,6 +4665,19 @@ do_decl:
 		    skip(';');
 		    continue;
 		}
+                /* The 'aligned' contributions visible at this point:
+                   typedef_aligned is the value carried by the type
+                   itself (a typedef attribute), reported exactly by
+                   parse_btype; ad1.a.aligned may additionally hold a
+                   specifier-position attribute (a different value can
+                   only have come from one; the same value is already
+                   represented by the carried term).  Tell them apart,
+                   then clear ad1 so that a value appearing during
+                   type_decl is known to be declarator-side. */
+                btype_aligned = typedef_aligned;
+                btype_da = (ad1.a.aligned != typedef_aligned)
+                    ? ad1.a.aligned : 0;
+                ad1.a.aligned = 0;
                 while (1) {
 		    if (flexible)
 		        tcc_error("flexible array member '%s' not at the end of struct",
@@ -4713,6 +4765,64 @@ do_decl:
                     if (v) {
                         ss = sym_push(v | SYM_FIELD, &type1, 0, 0);
                         ss->a = ad1.a;
+                        /* Resolve the field's effective alignment now,
+                           while the origin of an 'aligned' attribute is
+                           still known (struct_layout sees only the merged
+                           ss->a.aligned and cannot tell the cases apart):
+                           - an attribute carried by the type itself (via
+                             a typedef, snapshotted in btype_aligned) is
+                             part of the type's alignment and replaces the
+                             natural alignment of a scalar field;
+                           - an attribute on the declarator can only
+                             increase the alignment (as gcc does, and as
+                             decl() does for variables);
+                           - packed, on the field or on the struct,
+                             first reduces the alignment to 1, and the
+                             declarator's attribute then applies to that.
+                           For struct/union fields the type's own
+                           alignment (type_size) is authoritative. */
+                        {
+                            int ea = align;
+                            /* declarator-side 'aligned': the larger of
+                               the specifier-position value captured
+                               after parse_btype and the value type_decl
+                               left in ad1 (ad1 was cleared after the
+                               snapshot, so its value here is purely
+                               declarator-side) */
+                            int da = btype_da ? 1 << (btype_da - 1) : 0;
+                            if (ad1.a.aligned && (1 << (ad1.a.aligned - 1)) > da)
+                                da = 1 << (ad1.a.aligned - 1);
+                            if (btype_aligned
+                                && (type1.t & VT_BTYPE) != VT_STRUCT)
+                                ea = 1 << (btype_aligned - 1);
+                            if (da > ea)
+                                ea = da;
+                            /* the packed reduction is not applied to
+                               bit-fields here: struct_layout handles
+                               their packing itself, and reads a nonzero
+                               f->a.aligned as a specified alignment */
+                            if (bit_size < 0 && (ad1.a.packed || ad.a.packed))
+                                ea = da > 1 ? da : 1;
+                            /* store the resolved value whenever it
+                               differs from the natural alignment, and
+                               also under 'packed' (where struct_layout
+                               starts from 1, so a value equal to the
+                               natural alignment is a real override);
+                               bit-fields keep the historical form,
+                               their layout path reads f->a.aligned
+                               itself */
+                            ss->a.aligned = (ea != align
+                                || (bit_size < 0 && (ad1.a.packed || ad.a.packed)))
+                                ? exact_log2p1(ea) : 0;
+                            if (da) {
+                                if (nb_da == sz_da) {
+                                    sz_da = sz_da ? sz_da * 2 : 8;
+                                    da_f = tcc_realloc(da_f, sz_da * sizeof *da_f);
+                                    da_v = tcc_realloc(da_v, sz_da * sizeof *da_v);
+                                }
+                                da_f[nb_da] = ss, da_v[nb_da] = da, nb_da++;
+                            }
+                        }
                         *ps = ss;
                         ps = &ss->next;
                     }
@@ -4727,9 +4837,30 @@ do_decl:
             if (ad.cleanup_func) {
                 tcc_warning("attribute '__cleanup__' ignored on type");
             }
+            if (ad.a.packed) {
+                /* A 'packed' attribute after the closing brace was not
+                   yet known when the fields were parsed and their
+                   alignments resolved at sym_push: apply it now, as
+                   struct_layout cannot tell it apart there.  Fields
+                   with a declarator-side 'aligned' keep that value
+                   (reduced to at least 1); bit-fields are left to the
+                   packed handling in struct_layout, as before. */
+                int i;
+                for (ss = s->next; ss; ss = ss->next) {
+                    for (i = 0; i < nb_da; i++)
+                        if (da_f[i] == ss)
+                            break;
+                    if (i < nb_da)
+                        ss->a.aligned = exact_log2p1(da_v[i] > 1 ? da_v[i] : 1);
+                    else if (!(ss->type.t & VT_BITFIELD))
+                        ss->a.aligned = 1; /* log2(1) + 1 */
+                }
+            }
 	    check_fields(type, 1);
 	    check_fields(type, 0);
             struct_layout(type, &ad);
+            tcc_free(da_f);
+            tcc_free(da_v);
         }
         if (debug_modes)
             tcc_debug_fix_forw(tcc_state, type);
@@ -4765,6 +4896,7 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
     CType type1;
 
     memset(ad, 0, sizeof(AttributeDef));
+    typedef_aligned = 0;
     type_found = 0;
     typespec_found = 0;
     t = VT_INT;
@@ -5009,6 +5141,7 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
                 t |= VT_BT_ARRAY;
             /* get attributes from typedef */
             sym_to_attr(ad, s);
+            typedef_aligned = s->a.aligned;
             typespec_found = 1;
             st = bt = -2;
             break;
@@ -5750,6 +5883,7 @@ ST_FUNC void unary(void)
         next();
         /* cast ? */
         if (parse_btype(&type, &ad, 0)) {
+            int ad_aligned = ad.a.aligned;
             type_decl(&type, &ad, &n, TYPE_ABSTRACT);
             skip(')');
             /* check ISOC99 compound literal */
@@ -5765,6 +5899,14 @@ ST_FUNC void unary(void)
                 memset(&ad, 0, sizeof(AttributeDef));
                 decl_initializer_alloc(&type, &ad, r, 1, 0, 0);
             } else if (t == TOK_SOTYPE) { /* from sizeof/alignof (...) */
+                /* an 'aligned' attribute carried by the type itself
+                   (a typedef attribute) is part of the type's
+                   alignment; the CType cannot carry it, so hand it
+                   to the _Alignof handler via sotype_aligned.  For
+                   struct/union types the type's own alignment is
+                   authoritative and this does not apply. */
+                if (ad_aligned && (type.t & VT_BTYPE) != VT_STRUCT)
+                    sotype_aligned = ad_aligned;
                 vpush(&type);
                 return;
             } else {
@@ -5854,10 +5996,15 @@ ST_FUNC void unary(void)
             tok = TOK_SOTYPE;
         expr_type(&type, unary);
         if (t == TOK_SIZEOF) {
+            sotype_aligned = 0; /* size is not affected by alignment */
             vpush_type_size(&type, &align);
             gen_cast_s(VT_SIZE_T);
         } else {
             type_size(&type, &align);
+            if (sotype_aligned) {
+                align = 1 << (sotype_aligned - 1);
+                sotype_aligned = 0;
+            }
             s = NULL;
             if (vtop[1].r & VT_SYM)
                 s = vtop[1].sym; /* hack: accessing previous vtop */

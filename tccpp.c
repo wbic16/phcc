@@ -3503,7 +3503,9 @@ static int macro_subst(
         TOK_GET(&t, &macro_str, &cval);
         if (t == 0 || t == TOK_EOF)
             break;
-        if (t >= TOK_IDENT) {
+        if (t >= TOK_IDENT && t != TOK_ATTRIBUTE1 && t != TOK_ATTRIBUTE2) {
+            /* as in next(): the '__attribute__' keyword is never
+               substituted, even inside a macro body */
             s = define_find(t);
             if (s == NULL || nosubst)
                 goto no_subst;
@@ -3578,8 +3580,15 @@ redo:
 
     next_nomacro();
     t = tok;
-    if (t >= TOK_IDENT && (parse_flags & PARSE_FLAG_PREPROCESS)) {
-        /* if reading from file, try to substitute macros */
+    if (t >= TOK_IDENT && t != TOK_ATTRIBUTE1 && t != TOK_ATTRIBUTE2
+        && (parse_flags & PARSE_FLAG_PREPROCESS)) {
+        /* if reading from file, try to substitute macros.
+           '__attribute__' is a keyword, not an identifier, and is never
+           substituted: system headers (e.g. glibc's <sys/cdefs.h>, which
+           does not know this compiler defines no __GNUC__) define it as
+           an empty macro for compilers without attribute support, and
+           expanding it would silently erase attributes which are in
+           fact implemented by the parser. */
         Sym *s = define_find(t);
         if (s) {
             Sym *nested_list = NULL;

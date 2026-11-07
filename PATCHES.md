@@ -30,7 +30,8 @@ from this file alone.
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
 | `tcc.h` | +48 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. |
-| `tccpp.c` | +79 / −1 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. |
+| `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). |
+| `tccgen.c` | +148 / −1 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. |
 | `libtcc.c` | +24 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -259,6 +260,86 @@ structure; the fork's intent is carried, never dropped silently).
     parity, stated plainly: the sorted materialization's memmove
     dominates inserts in both, and F4 claims lookup speed, not
     insert speed.
+
+- **F5 — `packed`/`aligned` attributes are honoured, not erased
+  (2026-11-07).** Conformance slice 1 (task 50.3.5/4.3.8/3.3.9)
+  found the two HIGH silent defects REG-CONF-1/REG-CONF-2:
+  `__attribute__((packed))` and `__attribute__((aligned(N)))`
+  produced natural layouts with no diagnostic, in every placement.
+  Root cause, established from the source and by preprocessed
+  output: **the attributes never reached the parser.** phcc
+  predefines neither `__GNUC__` nor `__clang__` (only `__TINYC__`),
+  so glibc's `<sys/cdefs.h>` — reached via stdio.h, string.h,
+  stdint.h, limits.h, … — takes its "compiler doesn't understand
+  attributes" branch and defines `__attribute__(xyz)` as an empty
+  function-like macro; tccpp's token loop then macro-expanded the
+  keyword token (keywords live at `tok >= TOK_IDENT`, the same
+  range the macro lookup covers) exactly as if it were an
+  identifier, silently, in every translation unit that includes a
+  glibc-routed header. The parser and layout machinery were intact
+  all along: in header-free translation units every placement
+  already laid out correctly. Fix family, three parts:
+  - *tccpp.c:* `TOK_ATTRIBUTE1`/`TOK_ATTRIBUTE2` are never
+    substituted — not in the live token stream (`next()`) and not
+    when a macro body is walked (`macro_subst()`). The tokens are
+    keywords, not identifiers; the oracles likewise never treat
+    them as macro names. `#ifdef __attribute__` / `defined()`
+    semantics are unchanged (only expansion is suppressed).
+  - *tccgen.c, struct fields:* with the token surviving, gcc's
+    split semantics for `aligned` had to be honoured, which the
+    merged `SymAttr.aligned` cannot express: an attribute carried
+    by the type itself (via a typedef — the Linux-kernel
+    `unaligned_u64` idiom in `tests/tcctest.c`'s aligntest9) is
+    part of the type's alignment and *replaces* the natural
+    alignment; an attribute on the declarator can only *increase*
+    it; `packed` (field or struct) first reduces it to 1, and a
+    declarator attribute then applies to that. `struct_decl()`
+    now snapshots the type-carried value exactly (parse_btype
+    reports it via the `typedef_aligned` side channel), resolves
+    each field's effective alignment at `sym_push`, and corrects
+    fields again after the closing brace for a post-brace
+    `packed`. Bit-fields are excluded from the packed reduction
+    (struct_layout's bit-field path reads a nonzero `f->a.aligned`
+    as a specified alignment). This also fixed two pre-existing
+    divergences the probes exposed in the same family: member
+    `aligned` could *decrease* a field's alignment (gcc: it cannot,
+    without packed), and struct-level `packed` did not override a
+    typedef-carried alignment.
+  - *tccgen.c, enums and `_Alignof`:* `enum __attribute__((packed))`
+    now selects the smallest integer type holding all enumerator
+    values (unsigned when none is negative, else signed — the
+    oracles' rule), enumerators included; a post-brace attribute
+    is parsed for enums as it already was for structs. And
+    `_Alignof` of a type-id naming a typedef'd scalar reports the
+    typedef-carried alignment (handed over via the `sotype_aligned`
+    side channel, since a `CType` cannot carry it); struct/union
+    type-ids are excluded — the type's own alignment rules there.
+  - *Evidence:* the conformance corpus re-run: exactly the two
+    target probes changed behaviour across all 333 (b_gnu_010,
+    b_gnu_011 now agree with gcc and clang byte-for-byte), leaving
+    328/333 three-way agreement with the only remaining divergences
+    the four documented class-(b) items (`__STDC_VERSION__`,
+    `_Complex`, `__builtin_bswap`, `__auto_type`). A differential
+    layout fuzz vs gcc AND clang (random struct/union shapes ×
+    attribute placements, sizeof/_Alignof/every offsetof compared
+    byte-for-byte): 300 files / ~1,500 layouts over two seeds,
+    **0 divergences**; an enumerative typedef grid (4 base types ×
+    6 carried alignments × packed contexts × 5 declarator
+    attributes = 240 structs): **byte-identical to both oracles**.
+    Upstream `make test` ALL TESTS PASSED (aligntest9 included);
+    phext parity suite 163,831 checks / 0 failures under gcc and
+    under the fixed phcc. Known oracle splits, followed but not
+    chased: `_Alignof` of an enum with `aligned` (gcc ignores,
+    clang applies — phcc follows gcc); aligned on a global
+    variable, decrease case (gcc honours, clang ignores — phcc
+    follows clang, pre-existing); attributes in a raw type-id
+    (gcc honours, clang ignores — phcc follows gcc). Note for the
+    phext: this entry changes the Source scrolls of `tccpp.c` and
+    `tccgen.c`, so on the next phext refresh the bindings for
+    machine #1 (tccpp.c), machines #2 and #4 (tccgen.c), and those
+    files' Design views go STALE until regenerated; machine #3
+    (tccelf.c), the libtcc1 proof receipts and the assembly
+    listings are untouched.
 
 ## Maintenance rule
 
