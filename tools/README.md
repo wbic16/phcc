@@ -6,12 +6,12 @@ report-only trace gate bound to the code at its own addresses.
 
 ## phcc.phext (repo root)
 
-The canonical consolidated phext, 2026-11-07:
+The canonical merged phext, 2026-11-07:
 
-- SHA-256: `61638c143338ad942783a11141a0f1be3f66e522d4a15880b8301d2afbaa1b4f`
-- bytes: 43,975,346 · scrolls: 52,781
-- gate v4 verdict scroll (Meta, Vol 2, Book 10, Sec 9):
-  SHA-256 `47b7b8be8fea46c79f62370248647f6be7faf6aa947c2f636476a6e24c9e51d8`,
+- SHA-256: `646144c7afd7e39d485dec02b7e4ab58e5adda0b9bcbe24abba886d662b6c275`
+- bytes: 49,209,925 · scrolls: 52,815
+- gate v5 verdict scroll (Meta, Vol 2, Book 10, Sec 12):
+  SHA-256 `be476b923a5042cf709cbc23ba3dc4a43b3760b785729ac6cc126501f059680b`,
   byte-reproducible by re-running the gate (see below).
 
 Lineage (full record inside the phext at Meta 1.1.1/1.2.10/1.11.1):
@@ -20,7 +20,17 @@ Slice 1–4 phases (Tests, Design, Regressions, Proofs placements,
 preprocessor machine) — with lineage B's Volume 3, the importer-v4
 member refinement (32,933 members: 7,626 functions, 2,427 types,
 22,880 objects; every importer-v3 member kept its exact address
-and payload). Volume 1 is the 2024 monolith slurp, byte-verbatim
+and payload). On top of that base, the two sibling lines were
+merged (2026-11-07): Slice 5's value-stack machine (design §A.3
+machine #2 — machine scroll at tccgen.c's Design address, 26 trace
+tests, 5 sourced regressions, gate v5 register at Meta Sec 13 and
+verdict at Sec 12; 34 scrolls added) and the hardened Slice 2 proof
+receipts (four Proofs scrolls transplanted from the hardened
+lineage: WP partial 271/297 VCs discharged, __moddi3 fully
+discharged, T3 not granted, receipts hash-current in the gate).
+Merge accounting vs the consolidated base: exactly those 34
+additions + 4 changed scrolls; every other scroll byte-identical.
+Volume 1 is the 2024 monolith slurp, byte-verbatim
 (319/319 scrolls at the same coordinates) — the old standalone
 `monolith.phext` was a proof-of-concept and is not a build input;
 building phcc is `./configure && make && make test` on the plain
