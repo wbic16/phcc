@@ -7879,6 +7879,67 @@ static void decl_design_flex(init_params *p, Sym *ref, int index)
         tcc_error("flexible array has zero size in this context");
 }
 
+/* Cumulative offset of field 'target' within the struct/union
+   'type', descending into anonymous struct/union members: a
+   designator can name a member of such an aggregate directly, and
+   the cursor then holds that leaf field, whose own 'c' is relative
+   to the anonymous aggregate, not to 'type'.  Returns -1 when
+   'target' is not a member of 'type' at any depth.  */
+static int decl_cumofs(CType *type, Sym *target)
+{
+    Sym *s;
+    for (s = type->ref->next; s; s = s->next) {
+        if (s == target)
+            return s->c;
+        if ((s->type.t & VT_BTYPE) == VT_STRUCT
+            && s->v >= (SYM_FIRST_ANOM | SYM_FIELD)) {
+            int sub = decl_cumofs(&s->type, target);
+            if (sub >= 0)
+                return s->c + sub;
+        }
+    }
+    return -1;
+}
+
+/* The field a following non-designated initializer element should
+   target after the element for 'f' was consumed in the struct/union
+   'type', or NULL when 'type' is exhausted.  'f' may be a member of
+   an anonymous struct/union inside 'type' (a designator sets the
+   cursor to such a leaf): the continuation then walks that
+   aggregate's remaining members first and pops back out to the
+   member following the anonymous aggregate when they run out.
+   A union contributes a single slot: once the member through which
+   'f' was reached is exhausted, the union is exhausted too, and
+   the continuation never moves on to another union member.  */
+static Sym *decl_next_field(CType *type, Sym *f)
+{
+    Sym *s;
+    if (!f)
+        return NULL;
+    for (s = type->ref->next; s; s = s->next)
+        if (s == f) {
+            if (type->ref->type.t == VT_UNION)
+                return NULL;
+            return f->next;
+        }
+    for (s = type->ref->next; s; s = s->next) {
+        Sym *n;
+        if ((s->type.t & VT_BTYPE) != VT_STRUCT
+            || s->v < (SYM_FIRST_ANOM | SYM_FIELD))
+            continue;
+        n = decl_next_field(&s->type, f);
+        if (n)
+            return n;
+        if (decl_cumofs(&s->type, f) >= 0) {
+            /* f's aggregate is exhausted: continue after s itself */
+            if (type->ref->type.t == VT_UNION)
+                return NULL;
+            return s->next;
+        }
+    }
+    return NULL;
+}
+
 /* t is the array or struct type. c is the array or struct
    address. cur_field is the pointer to the current
    field, for arrays the 'c' member contains the current start
@@ -7981,8 +8042,17 @@ static int decl_designator(init_params *p, CType *type, unsigned long c,
 	        *cur_field = f = f->next;
             if (!f)
                 tcc_error("too many initializers");
+            /* The cursor may name a member of an anonymous
+               struct/union (set by an earlier designator); then
+               f->c is relative to that aggregate, so the offset
+               within this container must be accumulated through
+               the anonymous members.  For a direct field the
+               accumulated offset is f->c itself.  */
+            {
+                int ofs = decl_cumofs(type, f);
+                c += ofs >= 0 ? ofs : f->c;
+            }
 	    type = &f->type;
-            c += f->c;
         }
     }
 
@@ -8463,10 +8533,13 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
 		    if (no_oblock && len >= n*size1)
 		        break;
 		} else {
-		    if (s->type.t == VT_UNION)
-		        f = NULL;
-		    else
-		        f = f->next;
+		    /* The cursor may sit inside an anonymous
+		       struct/union (an earlier designator put it
+		       there): advance within that aggregate and pop
+		       back out when it is exhausted.  For a direct
+		       field this is f->next, and NULL for a union,
+		       exactly as before.  */
+		    f = decl_next_field(type, f);
 		    if (no_oblock && f == NULL)
 		        break;
 		}

@@ -31,7 +31,7 @@ from this file alone.
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
 | `tcc.h` | +57 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
-| `tccgen.c` | +148 / −1 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). |
+| `tccgen.c` | +226 / −6 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +127 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). |
 | `tcctok.h` | +22 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). |
@@ -715,6 +715,73 @@ structure; the fork's intent is carried, never dropped silently).
     description), the `tccelf.c` Design view, and the gate verdict
     go STALE until regenerated; machines #1, #2 and #4 are
     untouched.
+- **F11 — designated initializers continue correctly across
+  anonymous struct/union members (2026-11-07).** Found by the
+  benchmark programme's patch queue (PQ-9): FFmpeg's
+  libswscale/format.c:977,
+  `*swiz = (SwsSwizzleOp) {{ .x = tmp[0], tmp[1], tmp[2], tmp[3] }}`,
+  was rejected with "too many initializers". A designator naming
+  a member of an anonymous struct/union sets the initializer
+  cursor to that leaf field (C11 6.7.9 with 6.7.2.1p13: the
+  members of an anonymous aggregate are members of the containing
+  aggregate), and the positional initializers that follow must
+  walk the leaf's own aggregate and then pop back out to the
+  containing one. The inherited machinery did neither, in two
+  places:
+  - *Cursor advance* (`decl_initializer`'s list loop): after each
+    element a union container reset the cursor to NULL and a
+    struct container advanced it within the leaf's own sibling
+    list only — so the first continuation element after a
+    designator into an anonymous struct inside a union already
+    failed, and the element after an anonymous aggregate's last
+    member always failed.
+  - *Offset accounting* (`decl_designator`'s no-designator path):
+    a continuation element was addressed at the cursor's own `c`,
+    the leaf's offset within its anonymous aggregate, instead of
+    its cumulative offset within the container — silently wrong
+    code whenever the anonymous aggregate sits at a nonzero
+    offset (`struct { int pad; struct { int a, b; }; } s =
+    { .a = 1, 2 }` stored the 2 over `a`). No diagnostic pointed
+    here; differential probing found it, not the FFmpeg failure.
+  Fix, all in *tccgen.c*, two helpers beside `decl_designator`:
+  `decl_cumofs()` accumulates a field's offset through anonymous
+  members (the walk `find_field` does by name, done by identity),
+  and `decl_next_field()` computes the continuation cursor —
+  walk the anonymous aggregate's remaining members, pop out to
+  the member following it when they run out, and treat a union
+  as exhausted once the member through which the cursor was
+  reached is spent (a union never continues into another
+  member). For a direct field both reduce to the previous
+  behaviour exactly (offset `f->c`; advance `f->next`, NULL for
+  unions). The no-designator path now addresses continuation
+  elements at the cursor's `decl_cumofs()`; the list loop
+  advances with `decl_next_field()`.
+  - *Evidence:* the FFmpeg reproducer compiles and runs with
+    the oracles' result (exit 0 under gcc, clang and phcc). A
+    14-case differential probe family around the defect —
+    anonymous union only, anonymous struct only, two-level
+    nesting, designator-then-positional, positional-then-
+    designator, arrays inside anonymous members, anonymous
+    aggregates at nonzero offsets, file-scope initializers, the
+    chained `.u.x` form — is byte-identical under phcc,
+    gcc 13.3.0 and clang 18.1.3 (14/14); the unfixed compiler
+    rejected 11 of the 14 with "too many initializers" and
+    silently miscompiled a twelfth (the offset case), passing
+    only the two no-designator guard cases. Under the benchmark's
+    FFmpeg 9.0.2 recipe, libswscale/format.o now compiles.
+    Upstream `make test` ALL TESTS PASSED; conformance spot
+    re-run unchanged (328/333 three-way, the same five
+    documented class-(b) divergences). Deliberately unchanged:
+    excess initializers beyond a container's capacity remain a
+    hard error where the oracles warn and discard — that
+    behaviour predates this fix, applies to plain aggregates
+    with no anonymous members and no designators, and is a
+    separate divergence. Note for the phext: this entry changes
+    the Source scroll of `tccgen.c`, so on the next phext refresh
+    the bindings for machines #2 and #4 (tccgen.c) and that
+    file's Design view go STALE until regenerated; machines #1
+    and #3, the libtcc1 proof receipts and the assembly listings
+    are untouched.
 
 ## Maintenance rule
 
