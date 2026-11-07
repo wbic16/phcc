@@ -169,6 +169,31 @@ Private Rust helpers with no public counterpart in either language
 - **D-4 — map order:** Rust `explode` returns an unordered `HashMap`;
   C returns a coordinate-sorted array. Observable behaviour (`implode`,
   lookup) is identical.
+  **SUPERSEDED (2026-11-07, F4):** on Will's ruling ("phcc should use
+  the hashmap interface to speedup compilation, don't worry about
+  working directly on the buffer most of the time"), the C map's
+  lookup store is now a coordinate hash table, the reference's shape:
+  `phext_map_get` probes a lazily built open-addressing index
+  (splitmix64 chained over the nine components; load ≤ 0.7; probe
+  hits verified by coordinate equality), invalidated by any edit it
+  cannot track exactly. What remains of D-4 is only the
+  materialization: the C items array is still coordinate-sorted — so
+  iteration over `.items` is deterministic, a safe superset of the
+  reference's unordered HashMap iteration — and the canonical
+  ordering lives at `implode`, whose emit path clones and sorts, so
+  implode output was and remains byte-identical. Conformance under
+  F4: the ported suite passes 163,831 checks / 0 failures under gcc
+  and under phcc itself; the differential fuzz (40,000 cases, two
+  seeds) shows 0 divergences on defined behaviour, and the new C
+  driver's outputs are byte-identical to the pre-F4 driver's on both
+  corpora. Benchmark (aletheia-core, medians of 7 runs, this repo's
+  phcc.phext at 49,209,925 bytes → 52,262 scrolls): 200k mixed
+  lookups 21.6 ms → 8.5 ms (2.5×); full sequential pass 2.6 ms →
+  1.9 ms; explode 42.0 ms → 47.9 ms (no explode-path logic changed;
+  attributed to code layout); shuffled-`map_insert` store build
+  unchanged (539.7 ms → 540.6 ms — the sorted materialization's
+  memmove dominates both); one-time index build 1.5 ms at first
+  lookup. Full record in PATCHES.md (F4).
 - **D-5 — `PositionedScroll` display:** Rust panics when the scroll is
   shorter than 4 bytes; C prints what exists. Identical whenever Rust
   returns normally.
@@ -221,7 +246,8 @@ Implemented as planned: **77 capabilities audited, 77 with C counterparts,
 0 gaps.** No row needed a "no counterpart" verdict; every Rust idiom had a
 C spelling under the mapping above. Divergences D-2…D-6 stand as recorded
 (D-1 was an audit-stage note, resolved during implementation;
-D-2 was resolved upstream on 2026-11-07 — see §5).
+D-2 was resolved upstream on 2026-11-07, and D-4 was superseded the
+same day by F4 — see §5 for both).
 
 Conformance, all on aletheia-core:
 

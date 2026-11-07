@@ -162,11 +162,25 @@ typedef struct phext_positioned_scroll {
     phext_buffer scroll;
 } phext_positioned_scroll;
 
-/* Rust: Vec<PositionedScroll>, and HashMap<Coordinate, String> in sorted form */
+/* Rust: Vec<PositionedScroll>, and HashMap<Coordinate, String>.
+ * One C type serves both roles, as it always has in this port: `items`
+ * is the materialization - document order for a phokenize list,
+ * coordinate order for a map - and, since F4, a coordinate hash index
+ * serves phext_map_get so map lookups are O(1) probes instead of a
+ * binary search over the materialization. The index is a cache only:
+ * it never changes what any function returns, only how fast
+ * phext_map_get finds it. */
 typedef struct phext_scrolls {
     phext_positioned_scroll *items;
     size_t len;
     size_t cap;
+    /* hash index over items: slot -> item position + 1 (0 = empty).
+     * Built lazily by phext_map_get, invalidated by any library edit
+     * it cannot track exactly. Owned by the list; released by
+     * phext_scrolls_free. */
+    size_t *index;
+    size_t index_cap;
+    int index_fresh;
 } phext_scrolls;
 
 void phext_scrolls_init(phext_scrolls *list);
@@ -175,8 +189,10 @@ void phext_scrolls_reset(phext_scrolls *list);
 /* C idiom support: append a copy of (coord, scroll) to the list. */
 phext_status phext_scrolls_push(phext_scrolls *list, phext_coordinate coord,
                                 const unsigned char *scroll, size_t scroll_len);
-/* C idiom support for Rust's HashMap operations: the list is kept sorted
- * by coordinate; get returns NULL when absent, insert replaces or adds. */
+/* C idiom support for Rust's HashMap operations: the list's items stay
+ * sorted by coordinate (the iteration order, and implode's emit order),
+ * while get runs through the coordinate hash index - get returns NULL
+ * when absent, insert replaces or adds. */
 const phext_buffer *phext_map_get(const phext_scrolls *map, phext_coordinate coord);
 phext_status phext_map_insert(phext_scrolls *map, phext_coordinate coord,
                               const unsigned char *scroll, size_t scroll_len);
@@ -324,7 +340,8 @@ phext_status phext_next_scroll(const unsigned char *input, size_t len,
 /* Rust: phokenize - tokenize the whole document into positioned scrolls,
  * in document order. Always yields at least one (possibly empty) scroll. */
 phext_status phext_phokenize(const unsigned char *input, size_t len, phext_scrolls *out);
-/* Rust: explode - phokenize into a coordinate -> scroll map (sorted here). */
+/* Rust: explode - phokenize into a coordinate -> scroll map (items
+ * sorted here; lookups hash-indexed). */
 phext_status phext_explode(const unsigned char *input, size_t len, phext_scrolls *out_map);
 /* Rust: implode - serialize a coordinate -> scroll map back into a
  * document. Empty scrolls emit no text but still advance the position. */

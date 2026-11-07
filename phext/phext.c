@@ -112,6 +112,9 @@ void phext_scrolls_init(phext_scrolls *list) {
     list->items = NULL;
     list->len = 0;
     list->cap = 0;
+    list->index = NULL;
+    list->index_cap = 0;
+    list->index_fresh = 0;
 }
 
 void phext_scrolls_reset(phext_scrolls *list) {
@@ -120,11 +123,13 @@ void phext_scrolls_reset(phext_scrolls *list) {
         phext_buffer_free(&list->items[i].scroll);
     }
     list->len = 0;
+    list->index_fresh = 0;
 }
 
 void phext_scrolls_free(phext_scrolls *list) {
     phext_scrolls_reset(list);
     free(list->items);
+    free(list->index);
     phext_scrolls_init(list);
 }
 
@@ -162,6 +167,7 @@ phext_status phext_scrolls_push(phext_scrolls *list, phext_coordinate coord,
         return status;
     }
     list->len += 1;
+    list->index_fresh = 0;
     return PHEXT_OK;
 }
 
@@ -185,20 +191,121 @@ static size_t map_locate(const phext_scrolls *map, phext_coordinate coord, int *
     return lo;
 }
 
-const phext_buffer *phext_map_get(const phext_scrolls *map, phext_coordinate coord) {
-    int found;
-    size_t at = map_locate(map, coord, &found);
-    if (!found) {
-        return NULL;
+/* ----------------------------------------------------------------------------------------------------------
+ * the coordinate hash index (F4)
+ *
+ * Will's ruling (2026-11-07): the map role of phext_scrolls is served
+ * by a hash table, the way libphext-rs serves it with a HashMap - a
+ * compiler's hot path is coordinate lookups into a packed phext, and
+ * the sorted items array is the iteration materialization (and
+ * implode's emit order), not the lookup path. So phext_map_get probes
+ * this index: an open-addressing table from coordinate to item
+ * position, built lazily on first use after any edit it cannot track
+ * exactly (push, sort, reset, a map_insert that shifts the array -
+ * each marks index_fresh = 0; a content-replacing map_insert moves
+ * nothing and keeps the index). The index is a cache only: a probe
+ * hit is verified by coordinate equality before it is returned, and
+ * every other behaviour - contents, ordering, implode bytes - is
+ * exactly what the binary-search implementation produced.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+/* splitmix64-style mixing, chained over the nine components in
+ * declaration order: each step applies the splitmix64 finalizer to
+ * (state + component + golden gamma), avalanching every input bit
+ * across the result before the next component folds in. Deliberately
+ * separate from phext_coordinate_hash (FNV-1a): that function is a
+ * published C-side idiom whose values callers may already rely on;
+ * a table wants avalanche strength, not a stable value. */
+static uint64_t map_hash_mix(uint64_t state, uint64_t value) {
+    uint64_t z = state + value + (uint64_t)0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * (uint64_t)0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * (uint64_t)0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static uint64_t map_hash(phext_coordinate coord) {
+    uint64_t h = (uint64_t)0x243F6A8885A308D3ULL;
+    h = map_hash_mix(h, (uint64_t)coord.z.library);
+    h = map_hash_mix(h, (uint64_t)coord.z.shelf);
+    h = map_hash_mix(h, (uint64_t)coord.z.series);
+    h = map_hash_mix(h, (uint64_t)coord.y.collection);
+    h = map_hash_mix(h, (uint64_t)coord.y.volume);
+    h = map_hash_mix(h, (uint64_t)coord.y.book);
+    h = map_hash_mix(h, (uint64_t)coord.x.chapter);
+    h = map_hash_mix(h, (uint64_t)coord.x.section);
+    h = map_hash_mix(h, (uint64_t)coord.x.scroll);
+    return h;
+}
+
+/* (Re)build the index over items[0..len), load kept at or below 0.7.
+ * On allocation failure the index stays stale and callers fall back
+ * to binary search - a lookup must never fail for want of a cache. */
+static phext_status map_index_build(phext_scrolls *map) {
+    size_t cap = 16;
+    size_t i;
+    size_t *slots;
+    while (map->len * 10 > cap * 7) {
+        cap *= 2;
     }
-    return &map->items[at].scroll;
+    slots = (size_t *)calloc(cap, sizeof(size_t));
+    if (slots == NULL) {
+        return PHEXT_ENOMEM;
+    }
+    for (i = 0; i < map->len; i++) {
+        size_t at = (size_t)(map_hash(map->items[i].coord) & (uint64_t)(cap - 1));
+        while (slots[at] != 0) {
+            at = (at + 1) & (cap - 1);
+        }
+        slots[at] = i + 1;
+    }
+    free(map->index);
+    map->index = slots;
+    map->index_cap = cap;
+    map->index_fresh = 1;
+    return PHEXT_OK;
+}
+
+/* Probe a fresh index for `coord`: 1 (and *out_pos set) on a hit -
+ * verified by coordinate equality, so a hit is a hit - 0 on a
+ * definite miss. Only call when index_fresh is set. */
+static int map_index_find(const phext_scrolls *map, phext_coordinate coord, size_t *out_pos) {
+    size_t mask = map->index_cap - 1;
+    size_t at = (size_t)(map_hash(coord) & (uint64_t)mask);
+    while (map->index[at] != 0) {
+        size_t pos = map->index[at] - 1;
+        if (phext_coordinate_equal(map->items[pos].coord, coord)) {
+            *out_pos = pos;
+            return 1;
+        }
+        at = (at + 1) & mask;
+    }
+    return 0;
+}
+
+const phext_buffer *phext_map_get(const phext_scrolls *map, phext_coordinate coord) {
+    /* The index is a pure cache: building it inside a logically const
+     * lookup is the one place this library casts const away, and it
+     * only ever writes the index fields, never items or len. */
+    phext_scrolls *cache = (phext_scrolls *)map;
+    size_t at;
+    if (!cache->index_fresh && map_index_build(cache) != PHEXT_OK) {
+        int found;
+        at = map_locate(map, coord, &found);
+        return found ? &map->items[at].scroll : NULL;
+    }
+    return map_index_find(map, coord, &at) ? &map->items[at].scroll : NULL;
 }
 
 phext_status phext_map_insert(phext_scrolls *map, phext_coordinate coord,
                               const unsigned char *scroll, size_t scroll_len) {
     int found;
-    size_t at = map_locate(map, coord, &found);
+    size_t at;
     phext_status status;
+    if (map->index_fresh && map_index_find(map, coord, &at)) {
+        found = 1;
+    } else {
+        at = map_locate(map, coord, &found);
+    }
     if (found) {
         return buf_set(&map->items[at].scroll, scroll, scroll_len);
     }
@@ -217,6 +324,8 @@ phext_status phext_map_insert(phext_scrolls *map, phext_coordinate coord,
         return status;
     }
     map->len += 1;
+    /* the shift moved item positions; the index rebuilds lazily */
+    map->index_fresh = 0;
     return PHEXT_OK;
 }
 
@@ -244,6 +353,7 @@ static void scrolls_sort(phext_scrolls *list) {
         qsort(list->items, list->len, sizeof(phext_positioned_scroll),
               positioned_scroll_qsort_cmp);
     }
+    list->index_fresh = 0;
 }
 
 /* ----------------------------------------------------------------------------------------------------------

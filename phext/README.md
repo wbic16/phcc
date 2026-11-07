@@ -43,7 +43,7 @@ The test binary takes the fixture directory as an optional argument
 | `String` results | `phext_buffer` out-params (owned, length-authoritative, NUL-terminated) |
 | `&str` inputs | `(const unsigned char *ptr, size_t len)` pairs |
 | `Vec<PositionedScroll>` | `phext_scrolls` array |
-| `HashMap<Coordinate, String>` | the same `phext_scrolls`, kept sorted; `phext_map_get` / `phext_map_insert` |
+| `HashMap<Coordinate, String>` | the same `phext_scrolls`, items kept sorted (the iteration / implode order); `phext_map_get` probes a lazily built coordinate hash index, `phext_map_insert` |
 | `Result<T, E>` / panics on bad input | `phext_status` return codes (`PHEXT_OK`, `PHEXT_ENOMEM`, `PHEXT_EFORMAT`, `PHEXT_ENUMBER`) |
 | iterators | index loops over `phext_scrolls` |
 

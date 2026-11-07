@@ -34,9 +34,9 @@ from this file alone.
 | `libtcc.c` | +24 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
-| `phext/phext.h` | new, +380 | Public header for the phext developer library (F2): every type, constant, and function of the libphext-rs 0.4.1 parity surface, documented. C99, no dependencies beyond libc types. |
-| `phext/phext.c` | new, +1,921 | The library implementation (F2), including a scalar XXH3-128 port (from xxhash-rust's const implementation) for scroll checksums. Single translation unit. |
-| `phext/PARITY.md` | new, +233 | The parity audit: all 77 libphext-rs capabilities mapped to their C counterparts, the idiom mapping, divergences D-2…D-6, and the conformance outcome. |
+| `phext/phext.h` | new, +397 | Public header for the phext developer library (F2): every type, constant, and function of the libphext-rs 0.4.1 parity surface, documented. C99, no dependencies beyond libc types. F4 adds the hash-index fields to `phext_scrolls`. |
+| `phext/phext.c` | new, +2,031 | The library implementation (F2), including a scalar XXH3-128 port (from xxhash-rust's const implementation) for scroll checksums. Single translation unit. F4 adds the coordinate hash index behind `phext_map_get`. |
+| `phext/PARITY.md` | new, +268 | The parity audit: all 77 libphext-rs capabilities mapped to their C counterparts, the idiom mapping, divergences D-2…D-6, and the conformance outcome. D-4 superseded annotation added by F4. |
 | `phext/README.md` | new, +54 | Library overview, build/test instructions (including the phcc dogfood invocation), and the idiom-mapping summary. |
 | `phext/tests/` | new, +2,042 | The conformance suite: `test_phext.c` (+1,853) — libphext-rs's own test_lib.rs / test_phokenize.rs / regressions.rs ported case-for-case; `Makefile` (+22); the two regression-1 fixtures (helios phext + message text, +167 lines between them). |
 
@@ -205,6 +205,60 @@ structure; the fork's intent is carried, never dropped silently).
     by the modified phcc itself: **163,831 checks, 0 failures**.
     `ONE_SOURCE` build (`make x86_64-tcc`) builds clean and reproduces
     the same corpus result.
+
+- **F4 — the phext map is a hashmap (2026-11-07).** Will's ruling:
+  "phcc should use the hashmap interface to speedup compilation,
+  don't worry about working directly on the buffer most of the
+  time." PARITY divergence D-4 closed in shape.
+  - *Before:* `phext_scrolls` served both roles of the reference's
+    `HashMap<Coordinate, String>` from one coordinate-sorted array —
+    `phext_map_get` / `phext_map_insert` binary-searched it. Correct,
+    but a compiler's hot path is coordinate lookups into a packed
+    phext (source members fetched by address during compilation),
+    and every lookup paid log₂(n) probes.
+  - *Change:* the sorted array stays as the materialization — it is
+    the iteration order, and `phext_implode` (which already cloned
+    and sorted before emitting) keeps producing byte-identical
+    output — and `phext_map_get` now probes a coordinate hash index:
+    open addressing with linear probing, capacity a power of two at
+    load ≤ 0.7, keys mixed by a splitmix64 chain over the nine
+    coordinate components in declaration order (deliberately not the
+    public FNV-1a `phext_coordinate_hash` — a published value callers
+    may rely on; a table wants avalanche strength, not a stable
+    value). The index is a pure cache: built lazily on first lookup,
+    invalidated by any edit it cannot track exactly (push, sort,
+    reset, a shifting insert; a content-replacing insert keeps it),
+    every probe hit verified by coordinate equality, and binary
+    search remains as the allocation-failure fallback — a lookup
+    never fails for want of a cache. `phext_scrolls` gains three
+    fields (`index`, `index_cap`, `index_fresh`); the one const cast
+    in the library writes only those fields inside the logically
+    const `phext_map_get`. PARITY.md's D-4 is annotated accordingly.
+  - *Evidence:* the ported parity suite passes **163,831 checks,
+    0 failures** under gcc and under the phcc built from this tree
+    (dogfood); upstream `make test` ALL TESTS PASSED; the
+    `ONE_SOURCE` amalgamated build (`make x86_64-tcc`) also compiles
+    clean. Differential
+    fuzz vs the Rust reference driver: 40,000 cases (two seeds),
+    **0 divergences** on defined behaviour (Rust panics 173 + 166,
+    all the D-2 op-20 class); stronger, the new C driver's outputs
+    are **byte-identical** to the pre-F4 driver's on both corpora —
+    nothing observable changed. Benchmark (aletheia-core, gcc -O2,
+    medians of 7 interleaved runs; workload = this repo's
+    `phcc.phext`, 49,209,925 bytes → 52,262 stored scrolls; hit
+    counts and fetched-byte totals identical in both binaries):
+    explode 42.0 ms → 47.9 ms (no explode-path logic changed — the
+    only added instructions are flag writes, and a relayout control
+    build measured the same, so the delta is attributed to code
+    layout; reported, not tuned away); one-time index build at
+    first lookup 1.5 ms (break-even ≈ 23,000 lookups); 200,000
+    mixed lookups (90% hits / 10% near misses) 21.6 ms → 8.5 ms
+    (**2.5×**, 108 → 42 ns per lookup); full sequential pass over
+    all 52,262 coordinates 2.6 ms → 1.9 ms (1.4×); store build by
+    52,262 shuffled `phext_map_insert` calls 539.7 ms → 540.6 ms —
+    parity, stated plainly: the sorted materialization's memmove
+    dominates inserts in both, and F4 claims lookup speed, not
+    insert speed.
 
 ## Maintenance rule
 
