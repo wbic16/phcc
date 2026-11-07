@@ -1,0 +1,9 @@
+the 3
+dog 2
+barks 1
+brown 1
+fox 1
+jumps 1
+lazy 1
+over 1
+quick 1
