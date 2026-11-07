@@ -31,9 +31,9 @@ from this file alone.
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
 | `tcc.h` | +57 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
-| `tccgen.c` | +226 / −6 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. |
+| `tccgen.c` | +237 / −6 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
-| `tccasm.c` | +127 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). |
+| `tccasm.c` | +149 / −1 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. |
 | `tcctok.h` | +22 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). |
 | `libtcc.c` | +30 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. |
 | `tccelf.c` | +813 / −13 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. |
@@ -967,6 +967,82 @@ structure; the fork's intent is carried, never dropped silently).
     edited (the assembler's operand and section handling is not
     one of the four machines), and the libtcc1 proof receipts
     are untouched.
+- **F13 — `__builtin_constant_p` honesty + dead-code asm constraints
+  (2026-11-07).**
+  - *Files:* `tccgen.c` (+11, the `TOK_builtin_constant_p` case in
+    `unary()`), `tccasm.c` (+22 / −1, `asm_instr()`).
+  - *Change (tccgen.c):* the pre-existing test — the parsed argument
+    must sit on the value stack as `VT_CONST` and not be an
+    addrtaken symbol — is kept; one case is added. A pointer value
+    that merely *names* an object or a function (array decay, a
+    function designator: a named symbol, `TOK_IDENT <= v <
+    SYM_FIRST_ANOM`, under a pointer or function type) is an
+    address, not a folded constant, and now answers 0. String
+    literals keep their anonymous symbol and still answer 1.
+  - *Change (tccasm.c):* `asm_instr()` still parses its operands in
+    full (token consumption and value-stack accounting unchanged,
+    including the trailing `next()` past the `;` that callers rely
+    on), but when the statement sits in code that will not be
+    emitted (`nocode_wanted`: the dead arm of a constant-folded
+    `if` / `?:` / `&&` / `||`, a `sizeof` operand, a discarded
+    `__builtin_choose_expr` arm) it now skips `save_regs()`,
+    constraint computation, operand substitution and assembly.
+    Constraint satisfaction is a property of emitted code. In live
+    code nothing changes: an unsatisfiable `"i"` operand there is
+    still a hard error (negative-control probe in the evidence).
+  - *Reason:* FFmpeg's `libavcodec/x86/mathops.h` idiom —
+    `if (__builtin_constant_p(s)) asm (… "i" …) else asm (… "c" …)`
+    inside a `static inline` helper (~190 TUs). phcc does not
+    inline, so inside the helper `s` is a parameter and the honest
+    answer is 0 — the pre-fix builtin already answered 0 there —
+    but the dead `"i"` arm was still constraint-checked while being
+    parsed under `nocode_wanted`, and the compile died with
+    `asm constraint 1 ('i') could not be satisfied`. gcc folds the
+    dead arm away before constraint checking. Making the constraint
+    checker swallow unsatisfiable `"i"` operands instead was
+    rejected: in live code that error is the only guard against a
+    silent miscompile. On the builtin itself: gcc's answer is
+    optimizer-dependent (at -O2, after inlining and value
+    propagation, gcc answers 1 for locals, parameters at constant
+    call sites, even `(1,2)`); a compiler without an optimizer
+    cannot promise those, and code that branches on the answer
+    stays correct with 0 — it merely takes the general path. The
+    reference semantics is therefore gcc -O0: the compiler's own
+    folder view at the point of the call.
+  - *Evidence:* differential probe tables vs gcc 13.3.0 (files in
+    `~/workspace/phcc-pq6/probes/`): 45 printed cases across three
+    probe programs (literals, folded expressions, enum, `sizeof`,
+    float/char literals, string literals incl. `+ 0` and indexing,
+    named arrays bare / `+ 0` / indexed, globals by value and by
+    address, locals, `const` locals, parameters by value and by
+    address, function designators, side-effecting arguments —
+    counters prove the argument's side effects are never evaluated,
+    in `?:`, in `if`, and in static initializers) — the fixed
+    phcc's output is **byte-identical to gcc -O0 on all 45**; the
+    base phcc diverged on exactly 4 (named array bare, named array
+    `+ 0`, named const-char array, isolated function designator).
+    gcc -O2 recorded for the same tables: it diverges from its own
+    -O0 on the 8 optimizer-knowledge cases named above, as
+    expected. The mathops reproducer now compiles and runs with
+    gcc's exit code; a live-code unsatisfiable `"i"` still errors;
+    an unsatisfiable `"i"` inside a `sizeof` statement expression
+    compiles, matching gcc. FFmpeg 9.0.2 (bench recipe, `make -k`,
+    this fix on the 229ad47c base): 1,981 of 1,998 TUs built,
+    **zero** `could not be satisfied` errors anywhere; the 15
+    remaining failing files are all previously classified queue
+    items — SSE clobbers ×5 and SSE/MMX opcodes ×8 (PQ-7 / PQ-8),
+    `shared.c` (PQ-4, fixed by F7 on its own branch), `format.c`
+    (PQ-9, fixed by F11 on its own branch), `libavutil/cpu.c`
+    (`sys/sysctl.h` configure item). `make test` ALL TESTS PASSED;
+    the 333-probe conformance corpus is unchanged (328/333, the
+    same five documented class-(b) divergences, 0 unclassified);
+    sed 4.10 and grep 3.12 rebuild cleanly under the fixed compiler
+    and run (glibc-header regression smoke). Note for the phext:
+    `tccgen.c` and `tccasm.c` Source scrolls change — machine #2
+    and machine #4 bindings (tccgen.c) and the tccgen.c Design view
+    go STALE at the next refresh; `tccasm.c` is bound by no §A.3
+    machine; machine #1, machine #3, the libtcc1 proof receipts and
+    the assembly listings are untouched.
 
 ## Maintenance rule
 

@@ -1914,7 +1914,28 @@ ST_FUNC void asm_instr(void)
        token after the assembler parsing */
     if (tok != ';')
         expect("';'");
-    
+
+    /* F13: in code that will not be emitted (nocode_wanted: the dead
+       arm of a constant-folded if/?:/&&/||, a sizeof operand, a
+       discarded __builtin_choose_expr arm, ...) the statement has
+       been parsed only to consume its tokens.  Constraint
+       satisfaction is a property of emitted code -- gcc folds such
+       code away before ever checking asm constraints -- so skip the
+       constraint computation and the code generation below, but
+       keep the operand stack accounting identical. */
+    if (nocode_wanted) {
+        for(i=0;i<nb_operands;i++) {
+            vpop();
+        }
+        cstr_free_s(&astr);
+        /* the token stream was never switched to the asm string,
+           but the trailing next() of the normal path -- which moves
+           past the ';' -- is part of this function's contract with
+           its caller, so perform it here too */
+        next();
+        return;
+    }
+
     /* save all values in the memory */
     save_regs(0);
 

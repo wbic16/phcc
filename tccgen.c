@@ -6073,6 +6073,17 @@ ST_FUNC void unary(void)
 	    || ((vtop->r & VT_SYM) && vtop->sym->a.addrtaken)
 	    )
 	    n = 0;
+	/* F13: a pointer value that merely names an object or a
+	   function (array decay, function designator) is an address,
+	   not a folded constant: gcc answers 0 for those at every
+	   optimization level.  String literals keep their anonymous
+	   symbol (v >= SYM_FIRST_ANOM) and stay 1, like gcc. */
+	if (n && (vtop->r & VT_SYM)
+	    && ((vtop->type.t & VT_BTYPE) == VT_PTR
+		|| (vtop->type.t & VT_BTYPE) == VT_FUNC)
+	    && vtop->sym->v >= TOK_IDENT
+	    && vtop->sym->v < SYM_FIRST_ANOM)
+	    n = 0;
 	vtop--;
 	vpushi(n);
         break;
