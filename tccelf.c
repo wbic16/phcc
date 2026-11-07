@@ -1510,6 +1510,10 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
                 /* ignore hidden symbols after */
             } else if (s->sh_flags & SHF_DYNSYM) {
                 /* we accept that two DLL define the same symbol */
+            } else if (esym->st_shndx == SHN_COMMON && shndx != SHN_COMMON) {
+                /* a definition in a real section (data or bss)
+                   displaces a common */
+                goto do_patch;
             } else if (!IS_BSS(s1, shndx) && IS_BSS(s1, esym->st_shndx)) {
                 /* data symbol gets precedence over common/bss */
                 goto do_patch;
@@ -4432,10 +4436,65 @@ static int read_ar_header(int fd, int offset, ArchiveHeader *hdr)
     return len;
 }
 
+/* Is NAME strongly defined by the archive member whose object file
+   starts at file offset OFF?  GNU ld pulls a member for a standing
+   common only when the member's definition is a real one: a common
+   or a weak definition in the member satisfies an undefined
+   reference, but it neither displaces nor merges with a standing
+   common, so it does not pull.  Returns 0 only when the member is a
+   parseable ELF relocatable whose definition of NAME is a common
+   or a weak; every other outcome (strong definition, NAME not
+   defined here, unparseable member) answers 1 and lets the caller
+   load - and the loader judge - the member. */
+static int member_def_is_strong(int fd, unsigned long off, const char *name)
+{
+    ElfW(Ehdr) ehdr;
+    ElfW(Shdr) *shdr, *sh;
+    ElfW(Sym) *symtab, *sym;
+    char *strtab;
+    int i, nb_syms, ret = 1;
+
+    lseek(fd, off, SEEK_SET);
+    if (tcc_object_type(fd, &ehdr) != AFF_BINTYPE_REL)
+        return 1;
+    shdr = load_data(fd, off + ehdr.e_shoff,
+                     sizeof(ElfW(Shdr)) * ehdr.e_shnum);
+    symtab = NULL;
+    strtab = NULL;
+    nb_syms = 0;
+    for (i = 1; i < ehdr.e_shnum; i++) {
+        sh = &shdr[i];
+        if (sh->sh_type == SHT_SYMTAB) {
+            nb_syms = sh->sh_size / sizeof(ElfW(Sym));
+            symtab = load_data(fd, off + sh->sh_offset, sh->sh_size);
+            sh = &shdr[sh->sh_link];
+            strtab = load_data(fd, off + sh->sh_offset, sh->sh_size);
+            break;
+        }
+    }
+    if (symtab && strtab) {
+        for (sym = symtab + 1, i = 1; i < nb_syms; i++, sym++) {
+            int bind;
+            if (!sym->st_name || strcmp(strtab + sym->st_name, name))
+                continue;
+            if (sym->st_shndx == SHN_UNDEF)
+                continue;
+            bind = ELFW(ST_BIND)(sym->st_info);
+            ret = sym->st_shndx != SHN_COMMON
+                && (bind == STB_GLOBAL || bind == STB_GNU_UNIQUE);
+            break;
+        }
+    }
+    tcc_free(shdr);
+    tcc_free(symtab);
+    tcc_free(strtab);
+    return ret;
+}
+
 /* load only the objects which resolve undefined symbols */
 static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
 {
-    int i, bound, nsyms, sym_index, len, ret = -1;
+    int i, bound, nsyms, sym_index, len, ret = -1, standing;
     unsigned long long off;
     uint8_t *data;
     const char *ar_names, *p;
@@ -4458,7 +4517,17 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
             if (!sym_index)
                 continue;
             sym = &((ElfW(Sym) *)s->data)[sym_index];
-            if(sym->st_shndx != SHN_UNDEF)
+            /* GNU ld extraction rule: a member is pulled when the
+               standing entry is an undefined reference (but never
+               for a weak undefined) or a common; for a common the
+               member must strongly define the symbol (see below). */
+            if (sym->st_shndx == SHN_UNDEF) {
+                if (ELFW(ST_BIND)(sym->st_info) == STB_WEAK)
+                    continue;
+                standing = SHN_UNDEF;
+            } else if (sym->st_shndx == SHN_COMMON) {
+                standing = SHN_COMMON;
+            } else
                 continue;
             off = get_be(ar_index + i * entrysize, entrysize);
             len = read_ar_header(fd, off, &hdr);
@@ -4468,6 +4537,13 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
                 goto the_end;
             }
             off += len;
+            /* a standing common is displaced by a strong
+               definition, not by another common or a weak
+               definition: if this member holds neither, leave
+               it unloaded (GNU ld) */
+            if (standing == SHN_COMMON
+                && !member_def_is_strong(fd, off, p))
+                continue;
             if (s1->verbose == 2)
                 printf("   -> %s\n", hdr.ar_name);
             if (tcc_load_object_file(s1, fd, off) < 0)

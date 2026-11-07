@@ -36,7 +36,7 @@ from this file alone.
 | `tccasm.c` | +149 / −1 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. |
 | `tcctok.h` | +22 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). |
 | `libtcc.c` | +40 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. |
-| `tccelf.c` | +813 / −13 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. |
+| `tccelf.c` | +891 / −15 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. |
 | `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -1226,6 +1226,108 @@ structure; the fork's intent is carried, never dropped silently).
     verdict go STALE until regenerated; machines #1 and #3,
     the libtcc1 proof receipts, the assembly listings, and the
     Library-10000 binary region are untouched.
+- **F16 — archive extraction satisfies standing commons, by GNU ld's
+  rule (2026-11-07).** PQ-12: `int shared;` (a common) in the main
+  object plus an archive member defining `int shared = 42;` printed
+  0 under phcc and 42 under GNU ld — `tcc_load_alacarte` extracted
+  members only for SHN_UNDEF entries, so a definition that existed
+  solely to satisfy a common was never pulled. The extraction rule
+  was established empirically against GNU ld (gcc 13.3.0's ld) over
+  a 17-case probe matrix before implementing; it is a two-sided
+  rule (standing entry × member definition):
+
+  standing UNDEF (global) pulls for a strong, weak, or common
+  definition in the member; standing UNDEF (weak) never pulls;
+  standing COMMON pulls only for a strong definition (a member's
+  common or weak definition satisfies an undefined, but for a
+  standing common it neither displaces nor merges, so it does not
+  pull); ABSENT and DEFINED entries never pull, and the decision
+  is made when the archive is encountered (an archive placed
+  before the object carrying the common pulls nothing — ld and
+  phcc agree). All 17 cells now match ld.
+
+  - *tccelf.c, `tcc_load_alacarte`:* the criterion is now
+    UNDEF-and-not-weak, or COMMON; for a COMMON, the new helper
+    `member_def_is_strong` inspects the candidate member's own
+    symtab (ELF relocatable only; it answers "load" for anything
+    unparseable, so the loader remains the judge) and the member
+    is skipped unless its definition of the name is a strong one
+    (STB_GLOBAL/STB_GNU_UNIQUE, defined, not SHN_COMMON).
+  - *tccelf.c, `set_elf_sym`:* the brief's premise — "a strong
+    definition displaces the common once the member is loaded" —
+    verified in the code before relying on it, and it held only
+    for PROGBITS definitions: `IS_BSS()` lumps SHN_COMMON with
+    SHT_NOBITS sections, so a pulled member's *bss* definition
+    (the normal shape from any -fno-common-built library) lost
+    to the standing common, which also made the fixed-point
+    rescan pull the same member again and error on its other
+    symbols. One branch inserted ahead of the IS_BSS rows: an
+    entry whose st_shndx is SHN_COMMON is patched by any
+    definition in a real section (data or bss). Only that one
+    cell changes: common × common still keeps the first common
+    (machine note N6, measured again here: two commons of 4 and
+    32 bytes merge to 4 under phcc, 32 under ld — a documented
+    divergence F16 deliberately leaves alone), bss × data and
+    the weak rows are byte-for-byte the old behaviour, and the
+    dynsym harvest path is unreachable for the new branch (the
+    SHF_DYNSYM accept row precedes it).
+  - *Evidence:* the probe matrix (R5 anchor 0 → 42; commons of
+    4+32 displaced by an archive definition of 16 — value and
+    output size both; a bss definition of 64 displacing a common
+    of 4 — size 64; extraction side-effect parity: a pulled
+    member's colliding duplicate now errors "defined twice"
+    exactly where ld errors; --whole-archive unaffected, 42 on
+    both). Upstream `make test` ALL TESTS PASSED in the gcc-built
+    tree and in the self-hosted tree (self-host build rc=0; the
+    self-host suite linked by gcc fails identically on the
+    unpatched base — that is PQ-1's overlapping-FDE rejection of
+    tcc-built libtcc.a by GNU ld, not an F16 effect).
+    Conformance spot re-run unchanged: 328/333, diverge set
+    exactly the five documented class-(b) items, 0 oracle
+    splits. Project builds: git 2.56.0 full build + init/commit/
+    log smoke; zlib 1.4 --static build + `*** zlib test OK ***`
+    (the default shared build still stops at GNU ld's
+    overlapping-FDE rejection — PQ-1, present in this base and
+    untouched by F16); OpenSSL 4.1.0 (no-asm, no-shared) failure
+    signature byte-identical to the unpatched base — 128
+    unresolved references at apps/openssl with the identical
+    symbol set, plus the providers/legacy.so stop; those are
+    F14's -l search order and F10's --version-script, separate
+    entries on their own branches, and F16 changes neither.
+  - *Machine #3 text this entry invalidates* (Design
+    1.1.1/3.2.5/1.2.2; proposed replacements, to be applied at
+    the next phext refresh — F16 does not edit the phext):
+    the ABSENT state entry's last sentence becomes "Archives
+    are not searched for ABSENT names; UNDEF entries (except
+    weak ones) and COMMON entries trigger extraction — a
+    COMMON only when the member strongly defines the name
+    (invariant I10, note N7)." Note N7 becomes: "N7 ABSENT
+    versus UNDEF is load-bearing. Archive extraction
+    (tcc_load_alacarte) and the ld script GROUP rescan
+    (ev_undef_scan) key on entries that exist: an UNDEF entry
+    triggers unless it is weak (a weak undefined never pulls,
+    GNU ld's rule), and a COMMON entry triggers when the
+    member's definition of the name is a strong one — a common
+    or weak definition in the member satisfies an UNDEF but
+    does not pull for a standing COMMON, and once pulled, a
+    definition in a real section (data or bss) displaces the
+    common in ev_set. A name that was never referenced
+    extracts nothing. That asymmetry is what makes archive
+    linking order-insensitive for referenced symbols and
+    inert for unreferenced ones." Invariant I10 gains one
+    clause before its final sentence: "On the load side, the
+    extraction that feeds ev_resolve obeys the dual rule:
+    weak UNDEF entries never extract, and COMMON entries
+    extract only against a member's strong definition — a
+    COMMON is either displaced by a real definition before
+    ev_resolve or allocated by ev_common exactly as if the
+    archive had not been consulted for it."
+  - *Phext bindings made STALE:* machine #3's binding **and
+    its description** (extraction criterion, per the replacement
+    text above), the `tccelf.c` Design view, the gate verdict,
+    and `tccelf.c`'s Source scroll. Machines #1/#2/#4, the
+    libtcc1 proof receipts, the assembly listings and the
+    Library-10000 region are untouched.
 
 ## Maintenance rule
 
