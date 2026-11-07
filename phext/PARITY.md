@@ -155,6 +155,14 @@ Private Rust helpers with no public counterpart in either language
   returns `Err` for wrong segment counts. C never panics:
   `phext_coordinate_parse` returns `PHEXT_EFORMAT` / `PHEXT_ENUMBER`.
   Defined behaviour (segment counts, valid parses) is identical.
+  **RESOLVED (2026-11-07):** libphext-rs PR #8 (parse-never-panics)
+  merged — the Rust strict parse now returns `Err(PhextParseError)` on
+  malformed components instead of panicking (in-tree libphext-rs 0.4.2;
+  merged, not published to crates.io). The C library's
+  `PHEXT_EFORMAT`/`PHEXT_ENUMBER` behaviour now agrees with the
+  reference exactly, and the differential fuzz's op-20 (strict-parse)
+  divergence class is closed. The paragraph above stands as the
+  historical record of the divergence as found against 0.4.1.
 - **D-3 — UTF-8:** Rust functions take `&str` and `expect` valid UTF-8
   results. The C API is byte-oriented and imposes no UTF-8 requirement.
   On all inputs that are valid UTF-8, results are byte-identical.
@@ -212,7 +220,8 @@ and wants its own slice and its own PATCHES.md entry when Will directs it.
 Implemented as planned: **77 capabilities audited, 77 with C counterparts,
 0 gaps.** No row needed a "no counterpart" verdict; every Rust idiom had a
 C spelling under the mapping above. Divergences D-2…D-6 stand as recorded
-(D-1 was an audit-stage note, resolved during implementation).
+(D-1 was an audit-stage note, resolved during implementation;
+D-2 was resolved upstream on 2026-11-07 — see §5).
 
 Conformance, all on aletheia-core:
 
