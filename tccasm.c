@@ -41,6 +41,12 @@ ST_FUNC void gen_addr64(int r, Sym *sym, int64_t c)
 
 ST_FUNC void gen_expr64(ExprValue *pe)
 {
+    if (pe->sym && asm_label_diff_emit(pe->sym, pe->v, 8)) {
+        /* deferred label difference: zero field, patched later */
+        gen_le32(0);
+        gen_le32(0);
+        return;
+    }
     gen_addr64(pe->sym ? VT_SYM : 0, pe->sym, pe->v);
 }
 #endif
@@ -134,6 +140,194 @@ static Sym* asm_section_sym(TCCState *s1, Section *sec)
     label = tok_alloc_const(buf);
     sym = asm_label_find(label);
     return sym ? sym : asm_new_label1(s1, label, 1, sec->sh_num, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Deferred label differences (F12).
+ *
+ * GAS resolves "labelA - labelB" once both labels are known to lie
+ * in the same section, even when one or both are still undefined at
+ * the point of use; the perlasm ABI-note tail (".long 1f - 0f"
+ * written ahead of its labels) is the canonical case.  TCC's
+ * evaluator folds label differences eagerly, so asm_expr_sum() now
+ * turns such a subtraction into a synthetic symbol standing for the
+ * difference.  The data emitters (gen_expr32/gen_expr64) recognise
+ * it through asm_label_diff_emit(), emit a zero field and register
+ * a patch; asm_label_diffs_apply() fills the fields in once the
+ * assembly unit is complete and every label has its final value.
+ * A difference whose labels do not end up defined in one common
+ * section is rejected there.  Only the x86 assemblers defer; on
+ * other targets the subtraction keeps its historical error (see
+ * asm_expr_diff_defer). */
+typedef struct LabelDiff {
+    Sym *sym;                   /* synthetic symbol for (a - b) */
+    Sym *a, *b;
+} LabelDiff;
+
+typedef struct LabelDiffPatch {
+    Section *sec;               /* section holding the field */
+    unsigned long offset;
+    int size;                   /* field size in bytes (4 or 8) */
+    Sym *a, *b;
+    int64_t addend;             /* constant part of the expression */
+} LabelDiffPatch;
+
+static LabelDiff **label_diffs;
+static int nb_label_diffs;
+static LabelDiffPatch **label_diff_patches;
+static int nb_label_diff_patches;
+static int label_diff_counter;
+
+static void asm_label_diffs_reset(void)
+{
+    dynarray_reset(&label_diffs, &nb_label_diffs);
+    dynarray_reset(&label_diff_patches, &nb_label_diff_patches);
+    label_diff_counter = 0;
+}
+
+static Sym *asm_label_diff_new(TCCState *s1, Sym *a, Sym *b)
+{
+    LabelDiff *d = tcc_malloc(sizeof(LabelDiff));
+    d->a = a;
+    d->b = b;
+    d->sym = asm_label_push(asm_get_prefix_name(s1, "L..diff",
+                                                label_diff_counter++));
+    dynarray_add(&label_diffs, &nb_label_diffs, d);
+    return d->sym;
+}
+
+static LabelDiff *asm_label_diff_find(Sym *sym)
+{
+    int i;
+    if (!sym)
+        return NULL;
+    for (i = 0; i < nb_label_diffs; i++)
+        if (label_diffs[i]->sym == sym)
+            return label_diffs[i];
+    return NULL;
+}
+
+ST_FUNC int asm_label_diff_is(Sym *sym)
+{
+    return asm_label_diff_find(sym) != NULL;
+}
+
+/* If SYM stands for a deferred label difference, register a patch
+   for the field of SIZE bytes about to be emitted at the current
+   position and return 1; otherwise return 0. */
+ST_FUNC int asm_label_diff_emit(Sym *sym, int64_t addend, int size)
+{
+    LabelDiff *d = asm_label_diff_find(sym);
+    LabelDiffPatch *p;
+    if (!d)
+        return 0;
+    p = tcc_malloc(sizeof(LabelDiffPatch));
+    p->sec = cur_text_section;
+    p->offset = ind;
+    p->size = size;
+    p->a = d->a;
+    p->b = d->b;
+    p->addend = addend;
+    dynarray_add(&label_diff_patches, &nb_label_diff_patches, p);
+    return 1;
+}
+
+static void asm_label_diffs_apply(void)
+{
+    int i, j;
+    for (i = 0; i < nb_label_diff_patches; i++) {
+        LabelDiffPatch *p = label_diff_patches[i];
+        ElfSym *ea = elfsym(p->a), *eb = elfsym(p->b);
+        int64_t v;
+        uint8_t *ptr;
+        if (!ea || !eb || ea->st_shndx == SHN_UNDEF
+            || eb->st_shndx == SHN_UNDEF)
+            tcc_error("label difference involves an undefined label");
+        if (ea->st_shndx != eb->st_shndx)
+            tcc_error("label difference across sections");
+        v = (int64_t)ea->st_value - (int64_t)eb->st_value + p->addend;
+        if (p->sec->sh_type == SHT_NOBITS)
+            continue; /* cannot happen: NOBITS emits no fields */
+        ptr = p->sec->data + p->offset;
+        for (j = 0; j < p->size; j++)
+            ptr[j] = (uint64_t)v >> (8 * j);
+    }
+}
+
+/* If PE - E2 is the difference of two assembler labels, replace
+   PE's symbol by a synthetic symbol standing for the difference
+   (resolved at the end of the unit) and return 1. */
+static int asm_expr_diff_defer(TCCState *s1, ExprValue *pe, ExprValue *e2)
+{
+#if defined(TCC_TARGET_I386) || defined(TCC_TARGET_X86_64)
+    if (pe->sym && e2->sym && IS_ASM_SYM(pe->sym) && IS_ASM_SYM(e2->sym)) {
+        pe->sym = asm_label_diff_new(s1, pe->sym, e2->sym);
+        pe->pcrel = 0;
+        return 1;
+    }
+#endif
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* .comm bookkeeping (F12): .comm allocations are deferred to the
+   end of the assembly unit so repeated directives merge with GAS
+   semantics (largest size and alignment win); this record holds
+   the merged extents per symbol (see TOK_ASMDIR_comm). */
+typedef struct CommDef {
+    int v;                      /* symbol name token */
+    long size, align;
+} CommDef;
+
+static CommDef **comm_defs;
+static int nb_comm_defs;
+
+static CommDef *asm_comm_find(int v)
+{
+    int i;
+    for (i = 0; i < nb_comm_defs; i++)
+        if (comm_defs[i]->v == v)
+            return comm_defs[i];
+    return NULL;
+}
+
+static void asm_comm_record(int v, long size, long align)
+{
+    CommDef *cd = tcc_malloc(sizeof(CommDef));
+    cd->v = v;
+    cd->size = size;
+    cd->align = align;
+    dynarray_add(&comm_defs, &nb_comm_defs, cd);
+}
+
+static void asm_comm_reset(void)
+{
+    dynarray_reset(&comm_defs, &nb_comm_defs);
+}
+
+/* Materialise this unit's .comm symbols with their merged extents. */
+static void asm_comms_apply(TCCState *s1)
+{
+    int i;
+    for (i = 0; i < nb_comm_defs; i++) {
+        CommDef *cd = comm_defs[i];
+        Sym *sym = asm_label_find(cd->v);
+        ElfSym *esym = elfsym(sym);
+        if (!esym || (esym->st_shndx != SHN_UNDEF
+                      && esym->st_shndx != SHN_COMMON))
+            tcc_error("symbol '%s' was defined after its .comm",
+                      get_tok_str(cd->v, NULL));
+        if (s1->nocommon) {
+            addr_t addr = section_add(bss_section, cd->size, cd->align);
+            put_extern_sym(sym, bss_section, addr, cd->size);
+        } else {
+            /* for SHN_COMMON the symbol value is the alignment */
+            put_extern_sym(sym, common_section, cd->align, cd->size);
+        }
+        esym = elfsym(sym);
+        esym->st_info = ELFW(ST_INFO)(ELFW(ST_BIND)(esym->st_info),
+                                      STT_OBJECT);
+    }
 }
 
 /* We do not use the C expression parser to handle symbols. Maybe the
@@ -339,19 +533,20 @@ static inline void asm_expr_sum(TCCState *s1, ExprValue *pe)
 		ElfSym *esym1, *esym2;
 		esym1 = elfsym(pe->sym);
 		esym2 = elfsym(e2.sym);
-		if (!esym2)
-		    goto cannot_relocate;
-		if (esym1 && esym1->st_shndx == esym2->st_shndx
+		if (esym2 && esym1 && esym1->st_shndx == esym2->st_shndx
 		    && esym1->st_shndx != SHN_UNDEF) {
 		    /* we also accept defined symbols in the same section */
 		    pe->v += (int)(esym1->st_value - esym2->st_value);
 		    pe->sym = NULL;
-		} else if (esym2->st_shndx == cur_text_section->sh_num) {
+		} else if (esym2 && esym2->st_shndx == cur_text_section->sh_num) {
 		    /* When subtracting a defined symbol in current section
 		       this actually makes the value PC-relative.  */
 		    pe->v += (int)(0 - esym2->st_value);
 		    pe->pcrel = 1;
 		    e2.sym = NULL;
+		} else if (asm_expr_diff_defer(s1, pe, &e2)) {
+		    /* deferred label difference: pe->sym now stands for
+		       the difference, resolved at end of the unit */
 		} else {
 cannot_relocate:
 		    tcc_error("invalid operation with label");
@@ -841,6 +1036,72 @@ static void asm_parse_directive(TCCState *s1, int global)
             use_section(s1, sname);
 	}
 	break;
+    case TOK_ASMDIR_comm:
+        {
+            Sym *sym;
+            ElfSym *esym;
+            long size, align;
+            int name_tok;
+            next();
+            if (tok < TOK_IDENT)
+                expect("identifier");
+            name_tok = tok;
+            sym = get_asm_sym(tok, NULL);
+            next();
+            skip(',');
+            size = asm_int_expr(s1);
+            if (size < 0)
+                tcc_error("invalid size in .comm");
+            if (tok == ',') {
+                next();
+                align = asm_int_expr(s1);
+                if (align <= 0 || (align & (align - 1)) != 0)
+                    tcc_error("alignment in .comm is not a power of two");
+            } else {
+                /* GAS default alignment: the smallest power of
+                   two >= size, capped at 16 */
+                align = 1;
+                while (align < size && align < 16)
+                    align <<= 1;
+            }
+            /* .comm symbols are global even without .globl and
+               typed OBJECT.  The allocation itself is deferred to
+               the end of the unit (asm_comms_apply) so that
+               repeated .comm directives merge exactly like GAS --
+               largest size and alignment win -- in both modes:
+               SHN_COMMON under -fcommon (the symbol value carries
+               the alignment), .bss under -fno-common (tcc's
+               default), exactly like C tentative definitions. */
+            sym->type.t &= ~VT_STATIC;
+            esym = elfsym(sym);
+            if (esym && esym->st_shndx == SHN_COMMON) {
+                /* a common from an earlier unit (e.g. C): fold
+                   its extents into the merge */
+                if ((long)esym->st_size > size)
+                    size = esym->st_size;
+                if ((long)esym->st_value > align)
+                    align = esym->st_value;
+            } else if (esym && esym->st_shndx != SHN_UNDEF) {
+                tcc_error("symbol '%s' is already defined",
+                          get_tok_str(sym->v, NULL));
+            }
+            {
+                CommDef *cd = asm_comm_find(name_tok);
+                if (cd) {
+                    if (size > cd->size)
+                        cd->size = size;
+                    if (align > cd->align)
+                        cd->align = align;
+                } else {
+                    asm_comm_record(name_tok, size, align);
+                }
+            }
+            if (!sym->c)
+                /* an undefined ELF entry now, so relocations in
+                   this unit can reference the symbol */
+                put_extern_sym2(sym, SHN_UNDEF, 0, 0, 1);
+        }
+        break;
     case TOK_ASMDIR_file:
         {
             const char *p;
@@ -941,10 +1202,17 @@ static void asm_parse_directive(TCCState *s1, int global)
         {
             char sname[256];
 	    int old_nb_section = s1->nb_sections;
-            int flags = SHF_ALLOC;
+            int flags = SHF_ALLOC; /* TCC's longstanding default for
+                              an option-less directive; code in the
+                              wild (and tcctest's .data.ignore)
+                              relies on the section being allocated.
+                              A flags string, when present, replaces
+                              it from zero, exactly as in GAS. */
+            int sh_type = -1;
+            long sh_entsize = -1;
+            int opt_stage = 0; /* 0: flags, 1: type/entsize, 2: group */
 
 	    tok1 = tok;
-            /* XXX: support more options */
             next();
             sname[0] = '\0';
             while (tok != ';' && tok != TOK_LINEFEED && tok != ',') {
@@ -954,24 +1222,89 @@ static void asm_parse_directive(TCCState *s1, int global)
                     pstrcat(sname, sizeof(sname), get_tok_str(tok, NULL));
                 next();
             }
-            if (tok == ',') {
-                const char *p;
-                /* skip section options */
+            /* GAS option grammar (F12):
+                 .section name [, "flags"] [, @type] [, entsize]
+                             [, groupname [, comdat]]
+               A '#' after the comma starts a comment on x86 targets,
+               so a tail like perlasm's ", #alloc" carries no flags
+               for GAS on x86-64 either (verified with GAS+readelf);
+               it simply ends the option list. */
+            while (tok == ',') {
                 next();
-                if (tok != TOK_STR)
-                    expect("string constant");
-                for (p = tokc.str.data; *p; ++p) {
-                    if (*p == 'w')
-                        flags |= SHF_WRITE;
-                    if (*p == 'x')
-                        flags |= SHF_EXECINSTR;
-                }
-                next();
-                if (tok == ',') {
-                    next();
-                    if (tok == '@' || tok == '%')
+                if (tok == TOK_LINEFEED || tok == ';' || tok == TOK_EOF)
+                    /* A '#' comment (already consumed by the
+                       tokenizer, which treats '#' as comment-to-EOL
+                       in asm files) or the plain end of the line:
+                       no options follow. */
+                    break;
+                if (tok == '#') {
+                    while (tok != ';' && tok != TOK_LINEFEED
+                           && tok != TOK_EOF)
                         next();
+                    break;
+                }
+                if (opt_stage == 0) {
+                    /* The flags string: one SHF bit per letter,
+                       unknown letters are an error, as in GAS. */
+                    const char *p;
+                    if (tok != TOK_STR)
+                        expect("string constant");
+                    flags = 0;
+                    for (p = tokc.str.data; *p; ++p) {
+                        switch (*p) {
+                        case 'a': flags |= SHF_ALLOC; break;
+                        case 'w': flags |= SHF_WRITE; break;
+                        case 'x': flags |= SHF_EXECINSTR; break;
+                        case 'M': flags |= SHF_MERGE; break;
+                        case 'S': flags |= SHF_STRINGS; break;
+                        case 'T': flags |= SHF_TLS; break;
+                        case 'G': flags |= SHF_GROUP; break;
+                        case 'e': flags |= SHF_EXCLUDE; break;
+                        case 'o': break; /* SHF_OS_NONCONFORMING:
+                                            no state to record */
+                        default:
+                            tcc_error("unknown section flag '%c'", *p);
+                        }
+                    }
+                    opt_stage = 1;
                     next();
+                } else if (opt_stage == 1 && (tok == '@' || tok == '%')) {
+                    const char *tname;
+                    next();
+                    if (tok < TOK_IDENT)
+                        expect("section type");
+                    tname = get_tok_str(tok, NULL);
+                    if (!strcmp(tname, "progbits"))
+                        sh_type = SHT_PROGBITS;
+                    else if (!strcmp(tname, "nobits"))
+                        sh_type = SHT_NOBITS;
+                    else if (!strcmp(tname, "note"))
+                        sh_type = SHT_NOTE;
+                    else if (!strcmp(tname, "init_array"))
+                        sh_type = SHT_INIT_ARRAY;
+                    else if (!strcmp(tname, "fini_array"))
+                        sh_type = SHT_FINI_ARRAY;
+                    else if (!strcmp(tname, "preinit_array"))
+                        sh_type = SHT_PREINIT_ARRAY;
+                    else
+                        tcc_error("unknown section type '%s'", tname);
+                    opt_stage = 2;
+                    next();
+                } else if (opt_stage >= 1 && opt_stage <= 2
+                           && tok == TOK_PPNUM && sh_entsize < 0) {
+                    sh_entsize = asm_int_expr(s1);
+                    opt_stage = 2;
+                } else if (opt_stage == 2 && tok == TOK_STR) {
+                    /* Group name: accepted and shape-validated, but
+                       TCC emits no SHT_GROUP section for it. */
+                    opt_stage = 3;
+                    next();
+                } else if (opt_stage == 3 && tok >= TOK_IDENT
+                           && !strcmp(get_tok_str(tok, NULL), "comdat")) {
+                    opt_stage = 4;
+                    next();
+                } else {
+                    expect("section option");
                 }
             }
             last_text_section = cur_text_section;
@@ -989,6 +1322,22 @@ static void asm_parse_directive(TCCState *s1, int global)
                 if (!strcmp(sname, ".init") || !strcmp(sname, ".fini"))
                     flags |= SHF_EXECINSTR;
 	        cur_text_section->sh_flags = flags;
+                if (sh_type >= 0)
+                    cur_text_section->sh_type = sh_type;
+                else if (!strncmp(sname, ".note", 5)
+                         && (sname[5] == '\0' || sname[5] == '.'))
+                    /* GAS types sections named .note[.xxx] SHT_NOTE
+                       by default (e.g. .note.gnu.property). */
+                    cur_text_section->sh_type = SHT_NOTE;
+                if (sh_entsize < 0
+                    && (sh_type == SHT_INIT_ARRAY
+                        || sh_type == SHT_FINI_ARRAY
+                        || sh_type == SHT_PREINIT_ARRAY))
+                    /* GAS records the natural entry size for the
+                       array-of-pointers section types. */
+                    sh_entsize = PTR_SIZE;
+                if (sh_entsize > 0)
+                    cur_text_section->sh_entsize = sh_entsize;
             }
         }
         break;
@@ -1200,6 +1549,8 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global)
     parse_flags = PARSE_FLAG_ASM_FILE | PARSE_FLAG_TOK_STR;
     if (do_preprocess)
         parse_flags |= PARSE_FLAG_PREPROCESS;
+    asm_label_diffs_reset();
+    asm_comm_reset();
     for(;;) {
         next();
         if (tok == TOK_EOF)
@@ -1250,6 +1601,10 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global)
         parse_flags &= ~PARSE_FLAG_LINEFEED; /* XXX: suppress that hack */
     }
 
+    asm_label_diffs_apply();
+    asm_label_diffs_reset();
+    asm_comms_apply(s1);
+    asm_comm_reset();
     parse_flags = saved_parse_flags;
     return 0;
 }
@@ -1489,15 +1844,26 @@ ST_FUNC void asm_instr(void)
                 parse_asm_operands(operands, &nb_operands, 0);
                 if (tok == ':') {
                     /* clobber list */
-                    /* XXX: handle registers */
                     next();
                     for(;;) {
                         if (tok == ':')
                           break;
                         if (tok != TOK_STR)
                             expect("string constant");
-                        asm_clobber(clobber_regs, tokc.str.data);
-                        next();
+                        /* adjacent string literals concatenate
+                           (e.g. "%"FF_REG_a in FFmpeg) */
+                        {
+                            CString clobstr;
+                            cstr_new(&clobstr);
+                            while (tok == TOK_STR) {
+                                cstr_cat(&clobstr, tokc.str.data,
+                                         tokc.str.size - 1);
+                                next();
+                            }
+                            cstr_ccat(&clobstr, '\0');
+                            asm_clobber(clobber_regs, clobstr.data);
+                            cstr_free(&clobstr);
+                        }
                         if (tok == ',') {
                             next();
                         } else {

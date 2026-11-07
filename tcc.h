@@ -1800,6 +1800,8 @@ ST_FUNC int tcc_assemble(TCCState *s1, int do_preprocess);
 ST_FUNC int find_constraint(ASMOperand *operands, int nb_operands, const char *name, const char **pp);
 ST_FUNC Sym* get_asm_sym(int name, Sym *csym);
 ST_FUNC void asm_expr(TCCState *s1, ExprValue *pe);
+ST_FUNC int asm_label_diff_emit(Sym *sym, int64_t addend, int size);
+ST_FUNC int asm_label_diff_is(Sym *sym);
 ST_FUNC int asm_int_expr(TCCState *s1);
 #if PTR_SIZE == 8
 ST_FUNC void gen_expr64(ExprValue *pe);

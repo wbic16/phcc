@@ -46,6 +46,10 @@
 
 #define OPC_0F        0x100 /* Is secondary map (0x0f prefix) */
 #define OPC_48        0x200 /* Always has REX prefix */
+#define OPC_0F38      0x400 /* Is 0x0f38 map: the stored opcode is an
+                               optional prefix byte (0x66/0xf3, emitted
+                               by the prefix switch) plus the final
+                               opcode byte (F12) */
 #ifdef TCC_TARGET_X86_64
 # define OPC_WLQ     0x1000  /* accepts w, l, q or no suffix */
 # define OPC_BWLQ    (OPC_B | OPC_WLQ) /* accepts b, w, l, q or no suffix */
@@ -404,6 +408,11 @@ static void parse_operand(TCCState *s1, Operand *op)
 	} else if (tok >= TOK_ASM_spl && tok <= TOK_ASM_dil) {
 	    op->type = OP_REG8 | OP_REG8_LOW;
 	    op->reg = 4 + tok - TOK_ASM_spl;
+	} else if (tok >= TOK_ASM_xmm8 && tok <= TOK_ASM_xmm15) {
+	    /* high SSE registers: the encoder's REX logic handles
+	       register numbers 8..15 for OP_SSE operands */
+	    op->type = OP_SSE;
+	    op->reg = 8 + tok - TOK_ASM_xmm8;
         } else if ((op->reg = asm_parse_numeric_reg(tok, &op->type)) >= 0) {
 	    ;
 #endif
@@ -442,7 +451,10 @@ static void parse_operand(TCCState *s1, Operand *op)
             op->e = e;
         } else {
             next();
-            if (tok == '%') {
+            if (tok == '%' || tok == ',') {
+                /* (%reg...) register indirect, or (,index,scale)
+                   base-less SIB: no displacement expression; the
+                   '(' block below parses the register fields */
                 unget_tok('(');
                 op->e.v = 0;
                 op->e.sym = NULL;
@@ -486,6 +498,11 @@ static void parse_operand(TCCState *s1, Operand *op)
 /* XXX: unify with C code output ? */
 ST_FUNC void gen_expr32(ExprValue *pe)
 {
+    if (!pe->pcrel && pe->sym && asm_label_diff_emit(pe->sym, pe->v, 4)) {
+        /* deferred label difference: zero field, patched later */
+        gen_le32(0);
+        return;
+    }
     if (pe->pcrel)
         /* If PC-relative, always set VT_SYM, even without symbol,
 	   so as to force a relocation to be emitted.  */
@@ -499,6 +516,8 @@ static void gen_disp32(ExprValue *pe)
 {
     Sym *sym = pe->sym;
     ElfSym *esym = elfsym(sym);
+    if (sym && asm_label_diff_is(sym))
+        tcc_error("label difference cannot be used as a jump displacement");
     if (esym && esym->st_shndx == cur_text_section->sh_num) {
         /* same section: we can output an absolute value. Note
            that the TCC compiler behaves differently here because
@@ -967,6 +986,8 @@ again:
     }
     if (pa->instr_type & OPC_0F)
         v = ((v & ~0xff) << 8) | 0x0f00 | (v & 0xff);
+    if (pa->instr_type & OPC_0F38)
+        v = 0x0f3800 | (v & 0xff);
     if ((v == 0x69 || v == 0x6b) && nb_ops == 2) {
         /* kludge for imul $im, %reg */
         nb_ops = 3;
@@ -1252,6 +1273,15 @@ ST_FUNC int asm_parse_regvar (int t)
 #define REG_OUT_MASK 0x01
 #define REG_IN_MASK  0x02
 
+/* Number of general-purpose slots at the start of the clobber
+   arrays; the remaining slots up to NB_ASM_REGS record SSE
+   register clobbers (xmm0..), written by asm_clobber only. */
+#ifdef TCC_TARGET_X86_64
+# define NB_GP_REGS 16
+#else
+# define NB_GP_REGS 8
+#endif
+
 #define is_reg_allocated(reg) (regs_allocated[reg] & reg_mask)
 
 ST_FUNC void asm_compute_constraints(ASMOperand *operands,
@@ -1322,6 +1352,10 @@ ST_FUNC void asm_compute_constraints(ASMOperand *operands,
         else
             regs_allocated[i] = 0;
     }
+    /* The SSE clobber slots are records, not allocatable
+       registers: never hand them to an operand. */
+    for(i = NB_GP_REGS; i < NB_ASM_REGS; i++)
+        regs_allocated[i] = REG_IN_MASK | REG_OUT_MASK;
     /* esp cannot be used */
     regs_allocated[4] = REG_IN_MASK | REG_OUT_MASK;
     /* ebp cannot be used yet */
@@ -1724,6 +1758,7 @@ ST_FUNC void asm_gen_code(ASMOperand *operands, int nb_operands,
 ST_FUNC void asm_clobber(uint8_t *clobber_regs, const char *str)
 {
     int reg;
+    const char *s = str;
 #ifdef TCC_TARGET_X86_64
     unsigned int type;
 #endif
@@ -1732,7 +1767,30 @@ ST_FUNC void asm_clobber(uint8_t *clobber_regs, const char *str)
         !strcmp(str, "cc") ||
 	!strcmp(str, "flags"))
         return;
-    reg = tok_alloc_const(str);
+    if (s[0] == '%')
+        s++; /* GCC accepts the register name with or without '%' */
+    if (!strncmp(s, "xmm", 3) && s[3]) {
+        /* SSE register clobber (F12): recorded above the general
+           registers.  TCC's allocator never keeps C values in xmm
+           registers across an asm statement, so -- exactly as for
+           "cc" -- recording is the whole obligation; the marking
+           also keeps asm_compute_constraints from ever treating
+           the slot as free. */
+        char *end;
+        long n = strtol(s + 3, &end, 10);
+        if (*end == '\0' && n >= 0 && n < NB_ASM_REGS - NB_GP_REGS) {
+            clobber_regs[NB_GP_REGS + n] = 1;
+            return;
+        }
+        tcc_error("invalid clobber register '%s'", str);
+    }
+    if (s[0] == 'm' && s[1] == 'm' && s[2] >= '0' && s[2] <= '7'
+        && s[3] == '\0')
+        /* MMX register clobber: accepted; neither backend ever
+           allocates MMX registers, so there is nothing to record
+           (same class as "cc"). */
+        return;
+    reg = tok_alloc_const(s);
     if (reg >= TOK_ASM_eax && reg <= TOK_ASM_edi) {
         reg -= TOK_ASM_eax;
     } else if (reg >= TOK_ASM_ax && reg <= TOK_ASM_di) {

@@ -176,6 +176,17 @@
  DEF_ASM(bpl)
  DEF_ASM(sil)
  DEF_ASM(dil)
+ /* The high SSE registers; these cannot join the contiguous
+    al..db7 block above (its reg>>3 class encoding is full), so
+    parse_operand recognises them explicitly (F12). */
+ DEF_ASM(xmm8)
+ DEF_ASM(xmm9)
+ DEF_ASM(xmm10)
+ DEF_ASM(xmm11)
+ DEF_ASM(xmm12)
+ DEF_ASM(xmm13)
+ DEF_ASM(xmm14)
+ DEF_ASM(xmm15)
 #endif
  /* generic two operands */
  DEF_BWLX(mov)

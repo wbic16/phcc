@@ -781,6 +781,191 @@ structure; the fork's intent is carried, never dropped silently).
     the bindings for machines #2 and #4 (tccgen.c) and that
     file's Design view go STALE until regenerated; machines #1
     and #3, the libtcc1 proof receipts and the assembly listings
+- **F12 — assembler completion cluster (2026-11-07).** The x86
+  assembler learned the surface the benchmark corpora (OpenSSL 4.1.0
+  perlasm, FFmpeg 9.0.2 inline asm) actually use. Nine files:
+  `tccasm.c`, `tcctok.h`, `tcc.h`, `i386-asm.c`, `i386-tok.h`,
+  `i386-asm.h`, `x86_64-asm.h`, `i386-gen.c`, `x86_64-gen.c`
+  (+592 / −39). GAS is the oracle throughout: every encoding added
+  is byte-compared against GAS-assembled `.text` on probe files.
+  - **(a) `.section` full option grammar** (`tccasm.c`): GAS form
+    `name[, "flags"[, @type[, entsize[, group[, comdat]]]]]`.
+    Flag letters a/w/x/M/S/T/G/e map onto SHF_*; `o` accepted as a
+    no-op (SHF_OS_NONCONFORMING has no per-section state here);
+    an unknown flag letter is an error, as in GAS. Types
+    progbits/nobits/note/init_array/fini_array/preinit_array map
+    onto SHT_*; an explicit entsize lands on `sh_entsize`;
+    init/fini/preinit arrays take GAS's natural entsize
+    (PTR_SIZE) when none is given, and a section named `.note` or
+    `.note.*` defaults to SHT_NOTE. Group+comdat operands are
+    parsed and shape-validated but no SHT_GROUP section is
+    emitted (documented limitation; no corpus file needs one).
+    Flags apply only to a section this directive creates —
+    pre-existing sections are never re-flagged. Two measured
+    divergences from GAS, both deliberate: (1) an option-less
+    `.section name` keeps TCC's longstanding SHF_ALLOC default
+    where GAS gives a novel section no flags — TCC's own test
+    suite is the evidence this is load-bearing (tcctest's
+    `.pushsection .data.ignore` block relies on the section being
+    allocated; with GAS's rule `make test` fails in `-run` mode
+    with out-of-range relocations). A flags string, when present
+    (even empty), replaces the default from zero exactly as GAS.
+    (2) The perlasm `#alloc` tail: on x86-64 ELF GAS treats `#`
+    as a comment character, so `.section .note.gnu.property,
+    #alloc` yields a NOTE section with *no* SHF_ALLOC (readelf-
+    verified against the F9 reproducer, whose comment claims the
+    opposite — the claim holds only on targets where `#` is not
+    the comment char). TCC's tokenizer likewise eats `#…` as a
+    line comment in asm files, so the form is accepted with the
+    option-less defaults above; the resulting section differs
+    from GAS's in exactly the ALLOC cell of (1).
+  - **(b) Label differences in data directives** (`tccasm.c`,
+    hooks in `i386-asm.c`): perlasm note tails emit
+    `.long 1f - 0f` (126 occurrences across the corpus), which
+    the eager folder rejected ("invalid operation with label")
+    because the forward label is undefined at parse time.
+    Same-section asm-label differences in non-PC-relative
+    contexts are now deferred: the expression carries a synthetic
+    diff symbol, emission writes a placeholder, and patches are
+    applied at the end of `tcc_assemble_internal` once both
+    labels are defined (undefined or cross-section →
+    `tcc_error`). Cross-section and `.`-relative differences
+    keep the pre-existing PC-relative relocation path untouched
+    (tcctest's `__bug_table` and `661b - .` cases exercise it);
+    a diff symbol used as a jump displacement is an error.
+  - **(c) `.comm`** (`tcctok.h`, `tccasm.c`): GAS semantics —
+    symbol, size, optional alignment (power of two, else error);
+    default alignment is min(16, smallest power of two ≥ size),
+    measured against GAS for sizes 1…1000. Definitions are
+    recorded per assembly unit and materialised at unit end,
+    which is what makes repeated `.comm` merge correctly (max
+    size, max alignment) in both modes: with `-fcommon` the
+    symbol lands in SHN_COMMON with the alignment as its value;
+    with `-fno-common` (TCC's default) it is allocated in `.bss`,
+    mirroring how TCC's C tentative definitions materialise.
+    Type is forced to STT_OBJECT; a `.comm` for a symbol already
+    defined in a real section is an error. Verified symbol-for-
+    symbol against GAS in both modes.
+  - **(d) Base-less SIB operands** (`i386-asm.c`): `(,reg,scale)`
+    and `disp(,reg,scale)` parse — the operand parser now accepts
+    `,` where it previously required `%`. Encoding path is the
+    existing one (base −1 → mod 0, SIB base 5, disp32). Five-form
+    probe byte-identical to GAS; witness file x86_64-gf2m.s
+    unblocked.
+  - **(e) Register table: %xmm8–%xmm15** (`i386-tok.h`,
+    `i386-asm.c`): tokens added *outside* the contiguous register
+    block (insertion inside it would shift the cr/tr/db class
+    arithmetic in the operand parser) with an explicit range
+    branch in `parse_operand`; the encoder needed no change
+    (REX.R/REX.B already handled reg ≥ 8 for OP_SSE). ymm/zmm
+    deliberately not added: no VEX/EVEX encoding exists to back
+    them. Probe byte-identical to GAS, %xmm0–7 regression-free.
+  - **(f) SSE/MMX/SSE2/SSSE3 opcode coverage** (`i386-asm.c`,
+    both asm tables): new `OPC_0F38` table flag for the 0F 38
+    map (stored opcode is prefix byte + final map byte, as with
+    the existing prefix idiom). Added, each byte-verified:
+    movdqa, movdqu, movapd, movupd (66 0F 10/11 — GAS corrected
+    an initial F3 guess), movsd (SSE scalar form; the string
+    instruction of the same name never worked in TCC and is not
+    regressed), movhlps, andps (i386 table), andnps, orps,
+    xorps, shufps, paddq, pshufd, pshuflw, pshufhw, pshufw,
+    pinsrw, pslldq (modrm group **7**), psrldq (group **3** —
+    both corrected against GAS during verification; an early
+    draft had them swapped with other groups), movntq, movntdq,
+    punpcklqdq, punpckhqdq, the packed-double arithmetic family
+    (addpd/subpd/mulpd/divpd, addsd/subsd/mulsd/divsd), the
+    SSSE3 0F 38 family (pshufb, pabsb/w/d, psignb/w/d,
+    pmaddubsw, pmulhrsw — final byte 0x0B per GAS, not 0xF5),
+    adcx/adox (0F 38 F6 with 66/F3, including bare `adcxq`/`adoxq`
+    tokens and the suffix-less 64-bit forms), movbe (0F 38
+    F0/F1), and `pushfl`/`popfl` aliases in the x86-64 table
+    (32-bit templates use them; GAS-64 itself rejects the
+    suffix, TCC accepts — leniency noted). The MMX forms of
+    `pavgb`/`pavgw` were widened from SSE-only operand masks to
+    the MMXSSE idiom (FFmpeg uses `%mm` forms). Two pre-existing
+    defects found and fixed en route: the movaps/movups table
+    entries rejected a register source (`OPT_EA|OPT_REG32`
+    where the source may be an SSE register — baseline fails
+    `movaps %xmm1, %xmm2` identically), mask widened to
+    `OPT_EA|OPT_SSE`; and SSSE3 entries initially double-emitted
+    the 66 prefix (stored prefix byte plus the MMXSSE p66
+    mechanism) — stored prefix removed, p66 supplies it.
+  - **(g) Inline-asm SSE clobbers** (`i386-asm.c`, `tccasm.c`,
+    `i386-gen.c`, `x86_64-gen.c`): clobber lists accept `xmm0`–
+    `xmm15` (x86-64) / `xmm0`–`xmm7` (i386), with or without the
+    `%` prefix — the prefix is now stripped for *all* register
+    clobbers (`"%rax"` also failed at baseline). `mm0`–`mm7`
+    are accepted as recorded no-ops, the same honesty class as
+    the existing `"cc"`/`"flags"` handling; `xmm16`, `ymm0`,
+    and other unknown names still error. Clobbered xmm slots
+    are recorded in the existing `clobber_regs` mechanism
+    (`NB_ASM_REGS` grown past the GP prefix in both backends)
+    and are permanently marked allocated in constraint solving
+    so the 'r' allocator can never select one. Faithfulness
+    note: TCC's allocator never assigns xmm registers to C
+    values (no 'x'/'v' constraints exist) and floating-point
+    register state is not live across statements, so no
+    save/restore obligation arises — recording is the same
+    treatment GP clobbers get, not parse-only acceptance. Also
+    in `tccasm.c`: the clobber-list parser now concatenates
+    adjacent string literals, as C requires — FFmpeg's
+    `"%"FF_REG_a` idiom previously reached the parser as a bare
+    `"%"` and errored even at baseline.
+  - *Corpus evidence (OpenSSL):* of the 42 perlasm files
+    (measured on CFI-stripped copies; the sibling F9 entry covers
+    the `.cfi` lines, which are the first blocker in all 42
+    unstripped files), **12 assemble completely**: aes, aesni,
+    bsaes, cmll, gf2m, keccak1600, md5, rc4, rc4-md5, vpaes, wp,
+    x86_64cpuid. Their `.text` differs from GAS only in four
+    pre-existing TCC policy classes, each reproduced byte-for-
+    byte with the pristine baseline assembler on a policy probe
+    (so none is F12 damage): (A) no jump relaxation (rel32 where
+    GAS shortens to rel8), (B) `.align` filled with 0x90 where
+    GAS uses multi-byte NOPs, (C) shift-by-one emitted in the
+    C1 /ib form where GAS uses D1, (D) same-section branch
+    targets carried in a RELA addend (field zero) where GAS
+    resolves inline — TCC's documented always-relocate branch
+    policy. The remaining 30 files are blocked solely by
+    instruction encodings TCC does not implement at all, in
+    three classes: **BMI2 `mulxq`** (5 files: ecp_nistz256,
+    rsaz-x86_64, x25519, x86_64-mont, x86_64-mont5 — `adcx`/
+    `adox` from the same files now assemble), **VEX 128-bit
+    only** (4 files: aesni-gcm, aesni-mb, aesni-sha1, ghash —
+    the smallest future VEX subset), and **VEX with 256-bit or
+    EVEX forms** (21 files, incl. all AVX-512 files using
+    %zmm/%k/xmm16+). Adding `vzeroupper`/`vzeroall` as special
+    cases was measured and rejected: in every file where one is
+    the first blocker it is followed by 294–5,881 other VEX
+    lines, so the special case would complete zero files while
+    misrepresenting coverage. VEX/EVEX support is a design item
+    (prefix state machine), not table entries; it is recorded
+    here as the assembler's one remaining coverage frontier.
+  - *Corpus evidence (FFmpeg):* full build under the benchmark
+    recipe — every translation unit that was blocked on
+    assembler coverage now compiles, including the XMM_CLOBBERS
+    files (FFmpeg's own configure probe now reports
+    `HAVE_XMM_CLOBBERS 1`) and the pavgw/movapd/mulpd TUs found
+    during the run. The build's remaining failures are exactly
+    the out-of-scope items: 223 × the `mathops.h` 'i'-constraint
+    error (PQ-6, honest `__builtin_constant_p`), one
+    `sys/sysctl.h` configure-detection failure (known non-
+    compiler item), one excess-initializers error (PQ-11), and
+    one C11 char-literal error in libavformat/shared.c (F7's
+    territory). *Suites:* upstream `make test` ALL TESTS PASSED
+    (including the cross builds); the 333-probe conformance spot
+    re-run is unchanged — 328/333 with the same five documented
+    class-(b) divergences (`a_pp_018`, `b_gnu_009`, `b_gnu_015`,
+    `b_gnu_016`, `b_gnu_020`), oracle split 0. The i386 cross
+    compiler was rebuilt with the new tables and its probes
+    byte-match GAS --32. Note for the phext: this entry changes
+    the Source scrolls of `tccasm.c`, `tcctok.h`, `tcc.h`,
+    `i386-asm.c`, `i386-tok.h`, `i386-asm.h`, `x86_64-asm.h`,
+    `i386-gen.c`, and `x86_64-gen.c`, so on the next phext
+    refresh those files' Source scrolls, their Vol 3
+    segmentations and Design views, and the gate verdict go
+    STALE until regenerated; no §A.3 state-machine file is
+    edited (the assembler's operand and section handling is not
+    one of the four machines), and the libtcc1 proof receipts
     are untouched.
 
 ## Maintenance rule

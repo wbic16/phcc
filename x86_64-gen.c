@@ -24,7 +24,11 @@
 
 /* number of available registers */
 #define NB_REGS         25
-#define NB_ASM_REGS     16
+/* Clobber bookkeeping for asm statements: slots 0..15 are the
+   general registers, slots 16..31 record xmm0..xmm15 clobbers
+   (TREG_XMM0 + n).  The high slots are never handed out by the
+   asm operand allocator (see asm_compute_constraints). */
+#define NB_ASM_REGS     32
 #define CONFIG_TCC_ASM
 
 /* a register can belong to several classes. The classes must be

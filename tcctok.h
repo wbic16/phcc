@@ -393,6 +393,7 @@
  DEF_ASMDIR(file)
  DEF_ASMDIR(globl)
  DEF_ASMDIR(global)
+ DEF_ASMDIR(comm)
  DEF_ASMDIR(weak)
  DEF_ASMDIR(hidden)
  DEF_ASMDIR(ident)
