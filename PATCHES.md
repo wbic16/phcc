@@ -29,9 +29,9 @@ from this file alone.
 | `slurp`-era versioning: `VERSION` | 1 line changed | Upstream `VERSION` (0.9.28rc) set to `1.0.0` — the fork's version identity from commit "Forking to v1.0". See rebase resolution R3. |
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
-| `tcc.h` | +48 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. |
-| `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). |
-| `tccgen.c` | +148 / −1 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. |
+| `tcc.h` | +48 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. |
+| `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
+| `tccgen.c` | +148 / −1 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `libtcc.c` | +24 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
@@ -40,6 +40,8 @@ from this file alone.
 | `phext/phext.c` | new, +2,031 | The library implementation (F2), including a scalar XXH3-128 port (from xxhash-rust's const implementation) for scroll checksums. Single translation unit. F4 adds the coordinate hash index behind `phext_map_get`. |
 | `phext/PARITY.md` | new, +268 | The parity audit: all 77 libphext-rs capabilities mapped to their C counterparts, the idiom mapping, divergences D-2…D-6, and the conformance outcome. D-4 superseded annotation added by F4. |
 | `phext/README.md` | new, +54 | Library overview, build/test instructions (including the phcc dogfood invocation), and the idiom-mapping summary. |
+| `include/uchar.h` | new, +28 | C11 `<uchar.h>` for the hosted (glibc) header set (F7): `char16_t`/`char32_t` as `uint_least16_t`/`uint_least32_t` plus the four conversion-function declarations. The tree had no uchar.h outside win32/. |
+| `win32/include/uchar.h` | +5 / −1 | F7: the typedef gate widened from `__STDC_VERSION__ >= 201112L` to also admit `__TINYC__` — phcc implements the u/U literals while reporting 199901L, so its PE builds need the typedefs the gate was withholding. |
 | `phext/tests/` | new, +2,042 | The conformance suite: `test_phext.c` (+1,853) — libphext-rs's own test_lib.rs / test_phokenize.rs / regressions.rs ported case-for-case; `Makefile` (+22); the two regression-1 fixtures (helios phext + message text, +167 lines between them). |
 
 ## Rebase resolution log (Slice 0, 2026-11-07)
@@ -399,6 +401,94 @@ structure; the fork's intent is carried, never dropped silently).
   regenerated. `tccelf.c` is untouched, so machine #3's binding
   stays CURRENT, as do the libtcc1 proof receipts, the assembly
   listings, and the Library-10000 build region.
+- **F7 — C11 `char16_t`/`char32_t` literals are implemented
+  (2026-11-07).** Patch queue item PQ-4 (task 27.6.10/8.6.13/
+  6.6.10): the benchmark programme's FFmpeg build died in
+  `libavformat/shared.c` on `MKTAG(u'\xFF','S','h','$')` — phcc
+  lexed the `u` prefix as an identifier because the literal
+  scanner only knew `L`. The fix extends the existing `L'…'`/
+  `L"…"` machinery instead of adding a parallel one:
+  - *tcc.h:* four token kinds (`TOK_U16CHAR`, `TOK_U32CHAR`,
+    `TOK_U16STR`, `TOK_U32STR` at 0xd0–0xd3, previously unassigned)
+    and `TOK_HAS_VALUE` widened to cover them — required, not
+    decorative: a prefixed literal carried through a macro body
+    (the FFmpeg case is a macro argument) loses its value in the
+    token stream unless the stream treats it as a value token.
+  - *tccpp.c:* the literal parser is parametrized by encoding
+    (0 narrow, 1 `wchar_t`, 2 UTF-16, 3 UTF-32) instead of a
+    boolean `is_long`. `\u`/`\U` escapes are code points,
+    surrogate-split into UTF-16 strings above U+FFFF; `\x` stays
+    one element *of the string's encoding* (matching the
+    oracles' observable behaviour, including inside a UTF-32
+    string); narrow `\u`/`\U` still encode as UTF-8, as before.
+    Source text in prefixed strings is decoded as UTF-8 and
+    re-encoded, so a literal `é` or 😀 in a `u"…"`/`U"…"` string
+    lands as the right code units. The lexer recognizes the
+    `u`/`U` prefixes beside `L` in both the quote and the
+    stray-backslash paths, keeps `u8"…"` a plain `TOK_STR`, and
+    no longer treats a leading `u`/`U` as an identifier start
+    when a quote follows. `tcc -E` prints the new literals with
+    their prefixes (byte-identical preprocessed output to gcc
+    for the probe set).
+  - *tccgen.c:* `u'…'` has type `unsigned short`, `U'…'`
+    `unsigned int` (C11's `uint_least16_t`/`uint_least32_t`
+    semantics on every phcc target). String literals initialize
+    arrays through the same code path as `L"…"`, generalized by
+    element size: same-encoding concatenation copies verbatim,
+    an unprefixed literal concatenated with a prefixed one is
+    decoded as UTF-8 and re-encoded into the wide element size
+    (the oracles' observable rule), and a narrow literal still
+    initializes `uint16_t`/`uint32_t` arrays, as it already did
+    for `unsigned` arrays. One latent casualty found by the
+    probes and fixed in the same pass: the inserted cases had
+    intercepted `TOK_LCHAR`'s non-PE fallthrough to `TOK_CINT`;
+    `L'…'` is spelled out explicitly again (PE: `unsigned
+    short`; elsewhere `int`).
+  - *Headers:* new `include/uchar.h` for the hosted set (the
+    tree had none): the two typedefs plus `c16rtomb`,
+    `mbrtoc16`, `c32rtomb`, `mbrtoc32` declarations. The win32
+    set already shipped a uchar.h but gates its typedefs on
+    `__STDC_VERSION__ >= 201112L`, which phcc never reports;
+    the gate now also admits `__TINYC__` so PE builds see the
+    typedefs the literals need.
+  - *Oracle split, followed not chased:* a `char16_t` constant
+    above the BMP and a `\x` escape whose value exceeds the
+    element width — gcc (and its PP) truncate with a warning,
+    clang rejects both as errors. phcc follows gcc exactly
+    (value `0xDE00` for `u'\U0001F600'`, one unit for
+    `u"\x1F600"`), per the programme's F5 precedent of picking
+    one oracle per split.
+  - *Evidence:* the FFmpeg minimal reproducer now compiles and
+    runs, exit-identical to gcc. A differential probe set
+    (values, `sizeof`/`_Alignof`, string contents incl.
+    surrogate pairs, static/local/exact-fit initializers,
+    concatenation incl. mixed prefixes and macro-carried
+    literals, pointers, `#if`, `_Generic`) prints **byte-
+    identical output under gcc 13.3.0, clang 18.1.3 and phcc**.
+    Upstream `make test` ALL TESTS PASSED. Conformance corpus
+    spot re-run unchanged: the same five documented class-(b)
+    divergences (328/333), nothing new. The PE cross compiler
+    compiles the new literals against the win32 headers
+    (compile receipt only — no PE execution available).
+    FFmpeg itself, on the benchmark recipe, now builds **past
+    shared.c and through ~1,600 objects** before stopping at
+    the *next* queue items, each isolated with a reproducer in
+    phcc-pq4/repro-next/: the `mathops.h` `"i"`-constraint /
+    `__builtin_constant_p` idiom (~190 TUs), SSE register
+    clobbers rejected (`%xmm0`), SSE/MMX opcodes missing from
+    the assembler (`movdqa`, `pshufd`, `xorps`, …), and a
+    designated-initializer defect on anonymous-aggregate
+    members (libswscale/format.c). One further failure is not
+    the compiler's: `sys/sysctl.h` not found (libavutil/cpu.c)
+    is a configure-detection divergence. Note for the phext:
+    this entry changes the Source scrolls of `tccpp.c`,
+    `tccgen.c`, `tcc.h` and `win32/include/uchar.h` and adds
+    `include/uchar.h`, so on the next phext refresh the
+    bindings for machine #1 (tccpp.c), machines #2 and #4
+    (tccgen.c), those files' Design views and the gate verdict
+    go STALE until regenerated; machine #3 (tccelf.c), the
+    libtcc1 proof receipts and the assembly listings are
+    untouched.
 
 ## Maintenance rule
 

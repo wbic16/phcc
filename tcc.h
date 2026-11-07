@@ -1214,8 +1214,14 @@ struct filespec {
 #define TOK_PPNUM   0xcd /* preprocessor number */
 #define TOK_PPSTR   0xce /* preprocessor string */
 #define TOK_LINENUM 0xcf /* line number info */
+/* C11 prefixed literals (F7): value in tokc like their L counterparts */
+#define TOK_U16CHAR 0xd0 /* char16_t constant in tokc */
+#define TOK_U32CHAR 0xd1 /* char32_t constant in tokc */
+#define TOK_U16STR  0xd2 /* pointer to char16_t string in tokc */
+#define TOK_U32STR  0xd3 /* pointer to char32_t string in tokc */
 
-#define TOK_HAS_VALUE(t) (t >= TOK_CCHAR && t <= TOK_LINENUM)
+#define TOK_HAS_VALUE(t) ((t >= TOK_CCHAR && t <= TOK_LINENUM) \
+    || (t >= TOK_U16CHAR && t <= TOK_U32STR))
 
 #define TOK_EOF              (-1) /* end of file */
 #define TOK_LINEFEED         0x0A /* line feed */

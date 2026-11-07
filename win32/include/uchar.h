@@ -15,7 +15,11 @@
  * header.
  */
 
-#if __STDC_VERSION__ >= 201112L
+/* phcc (F7) implements the C11 u/U literals unconditionally even
+ * though it reports __STDC_VERSION__ 199901L, so its builds take
+ * the typedefs too; upstream tcc is unaffected in practice (the
+ * typedefs are plain integer types either way). */
+#if __STDC_VERSION__ >= 201112L || defined(__TINYC__)
 /**
  * __STDC_UTF_16__ The integer constant 1, intended to indicate that
  * values of type char16_t are UTF-16 encoded.
