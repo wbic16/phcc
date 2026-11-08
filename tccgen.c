@@ -3494,6 +3494,11 @@ static int is_compatible_func(CType *type1, CType *type2)
 /* return true if type1 and type2 are the same.  If unqualified is
    true, qualifiers on the types are ignored.
  */
+/* F44: the _BitInt conversion ladder and width, defined with the
+   _BitInt machinery below (compare_types is their first user) */
+static int bi_common(CType *t1, CType *t2, CType *ct);
+static int bi_width(CType *t);
+
 static int compare_types(CType *type1, CType *type2, int unqualified)
 {
     int bt1, t1, t2;
@@ -3504,6 +3509,18 @@ static int compare_types(CType *type1, CType *type2, int unqualified)
        ref, so it is settled here. */
     if (IS_NULLPTR_T(type1->t) || IS_NULLPTR_T(type2->t))
         return IS_NULLPTR_T(type1->t) && IS_NULLPTR_T(type2->t);
+
+    /* F44: _BitInt types are equal only at the same width and
+       signedness.  VT_TYPE below masks out the field that carries
+       the narrow width, so this is settled here; a _BitInt never
+       equals a standard type of the same BTYPE. */
+    if (IS_BITINT(type1->t) || IS_BITINT(type2->t)) {
+        if (!IS_BITINT(type1->t) || !IS_BITINT(type2->t))
+            return 0;
+        if ((type1->t & VT_UNSIGNED) != (type2->t & VT_UNSIGNED))
+            return 0;
+        return bi_width(type1) == bi_width(type2);
+    }
 
     if (IS_ENUM(type1->t)) {
         if (IS_ENUM(type2->t))
@@ -4403,6 +4420,12 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
         }
         if (op == CMP_OP)
           type.t = VT_SIZE_T;
+    } else if (IS_BITINT(t1) || IS_BITINT(t2)) {
+        /* F44: the conditional operator's common type under the
+           _BitInt ladder (arithmetic and comparisons compute the
+           same ladder in gen_op_bi) */
+        if (!bi_common(type1, type2, &type))
+            ret = 0;
     } else if (IS_COMPLEX(t1) || IS_COMPLEX(t2)) {
         /* F40: the common complex type of the operands' element
            types under the scalar ladder; only the conditional
@@ -4465,6 +4488,884 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
     return ret;
 }
 
+/* ------------------------------------------------------------------ */
+/* _BitInt (F44, C23 L3).  Two forms (see tcc.h): narrow rides
+   VT_LLONG with the width in the bit-size field and keeps its
+   values normalized to the width in registers; wide rides
+   VT_STRUCT with an interned descriptor (two u64 limbs, 16
+   bytes) and is memory-resident, its value operations running
+   through the __phcc_bi128_* helpers in libtcc1. */
+
+static Sym *bi_descs[64]; /* interned wide descriptors, by width-65 */
+
+static void bi_make_type(CType *t, int width, int is_unsigned)
+{
+    if (width <= 64) {
+        t->t = VT_LLONG | VT_BITINT_TAG
+            | ((width - 1) << (VT_STRUCT_SHIFT + 6))
+            | (is_unsigned ? VT_UNSIGNED : 0);
+        t->ref = NULL;
+    } else {
+        Sym *d = bi_descs[width - 65];
+        if (!d) {
+            CType ct, ft;
+            Sym *f1, *f2;
+            ft.t = VT_LLONG | VT_UNSIGNED;
+            ft.ref = NULL;
+            ct.t = VT_STRUCT | VT_BITINT_TAG;
+            ct.ref = NULL;
+            d = sym_push(SYM_FIELD, &ct, 8, 16);
+            f1 = sym_push(TOK___real__ | SYM_FIELD, &ft, 0, 0);
+            f2 = sym_push(TOK___imag__ | SYM_FIELD, &ft, 0, 8);
+            d->next = f1;
+            f1->next = f2;
+            f2->next = NULL;
+            bi_descs[width - 65] = d;
+        }
+        t->t = VT_STRUCT | VT_BITINT_TAG
+            | (is_unsigned ? VT_UNSIGNED : 0);
+        t->ref = d;
+    }
+}
+
+static int bi_width(CType *t)
+{
+    int i;
+    if (IS_BITINT_N(t->t))
+        return BITINT_NARROW_WIDTH(t->t);
+    if (IS_BITINT_W(t->t)) {
+        for (i = 0; i < 64; i++)
+            if (bi_descs[i] == t->ref)
+                return i + 65;
+    }
+    return 0;
+}
+
+/* the storage container size of a narrow _BitInt of width w */
+static int bi_container(int w)
+{
+    return w <= 8 ? 1 : w <= 16 ? 2 : w <= 32 ? 4 : 8;
+}
+
+/* integer promotion of one operand type (C23: a _BitInt promotes
+   only out of the small widths; the standard small integer types
+   promote to int as usual) */
+static void bi_promote(CType *t, CType *out)
+{
+    int bt = t->t & VT_BTYPE;
+    *out = *t;
+    out->t &= ~(VT_QUAL | VT_STORAGE);
+    if (IS_BITINT(t->t)) {
+        int w = bi_width(t), un = (t->t & VT_UNSIGNED) != 0;
+        if ((!un && w <= 32) || (un && w <= 31)) {
+            out->t = VT_INT;
+            out->ref = NULL;
+        } else if (un && w <= 32) {
+            out->t = VT_INT | VT_UNSIGNED;
+            out->ref = NULL;
+        }
+    } else if (bt == VT_BYTE || bt == VT_SHORT || bt == VT_BOOL
+               || (IS_ENUM(t->t) && bt != VT_LLONG)) {
+        out->t = VT_INT;
+        out->ref = NULL;
+    }
+}
+
+/* The usual arithmetic conversions with a _BitInt operand (C23
+   6.3.1.8 as amended).  Both _BitInt: no promotion, the wider
+   wins, unsigned on a tie.  One _BitInt: the standard operand is
+   promoted first; then the type that can represent every value
+   of the other wins; if neither can, both convert to the
+   unsigned _BitInt of the greater width.  Returns 0 when no
+   _BitInt survives (the caller's ordinary ladder applies). */
+static int bi_common(CType *t1, CType *t2, CType *ct)
+{
+    int b1 = IS_BITINT(t1->t), b2 = IS_BITINT(t2->t);
+    CType *pb, *ps;
+    CType psp;
+    int w, un, ws, uns, b_rep_s, s_rep_b, align;
+
+    if (!b1 && !b2)
+        return 0;
+    if (b1 && b2) {
+        int w1 = bi_width(t1), w2 = bi_width(t2);
+        if (w1 > w2)
+            *ct = *t1;
+        else if (w2 > w1)
+            *ct = *t2;
+        else {
+            bi_make_type(ct, w1,
+                         ((t1->t | t2->t) & VT_UNSIGNED) != 0);
+            return 1;
+        }
+        ct->t &= ~(VT_QUAL | VT_STORAGE);
+        return 1;
+    }
+    {
+        /* the mixed case: BOTH operands are promoted first (the
+           clang receipts are decisive: unsigned _BitInt(32) +
+           unsigned int has type unsigned int, and _BitInt(8) +
+           char has type int).  If the _BitInt promotes to a
+           standard type, the ordinary ladder decides. */
+        CType pbp;
+        bi_promote(b1 ? t1 : t2, &pbp);
+        bi_promote(b1 ? t2 : t1, &psp);
+        if (!IS_BITINT(pbp.t)) {
+            SValue s1, s2;
+            memset(&s1, 0, sizeof s1);
+            memset(&s2, 0, sizeof s2);
+            s1.type = pbp;
+            s2.type = psp;
+            return combine_types(ct, &s1, &s2, '?');
+        }
+        pb = &pbp;
+    }
+    ps = &psp;
+    if (!is_integer_btype(ps->t & VT_BTYPE) && !IS_ENUM(ps->t))
+        return 0;
+    w = bi_width(pb);
+    un = (pb->t & VT_UNSIGNED) != 0;
+    ws = type_size(ps, &align) * 8;
+    uns = (ps->t & VT_UNSIGNED) != 0;
+    if (un)
+        b_rep_s = uns ? (w >= ws) : 0;
+    else
+        b_rep_s = uns ? (w >= ws + 1) : (w >= ws);
+    if (uns)
+        s_rep_b = un ? (ws >= w) : 0;
+    else
+        s_rep_b = un ? (ws >= w + 1) : (ws >= w);
+    if (b_rep_s)
+        *ct = *pb;
+    else if (s_rep_b)
+        *ct = *ps;
+    else {
+        bi_make_type(ct, w > ws ? w : ws, 1);
+        return 1;
+    }
+    ct->t &= ~(VT_QUAL | VT_STORAGE);
+    return 1;
+}
+
+/* normalize a plain 64-bit quantity to a _BitInt width, in place */
+static uint64_t bi_norm64(uint64_t v, int w, int un)
+{
+    int s;
+    if (w >= 64)
+        return v;
+    if (un)
+        return v & ((1ull << w) - 1);
+    s = 64 - w;
+    return (uint64_t)((int64_t)(v << s) >> s);
+}
+
+/* vtop holds a plain 64-bit value (its type already the plain
+   64-bit type of the same signedness): normalize it to the
+   width.  The caller relabels it to the _BitInt type. */
+static void bi_normalize(int w, int un)
+{
+    CType lt;
+    if (w >= 64)
+        return;
+    if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+        vtop->c.i = bi_norm64(vtop->c.i, w, un);
+        return;
+    }
+    if (vtop->r & VT_LVAL)
+        gv(RC_INT);
+    lt.t = VT_LLONG | (un ? VT_UNSIGNED : 0);
+    lt.ref = NULL;
+    vtop->type = lt;
+    vpushi(64 - w);
+    gen_op(TOK_SHL);
+    vpushi(64 - w);
+    gen_op(un ? TOK_SHR : TOK_SAR);
+}
+
+/* a frame temp for a wide _BitInt value; returns its offset */
+static int bi_temp(void)
+{
+    loc = (loc - 16) & -8;
+    return loc;
+}
+
+/* call a __phcc_bi128_* helper: the args are the top nargs
+   values, in order.  ret is 0 for void, else the return btype
+   (the return value is materialized the way gen_cvt_itof1 does
+   it) */
+static void bi_helper(int tok, int nargs, int ret)
+{
+    vpush_helper_func(tok);
+    vrott(nargs + 1);
+    gfunc_call(nargs);
+    if (ret) {
+        vpushi(0);
+        PUT_R_RET(vtop, ret);
+        vtop->type.t = ret;
+        vtop->type.ref = NULL;
+    }
+}
+
+/* vtop holds a wide _BitInt value: replace it with the address
+   of its 16 bytes, as a pointer value for a helper call */
+static void bi_addr_top(CType *ct)
+{
+    if (vtop->r & VT_LVAL) {
+        gaddrof();
+        mk_pointer(&vtop->type);
+        return;
+    }
+    if ((vtop->r & VT_VALMASK) == VT_LOCAL) {
+        vtop->r |= VT_LVAL;
+        gaddrof();
+        mk_pointer(&vtop->type);
+        return;
+    }
+    {
+        /* anything else (a register-class value cannot occur for
+           a 16-byte type, but a cast result can be a plain value
+           reference): spill it to a temp first */
+        SValue sv = *vtop;
+        int tloc = bi_temp();
+        vpop();
+        vset(ct, VT_LOCAL | VT_LVAL, tloc);
+        vpushv(&sv);
+        vstore();
+        vpop(); /* vstore leaves the stored value */
+        vset(ct, VT_LOCAL | VT_LVAL, tloc);
+        gaddrof();
+        mk_pointer(&vtop->type);
+    }
+}
+
+/* push the address of the wide temp at frame offset off */
+static void bi_push_temp_addr(CType *ct, int off)
+{
+    vset(ct, VT_LOCAL | VT_LVAL, off);
+    gaddrof();
+    mk_pointer(&vtop->type);
+}
+
+/* ---- F44: compile-time folding of wide _BitInt constants.
+   Host twins of the libtcc1 helpers, so constant expressions
+   (above all static initializers) fold exactly as the runtime
+   computes them. ---- */
+static void bi_host_norm(uint64_t *plo, uint64_t *phi, int w, int un);
+
+static int bi_const_image(SValue *v, uint64_t img[2])
+{
+    Section *ssec;
+    const unsigned char *sp;
+    if (!IS_BITINT_W(v->type.t))
+        return 0;
+    if ((v->r & (VT_VALMASK | VT_LVAL | VT_SYM))
+            != (VT_CONST | VT_LVAL | VT_SYM)
+        || !v->sym || v->sym->v < SYM_FIRST_ANOM)
+        return 0;
+    ssec = tcc_state->sections[elfsym(v->sym)->st_shndx];
+    sp = ssec->data + elfsym(v->sym)->st_value + (int)v->c.i;
+    memcpy(&img[0], sp, 8);
+    memcpy(&img[1], sp + 8, 8);
+    return 1;
+}
+
+static void bi_vpush_image(CType *ct, const uint64_t img[2])
+{
+    unsigned long off = section_add(rodata_section, 16, 8);
+    memcpy(rodata_section->data + off, img, 16);
+    vpush_ref(ct, rodata_section, off, 16);
+    vtop->r |= VT_CONST | VT_LVAL;
+}
+
+static void bi_fold_mag(const uint64_t a[2], int un,
+                        uint64_t m[2], int *neg)
+{
+    m[0] = a[0];
+    m[1] = a[1];
+    *neg = 0;
+    if (!un && (a[1] >> 63)) {
+        *neg = 1;
+        m[0] = ~a[0] + 1;
+        m[1] = ~a[1] + (m[0] == 0);
+    }
+}
+
+static void bi_fold_udivmod(const uint64_t a[2], const uint64_t b[2],
+                            uint64_t q[2], uint64_t r[2])
+{
+    int i;
+    q[0] = q[1] = 0;
+    r[0] = r[1] = 0;
+    if (b[0] == 0 && b[1] == 0) {
+        q[0] = q[1] = ~(uint64_t)0;
+        r[0] = a[0];
+        r[1] = a[1];
+        return;
+    }
+    for (i = 127; i >= 0; i--) {
+        r[1] = (r[1] << 1) | (r[0] >> 63);
+        r[0] = (r[0] << 1) | ((a[i >> 6] >> (i & 63)) & 1);
+        if (r[1] > b[1] || (r[1] == b[1] && r[0] >= b[0])) {
+            uint64_t lo = r[0] - b[0];
+            r[1] = r[1] - b[1] - (lo > r[0]);
+            r[0] = lo;
+            q[i >> 6] |= (uint64_t)1 << (i & 63);
+        }
+    }
+}
+
+static int bi_fold_cmp(const uint64_t a[2], const uint64_t b[2], int un)
+{
+    if (!un && (int64_t)a[1] != (int64_t)b[1])
+        return (int64_t)a[1] < (int64_t)b[1] ? -1 : 1;
+    if (un && a[1] != b[1])
+        return a[1] < b[1] ? -1 : 1;
+    if (a[0] != b[0])
+        return a[0] < b[0] ? -1 : 1;
+    return 0;
+}
+
+static int bi_fold_binop(int op, CType *ct, int op_class)
+{
+    uint64_t a[2], b[2], r[2];
+    int w = bi_width(ct), un = (ct->t & VT_UNSIGNED) != 0;
+    if (!bi_const_image(vtop - 1, a) || !bi_const_image(vtop, b))
+        return 0;
+    if (op_class == CMP_OP) {
+        int c = bi_fold_cmp(a, b, un), truth;
+        switch (op) {
+        case TOK_EQ: truth = c == 0; break;
+        case TOK_NE: truth = c != 0; break;
+        case TOK_LT: truth = c < 0; break;
+        case TOK_GT: truth = c > 0; break;
+        case TOK_LE: truth = c <= 0; break;
+        case TOK_GE: truth = c >= 0; break;
+        default: return 0;
+        }
+        vpop();
+        vpop();
+        vpushi(truth);
+        return 1;
+    }
+    switch (op) {
+    case '+':
+        r[0] = a[0] + b[0];
+        r[1] = a[1] + b[1] + (r[0] < a[0]);
+        break;
+    case '-': {
+        uint64_t lo = a[0] - b[0];
+        r[1] = a[1] - b[1] - (lo > a[0]);
+        r[0] = lo;
+        break;
+    }
+    case '*': {
+        unsigned int al[4], bl[4];
+        uint64_t acc[4];
+        int i, j;
+        al[0] = (unsigned int)a[0];
+        al[1] = (unsigned int)(a[0] >> 32);
+        al[2] = (unsigned int)a[1];
+        al[3] = (unsigned int)(a[1] >> 32);
+        bl[0] = (unsigned int)b[0];
+        bl[1] = (unsigned int)(b[0] >> 32);
+        bl[2] = (unsigned int)b[1];
+        bl[3] = (unsigned int)(b[1] >> 32);
+        acc[0] = acc[1] = acc[2] = acc[3] = 0;
+        for (i = 0; i < 4; i++) {
+            uint64_t carry = 0;
+            for (j = 0; j + i < 4; j++) {
+                uint64_t cur = acc[i + j] + (uint64_t)al[i] * bl[j] + carry;
+                acc[i + j] = (unsigned int)cur;
+                carry = cur >> 32;
+            }
+        }
+        r[0] = acc[0] | (acc[1] << 32);
+        r[1] = acc[2] | (acc[3] << 32);
+        break;
+    }
+    case '/': case '%': {
+        uint64_t ma[2], mb[2], q[2], rem[2];
+        int na, nb;
+        bi_fold_mag(a, un, ma, &na);
+        bi_fold_mag(b, un, mb, &nb);
+        bi_fold_udivmod(ma, mb, q, rem);
+        if (op == '/') {
+            if (na != nb) {
+                r[0] = ~q[0] + 1;
+                r[1] = ~q[1] + (r[0] == 0);
+            } else {
+                r[0] = q[0];
+                r[1] = q[1];
+            }
+        } else {
+            if (na) {
+                r[0] = ~rem[0] + 1;
+                r[1] = ~rem[1] + (r[0] == 0);
+            } else {
+                r[0] = rem[0];
+                r[1] = rem[1];
+            }
+        }
+        break;
+    }
+    case '&': r[0] = a[0] & b[0]; r[1] = a[1] & b[1]; break;
+    case '|': r[0] = a[0] | b[0]; r[1] = a[1] | b[1]; break;
+    case '^': r[0] = a[0] ^ b[0]; r[1] = a[1] ^ b[1]; break;
+    default: return 0;
+    }
+    bi_host_norm(&r[0], &r[1], w, un);
+    vpop();
+    vpop();
+    bi_vpush_image(ct, r);
+    return 1;
+}
+
+static int bi_fold_shift(int op, CType *lt)
+{
+    uint64_t a[2], r[2], n;
+    int w = bi_width(lt), un = (lt->t & VT_UNSIGNED) != 0;
+    if (!bi_const_image(vtop - 1, a))
+        return 0;
+    if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST
+        || is_float(vtop->type.t & VT_BTYPE))
+        return 0;
+    n = (uint64_t)vtop->c.i;
+    if (op == TOK_SHL) {
+        if (n >= 128) {
+            r[0] = r[1] = 0;
+        } else if (n >= 64) {
+            r[1] = a[0] << (n - 64);
+            r[0] = 0;
+        } else if (n == 0) {
+            r[0] = a[0];
+            r[1] = a[1];
+        } else {
+            r[1] = (a[1] << n) | (a[0] >> (64 - n));
+            r[0] = a[0] << n;
+        }
+    } else {
+        uint64_t fill = (!un && (a[1] >> 63)) ? ~(uint64_t)0 : 0;
+        if (n >= 128) {
+            r[0] = r[1] = fill;
+        } else if (n >= 64) {
+            r[0] = un ? (a[1] >> (n - 64))
+                      : (uint64_t)((int64_t)a[1] >> (n - 64));
+            r[1] = fill;
+        } else if (n == 0) {
+            r[0] = a[0];
+            r[1] = a[1];
+        } else {
+            r[0] = (a[0] >> n) | (a[1] << (64 - n));
+            r[1] = un ? (a[1] >> n)
+                      : (uint64_t)((int64_t)a[1] >> n);
+        }
+    }
+    bi_host_norm(&r[0], &r[1], w, un);
+    vpop();
+    vpop();
+    bi_vpush_image(lt, r);
+    return 1;
+}
+
+static void gen_op_bi_narrow(int op, CType *ct, int op_class)
+{
+    int w = bi_width(ct), un = (ct->t & VT_UNSIGNED) != 0;
+    CType lt;
+    lt.t = VT_LLONG | (un ? VT_UNSIGNED : 0);
+    lt.ref = NULL;
+    /* load both operands with their _BitInt types intact (the
+       backend load extends from the storage container, yielding
+       the normalized value); only then relabel to plain slots */
+    gv(RC_INT);
+    vswap();
+    gv(RC_INT);
+    vswap();
+    /* both operands hold normalized values, so as plain 64-bit
+       quantities the machine operation is the _BitInt operation
+       wrapped at 64 bits; renormalizing to the width completes
+       it (comparisons need no normalization: they read the
+       normalized operands directly) */
+    vtop[-1].type = lt;
+    vtop[0].type = lt;
+    gen_op(op);
+    if (op_class == CMP_OP)
+        return;
+    vtop->type = *ct;
+    bi_normalize(w, un);
+    vtop->type = *ct;
+}
+
+static void gen_op_bi_wide(int op, CType *ct, int op_class)
+{
+    int w = bi_width(ct), un = (ct->t & VT_UNSIGNED) != 0;
+    int rloc, htok, nargs;
+    SValue a_addr, b_addr;
+
+    if (op_class == CMP_OP) {
+        /* the helper's three-way comparison, tested against 0 */
+        bi_addr_top(ct);
+        b_addr = *vtop;
+        vpop();
+        bi_addr_top(ct);
+        vpushv(&b_addr);
+        vpushi(w);
+        vpushi(un);
+        bi_helper(TOK___phcc_bi128_cmp, 4, VT_INT);
+        vpushi(0);
+        gen_op(op);
+        return;
+    }
+    switch (op) {
+    case '+': htok = TOK___phcc_bi128_add; nargs = 5; break;
+    case '-': htok = TOK___phcc_bi128_sub; nargs = 5; break;
+    case '*': htok = TOK___phcc_bi128_mul; nargs = 5; break;
+    case '/': htok = TOK___phcc_bi128_div; nargs = 5; break;
+    case '%': htok = TOK___phcc_bi128_mod; nargs = 5; break;
+    case '&': htok = TOK___phcc_bi128_and; nargs = 3; break;
+    case '|': htok = TOK___phcc_bi128_or; nargs = 3; break;
+    case '^': htok = TOK___phcc_bi128_xor; nargs = 3; break;
+    default:
+        tcc_error("operation not supported on wide '_BitInt' (F44)");
+        return;
+    }
+    bi_addr_top(ct);
+    b_addr = *vtop;
+    vpop();
+    bi_addr_top(ct);
+    a_addr = *vtop;
+    vpop();
+    rloc = bi_temp();
+    bi_push_temp_addr(ct, rloc);
+    vpushv(&a_addr);
+    vpushv(&b_addr);
+    if (nargs == 5) {
+        vpushi(w);
+        vpushi(un);
+    }
+    bi_helper(htok, nargs, 0);
+    vset(ct, VT_LOCAL | VT_LVAL, rloc);
+}
+
+static void gen_op_bi(int op)
+{
+    int op_class = op;
+    CType ct;
+    int t1 = vtop[-1].type.t, t2 = vtop[0].type.t;
+
+    if (op == TOK_SHR || op == TOK_SAR || op == TOK_SHL)
+        op_class = SHIFT_OP;
+    else if (TOK_ISCOND(op))
+        op_class = CMP_OP;
+
+    /* a floating operand converts the _BitInt operand to the
+       floating type and the operation proceeds as floating */
+    if (is_float(t1 & VT_BTYPE) || is_float(t2 & VT_BTYPE)) {
+        int bi_on_top = IS_BITINT(t2);
+        if (!bi_on_top)
+            vswap();
+        gen_cast(&vtop[-1].type);
+        if (!bi_on_top)
+            vswap();
+        gen_op(op);
+        return;
+    }
+    if ((t1 & VT_BTYPE) == VT_PTR || (t2 & VT_BTYPE) == VT_PTR) {
+        /* pointer arithmetic and comparison with a _BitInt
+           operand: the _BitInt converts to the pointer-sized
+           integer type and the ordinary path proceeds (a _BitInt
+           is an integer type, so it may index a pointer) */
+        CType szt;
+        szt.t = VT_SIZE_T;
+        szt.ref = NULL;
+        if (IS_BITINT(vtop[0].type.t)) {
+            gen_cast(&szt);
+        } else if (IS_BITINT(vtop[-1].type.t)) {
+            vswap();
+            gen_cast(&szt);
+            vswap();
+        }
+        gen_op(op);
+        return;
+    }
+    if (((t1 & VT_BTYPE) == VT_STRUCT && !IS_BITINT(t1))
+        || ((t2 & VT_BTYPE) == VT_STRUCT && !IS_BITINT(t2))
+        || (t1 & VT_BTYPE) == VT_FUNC || (t2 & VT_BTYPE) == VT_FUNC
+        || (t1 & VT_BTYPE) == VT_VOID || (t2 & VT_BTYPE) == VT_VOID)
+        tcc_error("invalid operand types for binary operation");
+
+    if (op_class == SHIFT_OP) {
+        /* shifts take no usual arithmetic conversions: the result
+           type is the promoted left operand's type */
+        CType lt = vtop[-1].type;
+        if (IS_BITINT(lt.t)) {
+            CType pr;
+            bi_promote(&lt, &pr);
+            if (!IS_BITINT(pr.t)) {
+                /* the left operand promoted away entirely */
+                vswap();
+                gen_cast(&pr);
+                vswap();
+                gen_op(op);
+                return;
+            }
+            /* the count becomes a plain 64-bit value */
+            if (IS_BITINT(vtop[0].type.t)) {
+                CType ull;
+                ull.t = VT_LLONG | VT_UNSIGNED;
+                ull.ref = NULL;
+                gen_cast(&ull);
+            }
+            if (IS_BITINT_W(pr.t)) {
+                SValue a_addr, cnt;
+                int rloc;
+                if (bi_fold_shift(op, &pr))
+                    return;
+                cnt = *vtop;
+                vpop();
+                bi_addr_top(&pr);
+                a_addr = *vtop;
+                vpop();
+                rloc = bi_temp();
+                bi_push_temp_addr(&pr, rloc);
+                vpushv(&a_addr);
+                vpushv(&cnt);
+                vpushi(bi_width(&pr));
+                vpushi((pr.t & VT_UNSIGNED) != 0);
+                bi_helper(op == TOK_SHL ? TOK___phcc_bi128_shl
+                          : TOK___phcc_bi128_shr, 5, 0);
+                vset(&pr, VT_LOCAL | VT_LVAL, rloc);
+                return;
+            }
+            /* narrow shift: plain 64-bit shift of the normalized
+               value; only << can leave the width */
+            {
+                CType plt;
+                plt.t = VT_LLONG | (lt.t & VT_UNSIGNED);
+                plt.ref = NULL;
+                vtop[-1].type = plt;
+                if (IS_BITINT(vtop[0].type.t))
+                    vtop[0].type = plt;
+                gen_op(op);
+                vtop->type = pr;
+                if (op == TOK_SHL) {
+                    bi_normalize(bi_width(&pr),
+                                 (pr.t & VT_UNSIGNED) != 0);
+                    vtop->type = pr;
+                }
+                return;
+            }
+        }
+        /* a plain left operand: the _BitInt is only a count */
+        {
+            CType ull;
+            ull.t = VT_LLONG | VT_UNSIGNED;
+            ull.ref = NULL;
+            gen_cast(&ull);
+        }
+        gen_op(op);
+        return;
+    }
+
+    if (!bi_common(&vtop[-1].type, &vtop[0].type, &ct))
+        tcc_error("invalid operand types for binary operation");
+    gen_cast(&ct);
+    vswap();
+    gen_cast(&ct);
+    vswap();
+    if (IS_BITINT_W(ct.t)) {
+        if (bi_fold_binop(op, &ct, op_class))
+            return;
+        gen_op_bi_wide(op, &ct, op_class);
+        return;
+    }
+    if (IS_BITINT_N(ct.t)) {
+        gen_op_bi_narrow(op, &ct, op_class);
+        return;
+    }
+    /* the common type is a standard integer: the casts above did
+       the whole conversion */
+    gen_op(op);
+}
+
+/* conversions with a wide _BitInt side: everything runs on
+   memory through the cast helper (or its tod/nonzero siblings).
+   On entry vtop holds the source; on return it holds the
+   converted value with approximately the destination type (the
+   caller in gen_cast fixes the exact type). */
+static void gen_cast_bi_wide(CType *dt)
+{
+    CType *st = &vtop->type;
+    int dw = IS_BITINT_W(dt->t) ? bi_width(dt) : 0;
+    int sw = IS_BITINT_W(st->t) ? bi_width(st) : 0;
+    CType u64t;
+    u64t.t = VT_LLONG | VT_UNSIGNED;
+    u64t.ref = NULL;
+
+    if (IS_BITINT_W(dt->t)) {
+        int rloc = bi_temp();
+        if (IS_BITINT_W(st->t)) {
+            SValue a_addr;
+            if (sw == dw
+                && ((st->t ^ dt->t) & VT_UNSIGNED) == 0
+                && (vtop->r & VT_LVAL)) {
+                /* identity: the value already has the destination
+                   form in memory */
+                return;
+            }
+            bi_addr_top(st);
+            a_addr = *vtop;
+            vpop();
+            bi_push_temp_addr(dt, rloc);
+            vpushv(&a_addr);
+            vpushi(sw);
+            vpushi((st->t & VT_UNSIGNED) != 0);
+            vpushi(dw);
+            vpushi((dt->t & VT_UNSIGNED) != 0);
+            bi_helper(TOK___phcc_bi128_cast, 6, 0);
+            vset(dt, VT_LOCAL | VT_LVAL, rloc);
+            return;
+        }
+        if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
+            && !is_float(st->t & VT_BTYPE)) {
+            /* F44: a constant scalar source folds on the host
+               (the two-step normalize of the cast helper,
+               computed at compile time) */
+            uint64_t img[2];
+            int sw2, sun2 = (st->t & VT_UNSIGNED) != 0;
+            if (IS_BITINT_N(st->t)) {
+                sw2 = bi_width(st);
+                img[0] = (uint64_t)vtop->c.i;
+                img[1] = sun2 ? 0
+                    : ((img[0] >> 63) ? ~(uint64_t)0 : 0);
+            } else {
+                int ssz, al2;
+                ssz = type_size(st, &al2);
+                img[0] = (uint64_t)vtop->c.i;
+                if (ssz < 8 && !sun2)
+                    img[0] = (uint64_t)((int64_t)(img[0] << (64 - ssz * 8))
+                                        >> (64 - ssz * 8));
+                if (ssz < 8 && sun2)
+                    img[0] &= ((uint64_t)1 << (ssz * 8)) - 1;
+                img[1] = sun2 ? 0
+                    : ((img[0] >> 63) ? ~(uint64_t)0 : 0);
+                sw2 = 64;
+            }
+            bi_host_norm(&img[0], &img[1], sw2, sun2);
+            bi_host_norm(&img[0], &img[1], dw,
+                         (dt->t & VT_UNSIGNED) != 0);
+            vpop();
+            bi_vpush_image(dt, img);
+            return;
+        }
+        {
+            /* scalar -> wide: build the value's 128-bit image
+               (sign/zero-extended from its plain 64-bit form) in
+               a buffer, then convert with the cast helper */
+            int bloc, sun;
+            SValue val;
+            sun = is_float(st->t & VT_BTYPE) ? 0
+                : (st->t & VT_UNSIGNED) != 0;
+            if (IS_BITINT_N(st->t)) {
+                vtop->type.t = VT_LLONG | (st->t & VT_UNSIGNED);
+                vtop->type.ref = NULL;
+            } else {
+                CType lt;
+                lt.t = VT_LLONG | (sun ? VT_UNSIGNED : 0);
+                lt.ref = NULL;
+                gen_cast(&lt);
+            }
+            val = *vtop;
+            vpop();
+            bloc = bi_temp();
+            vset(&u64t, VT_LOCAL | VT_LVAL, bloc);
+            vpushv(&val);
+            vstore();
+            vpop(); /* vstore leaves the stored value */
+            vset(&u64t, VT_LOCAL | VT_LVAL, bloc + 8);
+            if (sun) {
+                vpushi(0);
+            } else {
+                vpushv(&val);
+                vpushi(63);
+                gen_op(TOK_SAR);
+            }
+            vstore();
+            vpop();
+            bi_push_temp_addr(dt, rloc);
+            bi_push_temp_addr(dt, bloc);
+            vpushi(64);
+            vpushi(sun);
+            vpushi(dw);
+            vpushi((dt->t & VT_UNSIGNED) != 0);
+            bi_helper(TOK___phcc_bi128_cast, 6, 0);
+            vset(dt, VT_LOCAL | VT_LVAL, rloc);
+            return;
+        }
+    }
+    /* the source is wide and the destination a scalar */
+    {
+        uint64_t img[2];
+        if (bi_const_image(vtop, img)
+            && !is_float(dt->t & VT_BTYPE)) {
+            /* F44: a wide constant source folds on the host */
+            int sw2 = bi_width(st), sun2 = (st->t & VT_UNSIGNED) != 0;
+            CValue cv;
+            if ((dt->t & VT_BTYPE) == VT_BOOL) {
+                int nz = (img[0] || img[1]) ? 1 : 0;
+                vpop();
+                vpushi(nz);
+                return;
+            }
+            {
+                int al2, dw2 = IS_BITINT_N(dt->t) ? bi_width(dt)
+                            : type_size(dt, &al2) * 8;
+                bi_host_norm(&img[0], &img[1], sw2, sun2);
+                bi_host_norm(&img[0], &img[1], dw2,
+                             (dt->t & VT_UNSIGNED) != 0);
+                cv.i = (long long)img[0];
+                vpop();
+                vsetc(dt, VT_CONST, &cv);
+                return;
+            }
+        }
+    }
+    if ((dt->t & VT_BTYPE) == VT_BOOL) {
+        bi_addr_top(st);
+        bi_helper(TOK___phcc_bi128_nonzero, 1, VT_INT);
+        return;
+    }
+    if (is_float(dt->t & VT_BTYPE)) {
+        bi_addr_top(st);
+        vpushi(sw);
+        vpushi((st->t & VT_UNSIGNED) != 0);
+        bi_helper(TOK___phcc_bi128_tod, 3, VT_DOUBLE);
+        if ((dt->t & VT_BTYPE) != VT_DOUBLE)
+            gen_cast(dt);
+        return;
+    }
+    {
+        /* wide -> integer: convert into a temp at the
+           destination width, then take the low limb (the cast
+           helper normalizes across all 128 bits, so the low
+           limb is the destination value in 64-bit form) */
+        int rloc = bi_temp(), align, dw2;
+        SValue a_addr;
+        dw2 = type_size(dt, &align) * 8;
+        bi_addr_top(st);
+        a_addr = *vtop;
+        vpop();
+        bi_push_temp_addr(st, rloc);
+        vpushv(&a_addr);
+        vpushi(sw);
+        vpushi((st->t & VT_UNSIGNED) != 0);
+        vpushi(dw2);
+        vpushi((dt->t & VT_UNSIGNED) != 0);
+        bi_helper(TOK___phcc_bi128_cast, 6, 0);
+        vset(&u64t, VT_LOCAL | VT_LVAL, rloc);
+        gv(RC_INT);
+    }
+}
+
 /* generic gen_op: handles types problems */
 ST_FUNC void gen_op(int op)
 {
@@ -4486,6 +5387,15 @@ ST_FUNC void gen_op(int op)
     if (!TOK_ISCOND(op)
         && (IS_NULLPTR_T(vtop[-1].type.t) || IS_NULLPTR_T(vtop[0].type.t)))
         tcc_error("arithmetic on 'nullptr_t'");
+
+    /* F44: _BitInt arithmetic is computed by the _BitInt
+       machinery (the generic paths below would read a narrow
+       form's width field as a bit-field size, and a wide form
+       as an ordinary struct) */
+    if (IS_BITINT(vtop[-1].type.t) || IS_BITINT(vtop[0].type.t)) {
+        gen_op_bi(op);
+        return;
+    }
 
     if (op == TOK_SHR || op == TOK_SAR || op == TOK_SHL)
         op_class = SHIFT_OP;
@@ -4745,6 +5655,76 @@ static void gen_cast(CType *type)
             tcc_error("conversion from 'nullptr_t' to incompatible type");
     }
 
+    /* F44: _BitInt conversions.  A narrow value is a normalized
+       64-bit quantity, so conversions through it reduce to a
+       renormalize-and-relabel; anything touching the wide form
+       runs on memory in gen_cast_bi_wide(). */
+    if (IS_BITINT(vtop->type.t) || IS_BITINT(type->t)) {
+        CType *dt = type, *st = &vtop->type;
+        int dbt2 = dt->t & VT_BTYPE, sbt2 = st->t & VT_BTYPE;
+        if ((dbt2 == VT_STRUCT && !IS_BITINT(dt->t))
+            || (sbt2 == VT_STRUCT && !IS_BITINT(st->t))) {
+            /* an ordinary struct on the other side: not a _BitInt
+               conversion -- fall through to the struct paths */
+        } else if (dbt2 == VT_PTR || sbt2 == VT_PTR
+                   || dbt2 == VT_FUNC || sbt2 == VT_FUNC) {
+            tcc_error("invalid conversion involving '_BitInt' (F44)");
+        } else if (IS_BITINT_W(dt->t) || IS_BITINT_W(st->t)) {
+            gen_cast_bi_wide(dt);
+            vtop->type = *type;
+            vtop->type.t &= ~(VT_QUAL | VT_ARRAY | VT_TLS);
+            return;
+        } else if (IS_BITINT(dt->t)) {
+            /* to a narrow _BitInt: reduce the source to a plain
+               64-bit value of its own signedness, then normalize
+               to the destination width */
+            int dw = bi_width(dt), dun = (dt->t & VT_UNSIGNED) != 0;
+            if (IS_BITINT_N(st->t)) {
+                gv(RC_INT); /* container load, type intact */
+                vtop->type.t = VT_LLONG | (st->t & VT_UNSIGNED);
+                vtop->type.ref = NULL;
+            } else {
+                CType lt;
+                int sun = is_float(sbt2) ? 0
+                    : (st->t & VT_UNSIGNED) != 0;
+                lt.t = VT_LLONG | (sun ? VT_UNSIGNED : 0);
+                lt.ref = NULL;
+                gen_cast(&lt);
+            }
+            vtop->type.t = VT_LLONG | (dun ? VT_UNSIGNED : 0);
+            vtop->type.ref = NULL;
+            bi_normalize(dw, dun);
+            vtop->type = *type;
+            vtop->type.t &= ~(VT_QUAL | VT_ARRAY | VT_TLS);
+            return;
+        } else {
+            /* from a narrow _BitInt to a scalar */
+            int sun = (st->t & VT_UNSIGNED) != 0;
+            gv(RC_INT); /* container load, type intact */
+            vtop->type.t = VT_LLONG | (sun ? VT_UNSIGNED : 0);
+            vtop->type.ref = NULL;
+            if (dbt2 == VT_BOOL) {
+                vpushi(0);
+                gen_op(TOK_NE);
+                vtop->type = *type;
+                vtop->type.t &= ~(VT_QUAL | VT_ARRAY | VT_TLS);
+                return;
+            }
+            if (is_integer_btype(dbt2)) {
+                /* exactly a normalize to the destination width
+                   and signedness (modular where the destination
+                   cannot hold the value) */
+                int align, dsz = type_size(dt, &align);
+                if (dsz < 8)
+                    bi_normalize(dsz * 8, (dt->t & VT_UNSIGNED) != 0);
+            }
+            /* the value now stands as the plain 64-bit form the
+               ordinary cast expects */
+            gen_cast(type);
+            return;
+        }
+    }
+
     /* special delayed cast for char/short */
     if (vtop->r & VT_MUSTCAST)
         force_charshort_cast();
@@ -4998,6 +5978,21 @@ ST_FUNC int type_size(CType *type, int *a)
     Sym *s;
     int bt;
 
+    /* F44: _BitInt layout (the oracles' measured rule): the
+       storage is the smallest power-of-two container holding the
+       width, its alignment is its size, except that the 16-byte
+       wide form aligns to 8.  This pre-empts the VT_STRUCT case
+       below, whose descriptor size is also 16 by construction. */
+    if (IS_BITINT_N(type->t)) {
+        int sz = bi_container(BITINT_NARROW_WIDTH(type->t));
+        *a = sz;
+        return sz;
+    }
+    if (IS_BITINT_W(type->t)) {
+        *a = 8;
+        return 16;
+    }
+
     bt = type->t & VT_BTYPE;
     if (bt == VT_STRUCT) {
         /* struct/union */
@@ -5158,6 +6153,17 @@ static void verify_assign_cast(CType *dt)
             tcc_error("conversion from 'nullptr_t' to incompatible type");
         return;
     }
+    if (IS_BITINT(dt->t) || IS_BITINT(st->t)) {
+        /* F44: _BitInt converts to and from every arithmetic type
+           (and _Bool), but never to or from a pointer, a function,
+           or an ordinary struct/union */
+        int sok = IS_BITINT(st->t) || is_integer_btype(sbt) || is_float(sbt);
+        int dok = IS_BITINT(dt->t) || is_integer_btype(dbt) || is_float(dbt);
+        if (sok && dok)
+            return;
+        cast_error(st, dt);
+        return;
+    }
     switch(dbt) {
     case VT_VOID:
         if (sbt != dbt)
@@ -5269,6 +6275,21 @@ ST_FUNC void vstore(void)
             SValue m = cx_mat(vtop);
             *vtop = m;
         }
+        ft = vtop[-1].type.t;
+        sbt = vtop->type.t & VT_BTYPE;
+        dbt = ft & VT_BTYPE;
+    }
+
+    /* F44: convert a _BitInt source to the destination type (or
+       a scalar source to a _BitInt destination) before the struct
+       and scalar store paths below classify the operands -- a
+       wide _BitInt destination has BTYPE VT_STRUCT and would
+       otherwise memcpy from a scalar's address */
+    if (IS_BITINT(vtop->type.t) || IS_BITINT(ft)) {
+        if (!IS_BITINT(vtop->type.t) || !IS_BITINT(ft)
+            || bi_width(&vtop->type) != bi_width(&vtop[-1].type)
+            || ((vtop->type.t ^ ft) & VT_UNSIGNED))
+            gen_cast(&vtop[-1].type);
         ft = vtop[-1].type.t;
         sbt = vtop->type.t & VT_BTYPE;
         dbt = ft & VT_BTYPE;
@@ -6063,6 +7084,10 @@ static void struct_decl(CType *type, int u)
             if (!parse_btype(&btype, &ad1, 0)
              || !is_integer_btype(btype.t & VT_BTYPE))
                 expect("enum type");
+            /* F44: an enum's fixed type rides the same field a
+               _BitInt's width does; the two cannot combine */
+            if (IS_BITINT(btype.t))
+                tcc_error("enum with '_BitInt' underlying type is not supported (F44)");
             bt = ut = btype.t & (VT_BTYPE|VT_LONG|VT_UNSIGNED|VT_DEFSIGN);
         }
     }
@@ -6284,6 +7309,11 @@ do_decl:
                     if (at_c23_attribute())
                         skip_c23_attributes();
                     if (tok == ':') {
+                        /* F44: a _BitInt member's width already
+                           rides its type's bit-size field, which a
+                           bit-field width would overwrite */
+                        if (IS_BITINT(type1.t))
+                            tcc_error("'_BitInt' bit-field members are not supported (F44)");
                         next();
                         bit_size = expr_const();
                         /* XXX: handle v = 0 case for messages */
@@ -6520,6 +7550,7 @@ static void parse_btype_qualify(CType *type, int qualifiers)
 static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
 {
     int t, u, bt, st, type_found, typespec_found, g, n, cx_spec;
+    int bi_spec;
     Sym *s;
     CType type1;
 
@@ -6528,6 +7559,7 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
     auto_type_seen = 0;
     f128_typedef_name = 0;
     cx_spec = 0;
+    bi_spec = 0;
     type_found = 0;
     typespec_found = 0;
     t = VT_INT;
@@ -6742,7 +7774,18 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             next();
             break;
         case TOK_BITINT:
-            tcc_error("'_BitInt' is not supported yet (F44)");
+            /* F44: _BitInt(N), N an integer constant expression,
+               1..128; the sign comes from the accumulated
+               specifiers and the type is assembled at the_end */
+            if (bi_spec)
+                tcc_error("duplicate '_BitInt' specifier");
+            next();
+            skip('(');
+            bi_spec = expr_const();
+            if (bi_spec < 1 || bi_spec > 128)
+                tcc_error("'_BitInt' width %d out of range (1..128) (F44)", bi_spec);
+            skip(')');
+            typespec_found = 1;
             break;
         case '[':
             /* F42: C23 attribute specifier in specifier position;
@@ -6902,6 +7945,22 @@ the_end:
 #endif
         type->t = cxt->t | (t & (VT_QUAL | VT_STORAGE));
         type->ref = cxt->ref;
+        check_restrict_type(type);
+        return type_found;
+    }
+    if (bi_spec) {
+        /* F44: assemble the _BitInt type from the width and the
+           accumulated sign; no other basic-type specifier may
+           combine with it */
+        if (bt != -1 || st != -1 || (t & VT_LONG))
+            tcc_error("invalid type specifier combination with '_BitInt'");
+        if (!(t & VT_UNSIGNED) && bi_spec < 2)
+            tcc_error("signed '_BitInt' must have a width of at least 2 (F44)");
+#if !defined TCC_TARGET_X86_64 || defined TCC_TARGET_PE
+        tcc_error("'_BitInt' is only supported on Linux x86_64 (F44)");
+#endif
+        bi_make_type(type, bi_spec, (t & VT_UNSIGNED) != 0);
+        type->t |= (t & (VT_QUAL | VT_STORAGE));
         check_restrict_type(type);
         return type_found;
     }
@@ -7691,6 +8750,28 @@ ST_FUNC void unary(void)
 	vsetc(&type, VT_CONST, &tokc);
         next();
         break;
+    case TOK_CBITINT:
+        /* F44: a wb literal: its type is the _BitInt of the
+           minimal width parse_number computed.  A narrow value
+           is a plain constant; a wide one is materialized as an
+           anonymous static (rodata) constant, like a long double
+           complex constant. */
+        bi_make_type(&type, tok_bi_width, tok_bi_unsigned);
+        if (tok_bi_width <= 64) {
+            tokc.i = bi_norm64(
+                (uint64_t)(unsigned int)tokc.tab[0]
+                | ((uint64_t)(unsigned int)tokc.tab[1] << 32),
+                tok_bi_width, tok_bi_unsigned);
+            vsetc(&type, VT_CONST, &tokc);
+        } else {
+            unsigned long off = section_add(rodata_section, 16, 8);
+            unsigned char *p = rodata_section->data + off;
+            memcpy(p, tokc.tab, 16);
+            vpush_ref(&type, rodata_section, off, 16);
+            vtop->r |= VT_CONST | VT_LVAL;
+        }
+        next();
+        break;
     case TOK_NULLPTR:
         /* F42: the C23 nullptr constant.  Its type is nullptr_t
            (VT_PTR with the F42 tag bits, no pointee); the value is
@@ -7887,6 +8968,17 @@ ST_FUNC void unary(void)
         if (IS_COMPLEX(vtop->type.t)) {
             /* F40: both oracles take ~z as the conjugate (GNU) */
             cx_negate(1);
+            break;
+        }
+        if (IS_BITINT(vtop->type.t)) {
+            /* F44: unary ~ does not promote a _BitInt operand
+               (the result keeps the _BitInt type, C23 as measured
+               against clang) -- build the mask in the type */
+            CType bt = vtop->type;
+            bt.t &= ~(VT_QUAL | VT_ARRAY | VT_TLS);
+            vpushi(-1);
+            gen_cast(&bt);
+            gen_op('^');
             break;
         }
         vpushi(-1);
@@ -8203,7 +9295,17 @@ ST_FUNC void unary(void)
             cx_negate(0);
         } else if (is_float(vtop->type.t)) {
             gen_opif(TOK_NEG);
-	} else {
+	} else if (IS_BITINT(vtop->type.t)) {
+            /* F44: unary - does not promote a _BitInt operand;
+               the negation wraps at the width -- compute 0 - x
+               with both operands in the _BitInt type */
+            CType bt = vtop->type;
+            bt.t &= ~(VT_QUAL | VT_ARRAY | VT_TLS);
+            vpushi(0);
+            gen_cast(&bt);
+            vswap();
+            gen_op('-');
+        } else {
             vpushi(0);
             vswap();
             gen_op('-');
@@ -10578,6 +11680,87 @@ static int str_cat_narrow_as_elems(CString *out, int size1)
    list, so the speculative-parse hook does not re-enter */
 static int cx_init_replay;
 
+/* F44: normalize a 128-bit limb pair to a _BitInt width, on the
+   host (the compile-time twin of libtcc1's bi128_norm) */
+static void bi_host_norm(uint64_t *plo, uint64_t *phi, int w, int un)
+{
+    uint64_t lo = *plo, hi = *phi;
+    if (w >= 128)
+        return;
+    if (un) {
+        if (w <= 64) {
+            lo &= w == 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
+            hi = 0;
+        } else {
+            hi &= ((uint64_t)1 << (w - 64)) - 1;
+        }
+    } else if (w <= 64) {
+        if (w < 64)
+            lo = (uint64_t)((int64_t)(lo << (64 - w)) >> (64 - w));
+        hi = (lo >> 63) ? ~(uint64_t)0 : 0;
+    } else {
+        int k = w - 64;
+        if (k < 64)
+            hi = (uint64_t)((int64_t)(hi << (64 - k)) >> (64 - k));
+    }
+    *plo = lo;
+    *phi = hi;
+}
+
+/* F44: store a constant initializer for a wide _BitInt object in
+   static storage.  vtop holds the evaluated (not yet converted)
+   initializer: a wide _BitInt constant (its limbs are read from
+   its section) or a scalar integer constant (extended per its
+   own type).  The conversion is the cast helper's two-step
+   normalize, computed on the host. */
+static void bi_static_store(init_params *p, CType *type, unsigned long c)
+{
+    uint64_t lo, hi;
+    int sw, sun, dw, dun, align;
+    unsigned char *ptr;
+
+    dw = bi_width(type);
+    dun = (type->t & VT_UNSIGNED) != 0;
+    init_assert(p, c + 16);
+    ptr = (unsigned char *)p->sec->data + c;
+    if (IS_BITINT_W(vtop->type.t)
+        && (vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM))
+            == (VT_CONST | VT_LVAL | VT_SYM)
+        && vtop->sym && vtop->sym->v >= SYM_FIRST_ANOM) {
+        Section *ssec = tcc_state->sections[elfsym(vtop->sym)->st_shndx];
+        const unsigned char *sp = ssec->data + elfsym(vtop->sym)->st_value
+            + (int)vtop->c.i;
+        memcpy(&lo, sp, 8);
+        memcpy(&hi, sp + 8, 8);
+        sw = bi_width(&vtop->type);
+        sun = (vtop->type.t & VT_UNSIGNED) != 0;
+    } else if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
+               && !is_float(vtop->type.t & VT_BTYPE)) {
+        int ssz = type_size(&vtop->type, &align);
+        lo = vtop->c.i;
+        sun = (vtop->type.t & VT_UNSIGNED) != 0;
+        if (IS_BITINT_N(vtop->type.t)) {
+            sw = bi_width(&vtop->type);
+            hi = (lo >> 63) ? ~(uint64_t)0 : 0;
+        } else {
+            sw = 64;
+            if (ssz < 8 && !sun)
+                lo = (uint64_t)((int64_t)(lo << (64 - ssz * 8))
+                                >> (64 - ssz * 8));
+            if (ssz < 8 && sun)
+                lo &= ((uint64_t)1 << (ssz * 8)) - 1;
+            hi = sun ? 0 : ((lo >> 63) ? ~(uint64_t)0 : 0);
+        }
+    } else {
+        tcc_error("initializer element is not computable at load time");
+    }
+    bi_host_norm(&lo, &hi, sw, sun);
+    bi_host_norm(&lo, &hi, dw, dun);
+    memcpy(ptr, &lo, 8);
+    memcpy(ptr + 8, &hi, 8);
+    vpop();
+}
+
 static void decl_initializer(init_params *p, CType *type, unsigned long c, int flags)
 {
     int len, n, no_oblock, i;
@@ -10613,6 +11796,37 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
                         ? EXPR_ANY : EXPR_CONST);
         nocode_wanted = ncw_prev;
         flags |= DIF_HAVE_ELEM;
+    }
+
+    if (IS_BITINT_W(type->t) && !(flags & (DIF_SIZE_ONLY | DIF_DISCARD))) {
+        /* F44: a wide _BitInt is initialized from a scalar or
+           _BitInt expression as a whole (a one-element brace list
+           too), never as a brace list of its limbs */
+        if (tok == '{') {
+            next();
+            if (tok == '}')
+                vpushi(0); /* C23 empty braces: zero */
+            else
+                parse_init_elem(!p->sec ? EXPR_ANY : EXPR_CONST);
+            if (tok == ',') {
+                tcc_warning("excess elements in scalar initializer");
+                while (tok == ',') {
+                    next();
+                    if (tok == '}')
+                        break;
+                    ++nocode_wanted;
+                    parse_init_elem(EXPR_ANY);
+                    --nocode_wanted;
+                    vpop();
+                }
+            }
+            skip('}');
+        }
+        if (!p->sec)
+            init_putv(p, type, c);
+        else
+            bi_static_store(p, type, c);
+        return;
     }
 
     if (type->t & VT_ARRAY) {

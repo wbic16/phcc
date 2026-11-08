@@ -338,6 +338,22 @@
      DEF(TOK___divdc3, "__divdc3")
      DEF(TOK___mulxc3, "__mulxc3")
      DEF(TOK___divxc3, "__divxc3")
+/* _BitInt wide helpers (F44): libtcc1 entry points for the
+   memory-resident (width 65..128) value operations */
+     DEF(TOK___phcc_bi128_add, "__phcc_bi128_add")
+     DEF(TOK___phcc_bi128_sub, "__phcc_bi128_sub")
+     DEF(TOK___phcc_bi128_and, "__phcc_bi128_and")
+     DEF(TOK___phcc_bi128_or, "__phcc_bi128_or")
+     DEF(TOK___phcc_bi128_xor, "__phcc_bi128_xor")
+     DEF(TOK___phcc_bi128_mul, "__phcc_bi128_mul")
+     DEF(TOK___phcc_bi128_div, "__phcc_bi128_div")
+     DEF(TOK___phcc_bi128_mod, "__phcc_bi128_mod")
+     DEF(TOK___phcc_bi128_shl, "__phcc_bi128_shl")
+     DEF(TOK___phcc_bi128_shr, "__phcc_bi128_shr")
+     DEF(TOK___phcc_bi128_cmp, "__phcc_bi128_cmp")
+     DEF(TOK___phcc_bi128_cast, "__phcc_bi128_cast")
+     DEF(TOK___phcc_bi128_tod, "__phcc_bi128_tod")
+     DEF(TOK___phcc_bi128_nonzero, "__phcc_bi128_nonzero")
 /* TF128 helper tokens (F34 uses them on x86-64 too; the tokens
    are target-independent names for libgcc entry points) */
      DEF(TOK___addtf3, "__addtf3")

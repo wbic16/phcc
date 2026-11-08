@@ -1210,9 +1210,8 @@ struct filespec {
    (type inference for bare 'auto', '()' meaning '(void)', rejection
    of old-style parameter lists) live only in this mode.  The flag is
    separate from cversion because __STDC_VERSION__ may advertise
-   202311 only once the full L3 surface exists (F44); until then
-   -std=c23 leaves the advertised version at 201710 and the default
-   mode keeps advertising 199901. */
+   202311 only once the full L3 surface exists: since F44 it does,
+   and the default mode keeps advertising 199901. */
 #define TCC_C23_MODE (tcc_state->c23_mode != 0)
 
 /* 'nullptr' / nullptr_t (F42): the null pointer literal has its own
@@ -1222,6 +1221,34 @@ struct filespec {
    in the same tag space as VT_COMPLEX_TAG above; ref is NULL. */
 #define VT_NULLPTR_TAG (9 << VT_STRUCT_SHIFT)
 #define IS_NULLPTR_T(t) (((t) & (VT_STRUCT_MASK|VT_BTYPE)) == (VT_NULLPTR_TAG|VT_PTR))
+
+/* _BitInt (F44, C23 L3), widths 1..128 (BITINT_MAXWIDTH is 128).
+   Narrow (width <= 64): BTYPE is VT_LLONG, the field carries
+   VT_BITINT_TAG in the tag slot and width-1 in the BIT_SIZE slot
+   -- the same field a bit-field of that width would use.
+   Register values are always normalized: sign-extended (signed)
+   or masked (unsigned) to the declared width; memory holds the
+   low bytes of the normalized value, so a container-sized load
+   reproduces it exactly (the backend loads/stores narrow
+   _BitInts by their container size).
+   Wide (width 65..128): BTYPE is VT_STRUCT with VT_BITINT_TAG,
+   16-byte storage (two u64 limbs, alignment 8), memory-resident
+   like a struct; the width rides the interned descriptor Sym
+   (its c member holds the width) and the value operations run
+   through the __phcc_bi128_* helpers in libtcc1. */
+#define VT_BITINT_TAG    (8 << VT_STRUCT_SHIFT)
+#define BI_TAG(t)        (((t) >> VT_STRUCT_SHIFT) & 0x3f)
+#define IS_BITINT_N(t) \
+    (((t) & VT_BTYPE) == VT_LLONG && BI_TAG(t) == 8 \
+     && !((t) & VT_BITFIELD))
+#define IS_BITINT_W(t) \
+    (((t) & VT_BTYPE) == VT_STRUCT && BI_TAG(t) == 8)
+#define IS_BITINT(t) (IS_BITINT_N(t) || IS_BITINT_W(t))
+#define BITINT_NARROW_WIDTH(t) (BIT_SIZE(t) + 1)
+
+/* the wb literal's width/sign, set by parse_number for TOK_CBITINT
+   and consumed by unary() (tccpp.c / tccgen.c) */
+ST_DATA int tok_bi_width, tok_bi_unsigned;
 
 /* general: set/get the pseudo-bitfield value for bit-mask M */
 #define BFVAL(M,N) ((unsigned)((M) & ~((M) << 1)) * (N))
@@ -1315,9 +1342,12 @@ struct filespec {
 #define TOK_CIFLOAT   0xd5 /* imaginary float constant */
 #define TOK_CIDOUBLE  0xd6 /* imaginary double constant */
 #define TOK_CILDOUBLE 0xd7 /* imaginary long double constant */
+#define TOK_CBITINT   0xd8 /* _BitInt wb literal (F44): value in tokc.tab[0..1],
+                              width/sign in tok_bi_width/tok_bi_unsigned */
 
 #define TOK_HAS_VALUE(t) ((t >= TOK_CCHAR && t <= TOK_LINENUM) \
     || (t >= TOK_U16CHAR && t <= TOK_U32STR) || t == TOK_CF128 \
+    || t == TOK_CBITINT \
     || (t >= TOK_CIFLOAT && t <= TOK_CILDOUBLE))
 
 #define TOK_EOF              (-1) /* end of file */

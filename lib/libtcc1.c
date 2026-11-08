@@ -621,3 +621,259 @@ long long __fixxfdi (long double a1)
     return s ? ret : -ret;
 }
 #endif /* !ARM */
+
+/* _BitInt wide helpers (F44): the value operations for the
+   memory-resident _BitInt form (widths 65..128).  A value is two
+   unsigned long long limbs, normalized: for a signed width the
+   bits above the width are copies of the sign bit; for an
+   unsigned width they are zero.  Plain C only -- this file is
+   compiled by phcc itself, which has no __int128. */
+
+typedef unsigned long long bi_u64;
+typedef long long bi_i64;
+
+/* normalize the 128-bit value in r to width w */
+static void bi128_norm(bi_u64 *r, int w, int un)
+{
+    if (w >= 128)
+        return;
+    if (un) {
+        if (w <= 64) {
+            r[0] &= w == 64 ? ~(bi_u64)0 : (((bi_u64)1 << w) - 1);
+            r[1] = 0;
+        } else {
+            r[1] &= ((bi_u64)1 << (w - 64)) - 1;
+        }
+    } else if (w <= 64) {
+        if (w < 64)
+            r[0] = (bi_u64)((bi_i64)(r[0] << (64 - w)) >> (64 - w));
+        r[1] = (r[0] >> 63) ? ~(bi_u64)0 : 0;
+    } else {
+        int k = w - 64;
+        if (k < 64)
+            r[1] = (bi_u64)((bi_i64)(r[1] << (64 - k)) >> (64 - k));
+    }
+}
+
+void __phcc_bi128_add(bi_u64 *r, const bi_u64 *a, const bi_u64 *b,
+                      int w, int un)
+{
+    bi_u64 lo = a[0] + b[0];
+    r[1] = a[1] + b[1] + (lo < a[0]);
+    r[0] = lo;
+    bi128_norm(r, w, un);
+}
+
+void __phcc_bi128_sub(bi_u64 *r, const bi_u64 *a, const bi_u64 *b,
+                      int w, int un)
+{
+    bi_u64 lo = a[0] - b[0];
+    r[1] = a[1] - b[1] - (lo > a[0]);
+    r[0] = lo;
+    bi128_norm(r, w, un);
+}
+
+void __phcc_bi128_and(bi_u64 *r, const bi_u64 *a, const bi_u64 *b)
+{
+    r[0] = a[0] & b[0];
+    r[1] = a[1] & b[1];
+}
+
+void __phcc_bi128_or(bi_u64 *r, const bi_u64 *a, const bi_u64 *b)
+{
+    r[0] = a[0] | b[0];
+    r[1] = a[1] | b[1];
+}
+
+void __phcc_bi128_xor(bi_u64 *r, const bi_u64 *a, const bi_u64 *b)
+{
+    r[0] = a[0] ^ b[0];
+    r[1] = a[1] ^ b[1];
+}
+
+void __phcc_bi128_mul(bi_u64 *r, const bi_u64 *a, const bi_u64 *b,
+                      int w, int un)
+{
+    /* 32-bit limb schoolbook, keeping the low 128 bits */
+    unsigned int al[4], bl[4];
+    bi_u64 acc[4];
+    int i, j;
+    al[0] = (unsigned int)a[0];
+    al[1] = (unsigned int)(a[0] >> 32);
+    al[2] = (unsigned int)a[1];
+    al[3] = (unsigned int)(a[1] >> 32);
+    bl[0] = (unsigned int)b[0];
+    bl[1] = (unsigned int)(b[0] >> 32);
+    bl[2] = (unsigned int)b[1];
+    bl[3] = (unsigned int)(b[1] >> 32);
+    acc[0] = acc[1] = acc[2] = acc[3] = 0;
+    for (i = 0; i < 4; i++) {
+        bi_u64 carry = 0;
+        for (j = 0; j + i < 4; j++) {
+            bi_u64 cur = acc[i + j] + (bi_u64)al[i] * bl[j] + carry;
+            acc[i + j] = (unsigned int)cur;
+            carry = cur >> 32;
+        }
+    }
+    r[0] = acc[0] | (acc[1] << 32);
+    r[1] = acc[2] | (acc[3] << 32);
+    bi128_norm(r, w, un);
+}
+
+/* the magnitude of a normalized value; sets *neg for a negative
+   signed value (the sign lives in bit 127 of the normalized
+   form) */
+static void bi128_mag(const bi_u64 *a, int un, bi_u64 *m, int *neg)
+{
+    m[0] = a[0];
+    m[1] = a[1];
+    *neg = 0;
+    if (!un && (a[1] >> 63)) {
+        *neg = 1;
+        m[0] = ~a[0] + 1;
+        m[1] = ~a[1] + (m[0] == 0);
+    }
+}
+
+static void bi128_udivmod(const bi_u64 *a, const bi_u64 *b,
+                          bi_u64 *q, bi_u64 *r)
+{
+    int i;
+    q[0] = q[1] = 0;
+    r[0] = r[1] = 0;
+    if (b[0] == 0 && b[1] == 0) {
+        /* division by zero is undefined for the caller; keep the
+           helper itself from trapping */
+        q[0] = q[1] = ~(bi_u64)0;
+        r[0] = a[0];
+        r[1] = a[1];
+        return;
+    }
+    for (i = 127; i >= 0; i--) {
+        r[1] = (r[1] << 1) | (r[0] >> 63);
+        r[0] = (r[0] << 1) | ((a[i >> 6] >> (i & 63)) & 1);
+        if (r[1] > b[1] || (r[1] == b[1] && r[0] >= b[0])) {
+            bi_u64 lo = r[0] - b[0];
+            r[1] = r[1] - b[1] - (lo > r[0]);
+            r[0] = lo;
+            q[i >> 6] |= (bi_u64)1 << (i & 63);
+        }
+    }
+}
+
+void __phcc_bi128_div(bi_u64 *r, const bi_u64 *a, const bi_u64 *b,
+                      int w, int un)
+{
+    bi_u64 ma[2], mb[2], q[2], rem[2];
+    int na, nb;
+    bi128_mag(a, un, ma, &na);
+    bi128_mag(b, un, mb, &nb);
+    bi128_udivmod(ma, mb, q, rem);
+    if (na != nb) {
+        r[0] = ~q[0] + 1;
+        r[1] = ~q[1] + (r[0] == 0);
+    } else {
+        r[0] = q[0];
+        r[1] = q[1];
+    }
+    bi128_norm(r, w, un);
+}
+
+void __phcc_bi128_mod(bi_u64 *r, const bi_u64 *a, const bi_u64 *b,
+                      int w, int un)
+{
+    bi_u64 ma[2], mb[2], q[2], rem[2];
+    int na, nb;
+    bi128_mag(a, un, ma, &na);
+    bi128_mag(b, un, mb, &nb);
+    bi128_udivmod(ma, mb, q, rem);
+    if (na) {
+        r[0] = ~rem[0] + 1;
+        r[1] = ~rem[1] + (r[0] == 0);
+    } else {
+        r[0] = rem[0];
+        r[1] = rem[1];
+    }
+    bi128_norm(r, w, un);
+}
+
+void __phcc_bi128_shl(bi_u64 *r, const bi_u64 *a, bi_u64 n,
+                      int w, int un)
+{
+    if (n >= 128) {
+        r[0] = r[1] = 0;
+    } else if (n >= 64) {
+        r[1] = a[0] << (n - 64);
+        r[0] = 0;
+    } else if (n == 0) {
+        r[0] = a[0];
+        r[1] = a[1];
+    } else {
+        r[1] = (a[1] << n) | (a[0] >> (64 - n));
+        r[0] = a[0] << n;
+    }
+    bi128_norm(r, w, un);
+}
+
+void __phcc_bi128_shr(bi_u64 *r, const bi_u64 *a, bi_u64 n,
+                      int w, int un)
+{
+    bi_u64 fill = (!un && (a[1] >> 63)) ? ~(bi_u64)0 : 0;
+    if (n >= 128) {
+        r[0] = r[1] = fill;
+    } else if (n >= 64) {
+        r[0] = un ? (a[1] >> (n - 64))
+                  : (bi_u64)((bi_i64)a[1] >> (n - 64));
+        r[1] = fill;
+    } else if (n == 0) {
+        r[0] = a[0];
+        r[1] = a[1];
+    } else {
+        r[0] = (a[0] >> n) | (a[1] << (64 - n));
+        r[1] = un ? (a[1] >> n) : (bi_u64)((bi_i64)a[1] >> n);
+    }
+    bi128_norm(r, w, un);
+}
+
+int __phcc_bi128_cmp(const bi_u64 *a, const bi_u64 *b, int w, int un)
+{
+    (void)w;
+    if (!un && (bi_i64)a[1] != (bi_i64)b[1])
+        return (bi_i64)a[1] < (bi_i64)b[1] ? -1 : 1;
+    if (un && a[1] != b[1])
+        return a[1] < b[1] ? -1 : 1;
+    if (a[0] != b[0])
+        return a[0] < b[0] ? -1 : 1;
+    return 0;
+}
+
+void __phcc_bi128_cast(bi_u64 *r, const bi_u64 *a,
+                       int aw, int aus, int bw, int bus)
+{
+    /* normalize at the source width (cleans), then at the
+       destination width (truncate and re-extend): exactly the
+       value conversion */
+    bi_u64 v[2];
+    v[0] = a[0];
+    v[1] = a[1];
+    bi128_norm(v, aw, aus);
+    r[0] = v[0];
+    r[1] = v[1];
+    bi128_norm(r, bw, bus);
+}
+
+double __phcc_bi128_tod(const bi_u64 *a, int w, int un)
+{
+    bi_u64 m[2];
+    int neg;
+    double d;
+    (void)w;
+    bi128_mag(a, un, m, &neg);
+    d = (double)m[1] * 18446744073709551616.0 + (double)m[0];
+    return neg ? -d : d;
+}
+
+int __phcc_bi128_nonzero(const bi_u64 *a)
+{
+    return (a[0] | a[1]) != 0;
+}

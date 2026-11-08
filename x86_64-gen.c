@@ -450,6 +450,32 @@ void load(int r, SValue *sv)
 	    fc = 0;
 	}
         ll = 0;
+	if (IS_BITINT_N(ft)) {
+	    /* F44: load a narrow _BitInt by its container size with
+	       a full 64-bit extension.  Storage is canonical (the
+	       low bytes of the normalized value), so extending from
+	       the container reproduces the normalized value. */
+	    int w = BITINT_NARROW_WIDTH(ft);
+	    int csz = w <= 8 ? 1 : w <= 16 ? 2 : w <= 32 ? 4 : 8;
+	    if (csz == 8)
+		gen_modrm_impl(0x8b, 1, r, fr, sv->sym, fc);
+	    else if (ft & VT_UNSIGNED) {
+		if (csz == 1)
+		    gen_modrm_impl(0xb60f, 1, r, fr, sv->sym, fc); /* movzbq */
+		else if (csz == 2)
+		    gen_modrm_impl(0xb70f, 1, r, fr, sv->sym, fc); /* movzwq */
+		else
+		    gen_modrm_impl(0x8b, 0, r, fr, sv->sym, fc); /* movl (zero-extends) */
+	    } else {
+		if (csz == 1)
+		    gen_modrm_impl(0xbe0f, 1, r, fr, sv->sym, fc); /* movsbq */
+		else if (csz == 2)
+		    gen_modrm_impl(0xbf0f, 1, r, fr, sv->sym, fc); /* movswq */
+		else
+		    gen_modrm_impl(0x63, 1, r, fr, sv->sym, fc); /* movsxd */
+	    }
+	    return;
+	}
 	/* Like GCC we can load from small enough properly sized
 	   structs and unions as well.
 	   XXX maybe move to generic operand handling, but should
@@ -611,6 +637,14 @@ void store(int r, SValue *v)
     if (fc != v->c.i && (fr & VT_SYM))
         tcc_error("64 bit addend in store");
     bt = v->type.t & VT_BTYPE;
+    if (IS_BITINT_N(v->type.t)) {
+        /* F44: store only the container bytes of a narrow
+           _BitInt (the register value is normalized, so the
+           truncation is exact) */
+        int w = BITINT_NARROW_WIDTH(v->type.t);
+        bt = w <= 8 ? VT_BYTE : w <= 16 ? VT_SHORT
+            : w <= 32 ? VT_INT : VT_LLONG;
+    }
 
 #ifndef TCC_TARGET_PE
     /* we need to access the variable via got */

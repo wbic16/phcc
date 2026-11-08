@@ -33,6 +33,9 @@ ST_DATA int parse_flags;
 ST_DATA struct BufferedFile *file;
 ST_DATA int tok;
 ST_DATA CValue tokc;
+/* F44: the current wb literal's width and signedness, set by
+   parse_number alongside TOK_CBITINT (see tcc.h) */
+ST_DATA int tok_bi_width, tok_bi_unsigned;
 ST_DATA const int *macro_ptr;
 ST_DATA CString tokcstr; /* current parsed string, if any */
 
@@ -603,6 +606,8 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
         return strcpy(p, "<long double>");
     case TOK_CF128:
         return strcpy(p, "<float128>");
+    case TOK_CBITINT:
+        return strcpy(p, "<bitint>");
     case TOK_CIFLOAT:
         return strcpy(p, "<imaginary float>");
     case TOK_CIDOUBLE:
@@ -1180,6 +1185,15 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
         str[len++] = cv->tab[1];
         str[len++] = cv->tab[2];
         str[len++] = cv->tab[3];
+    case TOK_CBITINT:
+        /* F44: the 128-bit value (4 words), then the width and
+           the signedness, so a wb literal survives a macro body */
+        str[len++] = cv->tab[0];
+        str[len++] = cv->tab[1];
+        str[len++] = cv->tab[2];
+        str[len++] = cv->tab[3];
+        str[len++] = tok_bi_width;
+        str[len++] = tok_bi_unsigned;
     default:
         break;
     }
@@ -1264,6 +1278,17 @@ static inline void tok_get(int *t, const int **pp, CValue *cv)
         goto copy;
     case TOK_CF128:
         n = 4;
+        goto copy;
+    case TOK_CBITINT:
+        /* F44: 4 value words, then width and signedness (see
+           tok_str_add2) */
+        n = 4;
+        do
+            *tab++ = *p++;
+        while (--n);
+        tok_bi_width = *p++;
+        tok_bi_unsigned = *p++;
+        break;
     copy:
         do
             *tab++ = *p++;
@@ -3266,7 +3291,7 @@ static void parse_number(const char *p)
         }
     } else {
         unsigned long long n, n1;
-        int lcount, ucount, ov = 0;
+        int lcount, ucount, wbcount, ov = 0;
         const char *p1;
 
         /* integer number */
@@ -3300,10 +3325,19 @@ static void parse_number(const char *p)
         /* Determine the characteristics (unsigned and/or 64bit) the type of
            the constant must have according to the constant suffix(es) */
         lcount = ucount = 0;
+        wbcount = 0;
         p1 = p;
         for(;;) {
             t = toup(ch);
-            if (t == 'L') {
+            if (t == 'W' && toup(*p) == 'B') {
+                /* F44: the wb suffix of a _BitInt literal (an
+                   optional u may precede it or follow it) */
+                if (wbcount >= 1)
+                    tcc_error("two 'wb's in integer constant");
+                wbcount++;
+                ch = *p++; /* the 'b' */
+                ch = *p++; /* the character after it */
+            } else if (t == 'L') {
                 if (lcount >= 2)
                     tcc_error("three 'l's in integer constant");
                 if (lcount && *(p - 1) != ch)
@@ -3318,6 +3352,67 @@ static void parse_number(const char *p)
             } else {
                 break;
             }
+        }
+
+        if (wbcount) {
+            /* F44: a _BitInt literal.  Recompute the value at 128
+               bits from the collected digits (the accumulation
+               above stops at 64), then take the smallest width
+               that holds it: for a signed literal that is
+               bitlen+1 (2 for zero), for an unsigned one bitlen
+               (1 for zero) -- the oracles' measured rule. */
+            unsigned int w4[4];
+            const char *qq;
+            int i2, bitlen;
+            if (lcount)
+                tcc_error("invalid suffix on '_BitInt' integer constant");
+            w4[0] = w4[1] = w4[2] = w4[3] = 0;
+            for (qq = token_buf; *qq; qq++) {
+                unsigned long long carry;
+                t = *qq;
+                if (t >= 'a')
+                    t = t - 'a' + 10;
+                else if (t >= 'A')
+                    t = t - 'A' + 10;
+                else
+                    t = t - '0';
+                carry = t;
+                for (i2 = 0; i2 < 4; i2++) {
+                    unsigned long long cur =
+                        (unsigned long long)w4[i2] * b + carry;
+                    w4[i2] = (unsigned int)cur;
+                    carry = cur >> 32;
+                }
+                if (carry)
+                    tcc_error("integer constant too large for '_BitInt' (maximum width 128) (F44)");
+            }
+            bitlen = 0;
+            for (i2 = 3; i2 >= 0; i2--) {
+                if (w4[i2]) {
+                    unsigned int wv = w4[i2];
+                    bitlen = i2 * 32;
+                    while (wv) {
+                        bitlen++;
+                        wv >>= 1;
+                    }
+                    break;
+                }
+            }
+            tok_bi_unsigned = ucount != 0;
+            if (tok_bi_unsigned)
+                tok_bi_width = bitlen < 1 ? 1 : bitlen;
+            else
+                tok_bi_width = bitlen < 1 ? 2 : bitlen + 1;
+            if (tok_bi_width > 128)
+                tcc_error("integer constant too large for '_BitInt' (maximum width 128) (F44)");
+            if (pp_expr && tok_bi_width > 64)
+                tcc_error("'_BitInt' constant too large in preprocessor expression (F44)");
+            tok = TOK_CBITINT;
+            tokc.tab[0] = (int)w4[0];
+            tokc.tab[1] = (int)w4[1];
+            tokc.tab[2] = (int)w4[2];
+            tokc.tab[3] = (int)w4[3];
+            goto int_done;
         }
 
         /* in #if/#elif expressions, all numbers have type (u)intmax_t anyway */
@@ -3357,6 +3452,8 @@ static void parse_number(const char *p)
         tokc.i = n;
         if (toup(ch) == 'I' || toup(ch) == 'J')
             tcc_error("imaginary integer constants need _Complex integer types, a GNU extension not supported (F40)");
+    int_done:
+        ;
     }
     if (ch)
         tcc_error("invalid number");
@@ -4580,6 +4677,12 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
       putdef(cs, "__STDC__");
       cstr_printf(cs, "#define __STDC_HOSTED__ %d\n", s1->nostdlib ? 0 : 1);
       cstr_printf(cs, "#define __STDC_VERSION__ %dL\n", s1->cversion);
+      /* F44: BITINT_MAXWIDTH belongs to <limits.h> in C23, but
+         neither glibc's nor the bundled header defines it, so the
+         prelude carries it (visible without the include -- a
+         recorded delta in PATCHES.md).  The value is honest: it
+         is exactly the widest _BitInt this compiler accepts. */
+      putdef(cs, "BITINT_MAXWIDTH 128");
       if (s1->c23_mode) {
         /* F42: in C23 mode, bool/true/false and the C11 keyword
            spellings static_assert/alignas/thread_local are keywords.

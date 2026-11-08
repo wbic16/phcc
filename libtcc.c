@@ -2047,11 +2047,12 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
             break;
         case TCC_OPTION_std:
             /* F42: the -std selector maps the C99..C23 spellings onto
-               cversion and the c23_mode flag.  The C23 spellings
-               select C23 mode but leave the advertised version at
-               201710 for now: __STDC_VERSION__ advertises 202311
-               only when the L3 surface completes (F44).
-               Unrecognized values keep the historical ignore. */
+               cversion and the c23_mode flag.  Unrecognized values
+               keep the historical ignore.
+               F44: the L3 surface is complete (_BitInt is the last
+               piece), so the C23 spellings now advertise 202311, as
+               C23 requires.  The default mode still advertises
+               199901. */
             if (strcmp(optarg, "=c11") == 0 || strcmp(optarg, "=gnu11") == 0)
                 s->cversion = 201112;
             else if (strcmp(optarg, "=c17") == 0 || strcmp(optarg, "=gnu17") == 0
@@ -2059,7 +2060,7 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
                 s->cversion = 201710;
             else if (strcmp(optarg, "=c23") == 0 || strcmp(optarg, "=gnu23") == 0
                   || strcmp(optarg, "=c2x") == 0 || strcmp(optarg, "=gnu2x") == 0) {
-                s->cversion = 201710;
+                s->cversion = 202311;
                 s->c23_mode = 1;
             }
             else if (strcmp(optarg, "=c99") == 0 || strcmp(optarg, "=gnu99") == 0)
