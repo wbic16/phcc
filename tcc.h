@@ -989,6 +989,12 @@ struct TCCState {
     struct sym_version *sym_versions;
     int nb_sym_to_version;
     int *sym_to_version;
+    /* per-dynsymtab-entry compat state (tccelf.c; PATCHES F20):
+       0 = no shared-library definition seen yet,
+       1 = definitions seen, all non-default (compat) versions only,
+       2 = a definition an unversioned reference may bind to was seen */
+    int nb_dynsym_compat_only;
+    unsigned char *dynsym_compat_only;
     int dt_verneednum;
     Section *versym_section;
     Section *verneed_section;

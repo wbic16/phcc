@@ -38,6 +38,8 @@ struct sym_version {
 #define sym_versions        s1->sym_versions
 #define nb_sym_to_version   s1->nb_sym_to_version
 #define sym_to_version      s1->sym_to_version
+#define nb_dynsym_compat_only s1->nb_dynsym_compat_only
+#define dynsym_compat_only    s1->dynsym_compat_only
 #define dt_verneednum       s1->dt_verneednum
 #define versym_section      s1->versym_section
 #define verneed_section     s1->verneed_section
@@ -46,6 +48,7 @@ struct sym_version {
 
 #ifndef ELF_OBJ_ONLY
 static void vscript_free(TCCState *s1); /* defined with the version-script code below */
+static int dynsym_is_compat_only(TCCState *s1, int sym_index); /* ditto (F20) */
 #endif
 
 /* special flag to indicate that the section should not be linked to the other ones */
@@ -154,6 +157,7 @@ ST_FUNC void tccelf_delete(TCCState *s1)
     }
     tcc_free(sym_versions);
     tcc_free(sym_to_version);
+    tcc_free(dynsym_compat_only);
     vscript_free(s1);
     tcc_free(s1->dynsym_version);
 #endif
@@ -2853,7 +2857,12 @@ static void bind_exe_dynsyms(TCCState *s1, int is_PIE)
             name = (char *) symtab_section->link->data + sym->st_name;
             sym_index = find_elf_sym(s1->dynsymtab_section, name);
             esym = &((ElfW(Sym) *)s1->dynsymtab_section->data)[sym_index];
-            if (sym_index && esym->st_shndx != SHN_UNDEF) {
+            /* a definition that exists only as a non-default (compat)
+               symbol version does not satisfy an unversioned reference:
+               GNU ld refuses it, and an unversioned import emitted for
+               it would fail to resolve at run time (PATCHES F20) */
+            if (sym_index && esym->st_shndx != SHN_UNDEF
+                && !dynsym_is_compat_only(s1, sym_index)) {
                 if (is_PIE)
                     continue;
                 type = ELFW(ST_TYPE)(esym->st_info);
@@ -2909,6 +2918,12 @@ static void bind_exe_dynsyms(TCCState *s1, int is_PIE)
                 /* XXX: _fp_hw seems to be part of the ABI, so we ignore it */
                 if (ELFW(ST_BIND)(sym->st_info) == STB_WEAK ||
                     !strcmp(name, "_fp_hw")) {
+                } else if (sym_index && esym->st_shndx != SHN_UNDEF) {
+                    /* the name is defined by a shared library, but only
+                       as a non-default (compat) symbol version */
+                    tcc_error_noabort("unresolved reference to '%s': "
+                        "defined by a shared library only with a "
+                        "non-default (compat) symbol version", name);
                 } else {
                     tcc_error_noabort("unresolved reference to '%s'", name);
                 }
@@ -4651,6 +4666,41 @@ set_sym_version(TCCState *s1, int sym_index, int verndx)
       sym_to_version[sym_index] = verndx;
 }
 
+/* Record one shared-library definition instance of the dynsymtab entry
+   SYM_INDEX.  COMPAT is true when the instance's only version is a
+   non-default ("compat") version -- the hidden bit (0x8000) in the
+   defining library's .gnu.versym entry, printed by nm/readelf as a
+   single '@'.  GNU ld binds a new UNVERSIONED reference only to an
+   unversioned or default-version (@@) definition; a compat-only
+   definition satisfies existing versioned references (which this
+   linker does not model) but must not satisfy an unversioned one.
+   State transitions: unseen -> compat-only on a compat instance,
+   anything -> bindable on a bindable instance, and bindable is
+   terminal.  (PATCHES F20; gate item PQ-19.)  */
+static void set_dynsym_compat(TCCState *s1, int sym_index, int compat)
+{
+    if (sym_index >= nb_dynsym_compat_only) {
+        int n = sym_index + 16, o = nb_dynsym_compat_only;
+        dynsym_compat_only = tcc_realloc(dynsym_compat_only, n);
+        memset(dynsym_compat_only + o, 0, (n - o) * sizeof(*dynsym_compat_only));
+        nb_dynsym_compat_only = n;
+    }
+    if (compat) {
+        if (dynsym_compat_only[sym_index] == 0)
+            dynsym_compat_only[sym_index] = 1;
+    } else
+        dynsym_compat_only[sym_index] = 2;
+}
+
+/* True when every shared-library definition of the dynsymtab entry
+   SYM_INDEX seen so far is a non-default (compat) version, so an
+   unversioned reference must not bind to it (GNU ld's rule).  */
+static int dynsym_is_compat_only(TCCState *s1, int sym_index)
+{
+    return sym_index < nb_dynsym_compat_only
+        && dynsym_compat_only[sym_index] == 1;
+}
+
 struct versym_info {
     int nb_versyms;
     ElfW(Verdef) *verdef;
@@ -4823,6 +4873,9 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
         name = dynstr + sym->st_name;
         sym_index = set_elf_sym(s1->dynsymtab_section, sym->st_value, sym->st_size,
                                 sym->st_info, sym->st_other, sym->st_shndx, name);
+        if (sym->st_shndx != SHN_UNDEF)
+            set_dynsym_compat(s1, sym_index,
+                              v.versym && (v.versym[i] & 0x8000));
         if (v.versym) {
             ElfW(Half) vsym = v.versym[i];
             if ((vsym & 0x8000) == 0 && vsym > 0 && vsym < v.nb_local_ver)

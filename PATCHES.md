@@ -29,7 +29,7 @@ from this file alone.
 | `slurp`-era versioning: `VERSION` | 1 line changed | Upstream `VERSION` (0.9.28rc) set to `1.0.0` — the fork's version identity from commit "Forking to v1.0". See rebase resolution R3. |
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
-| `tcc.h` | +60 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. |
+| `tcc.h` | +66 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
 | `tccgen.c` | +333 / −18 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
@@ -37,7 +37,7 @@ from this file alone.
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
 | `tcctok.h` | +31 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). F17: nine more `DEF_ASMDIR` tokens (`value`, `hword`, `2byte`, `4byte`, `8byte`, `zero`, `float`, `single`, `double`) after `reloc`; `section` remains the last directive token. |
 | `libtcc.c` | +53 / −1 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. |
-| `tccelf.c` | +899 / −15 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. |
+| `tccelf.c` | +953 / −16 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. F20: the compat-version binding policy — per-entry compat state recorded in `tcc_load_dll` from the defining library's `.gnu.versym` hidden bit, and the matching gate in `bind_exe_dynsyms`. See F20. |
 | `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -1609,6 +1609,108 @@ structure; the fork's intent is carried, never dropped silently).
     changes, as the branch fires only under a flag the machine's
     default-link model does not carry — and the gate verdict
     scroll goes stale with the rest.
+- **F20 — a definition that exists only as a non-default (compat)
+    symbol version does not satisfy an unversioned reference
+    (2026-11-07).** PQ-19 from the final-matrix gate: FFmpeg's
+    `check_func sysctl` probe flipped positive under phcc, because
+    tcc's linker bound the unversioned reference to glibc's
+    `sysctl@GLIBC_2.2.5` — a symbol that exists only as a single-@
+    compat version (glibc removed `<sys/sysctl.h>` in 2.32 and kept
+    the symbol for old binaries only). HAVE_SYSCTL became 1,
+    `libavutil/cpu.c` included the nonexistent header, and FFmpeg
+    died on its 1,903rd unit over a code path that is dead on Linux.
+    GNU ld's rule, measured first with a purpose-built versioned
+    library (gcc/ld-built, version script with nodes VOLD/VNEW;
+    probes in `~/workspace/phcc-pq19/probes/`): an unversioned
+    reference binds to an unversioned definition (no VERNEED
+    recorded), binds to a default-version (@@) definition (VERNEED
+    records that version), binds the @@ definition when both @ and
+    @@ exist, and is REFUSED — `undefined reference to 'old'` — when
+    the only definition carries a non-default version, for function
+    and object (COPY-reloc) symbols alike. An explicitly versioned
+    reference (`name@VOLD`, encoded in a relocatable object as a
+    literal `name@VER` symbol) binds the compat definition: that is
+    the compat mechanism's legitimate use. A weak unversioned
+    reference to a compat-only definition links and stays unbound
+    (runs as null). A shared-library output leaves the reference
+    plain undefined, as before. The pre-F20 phcc behaviour was worse
+    than a wrong bind: the link succeeded but the emitted import was
+    unversioned, so the resulting binary failed at load time with
+    ld.so's `symbol lookup error: undefined symbol: 'old'` (and the
+    weak case, which GNU ld leaves null-valued, failed the same
+    way). The fix (tccelf.c +54/−1, tcc.h +6): `tcc_load_dll` now
+    records, per dynsymtab entry, a tri-state compat flag —
+    `set_dynsym_compat()` beside `set_sym_version()`, fed by the
+    hidden bit (0x8000) of each defined instance's `.gnu.versym`
+    entry; a bindable instance (unversioned or @@) is terminal,
+    compat instances accumulate only until one appears.
+    `bind_exe_dynsyms` — the one place executable imports are bound
+    from shared libraries — treats a compat-only entry as no
+    definition: weak references stay unresolved without error,
+    others fail with `unresolved reference to 'sysctl': defined by
+    a shared library only with a non-default (compat) symbol
+    version`. Shared-library outputs, static links and `-run` are
+    untouched (runtime lookup is ld.so's domain, as with
+    dlopen/dlsym). Probe matrix after the fix matches GNU ld on
+    every cell, including the sysctl anchor (now refused) and the
+    glibc default-version association (`memcpy` still records
+    GLIBC_2.14). One pre-existing gap the matrix exposed, NOT
+    changed by this entry and not a regression: phcc has never
+    resolved versioned references from relocatable objects — the
+    `name@VER` symbol arrives literally and fails unresolved before
+    and after F20 — and tcc's own `.symver` directive is
+    parse-and-ignore (the TODO in tccasm.c), so a versioned
+    reference cannot be minted by phcc-compiled code at all; under
+    phcc the compat definitions are simply unreachable, which is
+    the conservative direction. Composition with F10 verified: a
+    phcc-built version-script library is byte-identical before and
+    after F20 (same output name), GNU ld and fixed phcc both bind
+    unversioned references to its @@ node, and its localized symbol
+    is refused by both. Verification (aletheia-core): upstream
+    `make test` ALL TESTS PASSED; conformance spot re-run unchanged
+    at 328/333 with the same five documented class-(b) divergences
+    and zero oracle splits; OpenSSL 4.1.0 (no-asm, shared,
+    `make -k build_sw`) completes everything except the one
+    documented class-(b) test program (`test/rsa_complex.c` →
+    `_Complex is not yet supported` — the build's only error, as at
+    the gate), `libcrypto.so.4` carries 5,693 OPENSSL-versioned
+    exports (readelf count; nm count 5,691), exactly the gate's
+    tip-built count by both methods, its VERDEF identical to the
+    tip build's except the section address, and `apps/openssl`
+    reproduces the SHA-256 known answer for "abc"; zlib (shared)
+    builds and its test suite passes (`*** zlib test OK ***`); git
+    2.56.0 builds and an init/add/commit/log/status smoke passes
+    (the auto-maintenance `--detach` complaint in the smoke
+    reproduces identically with the gcc-built git — an environment
+    artifact, not a compiler signal). FFmpeg 9.0.2 with the gate
+    recipe: configure now reports HAVE_SYSCTL 0, and every
+    compilation unit compiles — the make reaches the final links
+    with zero compile errors, the 1,903rd unit (`libavutil/cpu.c`)
+    among them — but the final `ffmpeg_g`/`ffprobe_g` link is
+    blocked by a NEWLY UNMASKED, pre-existing defect, PQ-21,
+    independent of this entry: tcc does not suppress dead branches
+    whose body is a do-while macro block with an inner if/else, so
+    FFmpeg's `EXTERNAL_*` guards (constant 0 under
+    `--disable-x86asm`) still emit references to nasm-only SIMD
+    symbols (`ff_lumRangeFromJpeg8_avx2` and family) that no object
+    defines. Measured with a faithful extract of
+    `libswscale/x86/swscale.c`'s range-convert initializer
+    (`~/workspace/phcc-pq19/repro/phantom-extract.c`): 16 phantom
+    undefined references under both the pre-F20 and post-F20
+    compilers, 0 under gcc -O0 — while bare assignments and calls
+    under the same guard fold correctly under tcc. The gate's
+    "one file from green" is therefore now "every file compiles;
+    the final link waits on PQ-21". Note for the phext: this entry
+    changes the Source scrolls of `tccelf.c` and `tcc.h` (and their
+    Volume 3 segmentations and Design views), the gate verdict, and
+    machine #3's description, which go STALE at the next refresh;
+    proposed machine-#3 text (a new note, number assigned at
+    refresh): "An unversioned reference is satisfied by a
+    shared-library definition only when that definition is
+    unversioned or carries a default (@@) version; a definition
+    existing only under a non-default (compat) version leaves the
+    reference unresolved — silently for a weak reference, as a link
+    error otherwise (F20)." Machines #1, #2 and #4 are untouched.
 
 ## Maintenance rule
 
