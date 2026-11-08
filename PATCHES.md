@@ -3189,6 +3189,17 @@ tests2 expectation files (60_errors_and_warnings,
 warnings become the single first error, as with the oracles'
 fail-fast behaviour.  make test passes in full.
 
+## F39 — `_Atomic(type-name)` rejects array and function types
+
+C11 6.7.2.4 constrains the type name in `_Atomic()` to not refer to
+an array or a function type; phcc accepted both (D7 slice-2 negative
+probe n2_atomic_spec_array), where gcc and clang error.  Fix
+(tccgen.c, the `_Atomic` specifier site in parse_btype): after
+`parse_expr_type`, reject VT_ARRAY types and VT_FUNC base types with
+a named error.  Corpus: array and function forms rejected;
+`_Atomic(int)`, `_Atomic(int*)` and the qualifier form still compile
+and run.
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in

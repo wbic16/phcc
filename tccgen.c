@@ -5585,6 +5585,11 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             t = type->t;
             if (tok == '(') {
                 parse_expr_type(&type1);
+                /* F39: C11 6.7.2.4 -- the type name in _Atomic()
+                   shall not refer to an array or a function type. */
+                if ((type1.t & VT_ARRAY) ||
+                    (type1.t & VT_BTYPE) == VT_FUNC)
+                    tcc_error("'_Atomic' applied to array or function type");
                 /* remove all storage modifiers except typedef */
                 type1.t &= ~(VT_STORAGE&~VT_TYPEDEF);
                 if (type1.ref)
