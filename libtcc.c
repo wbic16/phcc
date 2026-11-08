@@ -1555,6 +1555,10 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
             ignoring = 1;
         } else if (link_option(&o, "O")) {
             ignoring = 1;
+        } else if (link_option(&o, "zexecstack")) {
+            s->execstack = 1;
+        } else if (link_option(&o, "znoexecstack")) {
+            s->execstack = 2;
         } else if (link_option(&o, "z=")) {
             /* GNU ld: '-z muldefs' (keyword as a separate argument) is
                a synonym of --allow-multiple-definition; '-z=muldefs'
@@ -1564,6 +1568,10 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
                two are told apart. */
             if (s->link_optind > optind0 && 0 == strcmp(o.arg, "muldefs"))
                 s->allow_multiple_definition = 1;
+            else if (0 == strcmp(o.arg, "execstack"))
+                s->execstack = 1;
+            else if (0 == strcmp(o.arg, "noexecstack"))
+                s->execstack = 2;
             else
                 ignoring = 1;
         } else if (link_option(&o, "L:")) {

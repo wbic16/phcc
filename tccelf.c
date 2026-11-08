@@ -3054,6 +3054,7 @@ struct dyn_inf {
     int notes;
     int ehfr;
     int dyna;
+    int gstack;
 };
 
 /* Decide the layout of sections loaded in memory. This must be done before
@@ -3231,6 +3232,8 @@ static int layout_sections(TCCState *s1, int *sec_order, struct dyn_inf *d)
         d->ehfr = phnum++;
     if (d->relro)
         d->relro = phnum++;
+    if (d->gstack)
+        d->gstack = phnum++;
     d->phnum = phnum;
     d->phdr = tcc_mallocz(phnum * sizeof(ElfW(Phdr)));
 
@@ -3343,6 +3346,26 @@ static int layout_sections(TCCState *s1, int *sec_order, struct dyn_inf *d)
     /* Fill other headers */
     if (d->dyna)
         fill_phdr(&d->phdr[d->dyna], PT_DYNAMIC, d->dynamic);
+    if (d->gstack) {
+        /* PT_GNU_STACK, computed the way GNU ld computes it: the stack
+           is executable when -z execstack was given, when an input
+           object carries an executable .note.GNU-stack, or when an
+           input object has no such note at all (a missing note implies
+           an executable stack).  -z noexecstack forces it off. */
+        int exec_stack = 0;
+        Section *gs;
+        if (s1->execstack == 1)
+            exec_stack = 1;
+        else if (s1->execstack == 0) {
+            gs = have_section(s1, ".note.GNU-stack");
+            if (s1->inp_execstack || s1->inp_no_gnustack
+                || (gs && (gs->sh_flags & SHF_EXECINSTR)))
+                exec_stack = 1;
+        }
+        ph = fill_phdr(&d->phdr[d->gstack], PT_GNU_STACK, NULL);
+        ph->p_flags = PF_R | PF_W | (exec_stack ? PF_X : 0);
+        ph->p_align = 0x10;
+    }
     if (d->ehfr)
         fill_phdr(&d->phdr[d->ehfr], PT_GNU_EH_FRAME, eh_frame_hdr_section);
     if (d->interp)
@@ -3951,6 +3974,7 @@ static int elf_output_file(TCCState *s1, const char *filename)
     /* this array is used to reorder sections in the output file */
     sec_order = tcc_malloc(sizeof(int) * 2 * s1->nb_sections);
     /* compute section to program header mapping */
+    dyninf.gstack = 1; /* always emit PT_GNU_STACK, as GNU ld does */
     layout_sections(s1, sec_order, &dyninf);
 
         if (dynamic) {
@@ -4020,6 +4044,24 @@ static int elf_output_obj(TCCState *s1, const char *filename)
 {
     Section *s;
     int i, ret, file_offset;
+    /* Every ELF object carries an empty .note.GNU-stack section: its
+       presence tells GNU ld the stack is not executable (a missing
+       note makes ld assume the opposite, with a warning).  When
+       hand-written assembly already provided the section -- possibly
+       with SHF_EXECINSTR, to request an executable stack -- it is
+       kept as is. */
+    if (s1->output_format == TCC_OUTPUT_FORMAT_ELF) {
+        Section *gs = have_section(s1, ".note.GNU-stack");
+        if (!gs) {
+            gs = new_section(s1, ".note.GNU-stack", SHT_PROGBITS, 0);
+            gs->sh_addralign = 1;
+        }
+        /* an object merged into this output (-r) may have requested
+           an executable stack: the request must survive, as it does
+           through GNU ld -r */
+        if (s1->inp_execstack)
+            gs->sh_flags |= SHF_EXECINSTR;
+    }
     /* Allocate strings for section names */
     alloc_sec_names(s1, 1);
     file_offset = (sizeof (ElfW(Ehdr)) + 3) & -4;
@@ -4146,6 +4188,27 @@ invalid:
     /* load section names */
     sh = &shdr[ehdr.e_shstrndx];
     strsec = load_data(fd, file_offset + sh->sh_offset, sh->sh_size);
+
+    /* Record this object's .note.GNU-stack state for the PT_GNU_STACK
+       computation at output time: GNU ld treats an executable note as
+       a request for an executable stack, and a missing note as
+       implying one.  The section merge below cannot be relied on for
+       this: merged sections keep the flags of the first contributor. */
+    {
+        int gs_seen = 0, gs_exec = 0;
+        for(i = 1; i < ehdr.e_shnum; i++) {
+            sh = &shdr[i];
+            if (0 == strcmp(strsec + sh->sh_name, ".note.GNU-stack")) {
+                gs_seen = 1;
+                if (sh->sh_flags & SHF_EXECINSTR)
+                    gs_exec = 1;
+            }
+        }
+        if (!gs_seen)
+            s1->inp_no_gnustack = 1;
+        else if (gs_exec)
+            s1->inp_execstack = 1;
+    }
 
     /* load symtab and strtab */
     old_to_new_syms = NULL;

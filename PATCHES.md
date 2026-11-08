@@ -29,15 +29,15 @@ from this file alone.
 | `slurp`-era versioning: `VERSION` | 1 line changed | Upstream `VERSION` (0.9.28rc) set to `1.0.0` — the fork's version identity from commit "Forking to v1.0". See rebase resolution R3. |
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
-| `tcc.h` | +66 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20. |
+| `tcc.h` | +69 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20.F21: `TCCState` gains `execstack` (the `-z execstack`/`noexecstack` state) and the input-object records `inp_execstack`/`inp_no_gnustack`. See F21. |
+| `libtcc.c` | +63 / −2 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. F21: `tcc_set_linker` understands `-z execstack`/`-z noexecstack` in all three spellings (separate argument, joined, `=`). See F21. |
+| `tccelf.c` | +1016 / −16 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. F20: the compat-version binding policy — per-entry compat state recorded in `tcc_load_dll` from the defining library's `.gnu.versym` hidden bit, and the matching gate in `bind_exe_dynsyms`. See F20. F21: the object writer emits `.note.GNU-stack`, the object loader records each input's note state, and the link writer emits PT_GNU_STACK under GNU ld's rules. See F21. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
 | `tccgen.c` | +333 / −18 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. |
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
 | `tcctok.h` | +31 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). F17: nine more `DEF_ASMDIR` tokens (`value`, `hword`, `2byte`, `4byte`, `8byte`, `zero`, `float`, `single`, `double`) after `reloc`; `section` remains the last directive token. |
-| `libtcc.c` | +53 / −1 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. |
-| `tccelf.c` | +953 / −16 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. F20: the compat-version binding policy — per-entry compat state recorded in `tcc_load_dll` from the defining library's `.gnu.versym` hidden bit, and the matching gate in `bind_exe_dynsyms`. See F20. |
 | `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -1711,6 +1711,121 @@ structure; the fork's intent is carried, never dropped silently).
     existing only under a non-default (compat) version leaves the
     reference unresolved — silently for a weak reference, as a link
     error otherwise (F20)." Machines #1, #2 and #4 are untouched.
+- **F21 — `.note.GNU-stack` emitted in objects; PT_GNU_STACK computed
+  at link time, GNU ld's rules (2026-11-07).**
+  - *Files:* `tccelf.c` (+63), `tcc.h` (+3), `libtcc.c` (+10/−1).
+  - *Reason:* phcc's object writer emitted no `.note.GNU-stack`
+    section, so every GNU ld link of phcc objects warned "missing
+    .note.GNU-stack section implies executable stack" (seen in the
+    publication gate's zlib shared link, GATE-REPORT.md) and produced
+    RWE outputs by ld's missing-note rule; and phcc's own linker
+    emitted no PT_GNU_STACK segment at all, in any output, whatever
+    the inputs requested. Companion item to F6, recorded beside it
+    and left open there.
+  - *The convention (measured on this system's gcc 13.3.0 / GNU ld
+    2.42 / GAS 2.42, x86-64 ELF, before implementing):*
+    - Objects: gcc emits `.note.GNU-stack` in every `.o` —
+      SHT_PROGBITS, size 0, alignment 1, flags empty; a translation
+      unit needing an executable stack (nested-function trampoline)
+      gets the same section with SHF_EXECINSTR. GAS spells the
+      request `.section .note.GNU-stack,"ax",@progbits` (the `a` is
+      GAS's spelling; gcc's own exec note carries X only).
+    - Final links: ld emits PT_GNU_STACK (all address/size fields 0,
+      alignment 0x10) for executables and shared libraries when at
+      least one considered input carries the note: RW when every
+      note is non-executable, RWE when any note is executable
+      ("requires executable stack" warning) **or any considered
+      input lacks the note** ("missing .note.GNU-stack section
+      implies executable stack" warning). A shared library input's
+      own PT_GNU_STACK does not propagate. `-z execstack` forces
+      RWE, `-z noexecstack` forces RW, last one wins. When *no*
+      input carries a note and nothing else is linked (a pure `ld`
+      link of only note-less objects), ld emits no segment at all.
+    - phcc before F21: C objects carried no note (the gate warning);
+      hand-written assembly already produced the section correctly —
+      tccasm's `.section` handling creates it with the parsed flags
+      and the object writer emits it (verified: `"ax"` → AX,
+      `""` → no flags) — so only the C path lacked it. phcc links
+      produced no PT_GNU_STACK in any case (measured for plain,
+      gcc-object, exec-note and `-z` inputs alike), and the joined
+      spelling `-Wl,-zexecstack` was a hard error ("unsupported
+      linker option").
+  - *Change:* three parts, all in the ELF backend.
+    (1) `elf_output_obj` ensures the section exists before the object
+    is written: created empty (SHT_PROGBITS, no flags, alignment 1)
+    when absent; an assembly-provided section is kept untouched, so
+    nothing is ever double-emitted; on a merged output (`-r`) an
+    executable-stack request recorded from an input object is OR'd
+    into the section's flags so the request survives the merge, as
+    it does through GNU ld -r. (Existence is tested with
+    `have_section`, not `find_section` — the latter is find-or-create
+    and would mint the section with SHF_ALLOC and alignment 8.)
+    ELF-format outputs only; COFF/binary object output is unchanged.
+    (2) `tcc_load_object_file` records each input object's note state
+    on the TCCState (`inp_execstack`, `inp_no_gnustack`) in a
+    pre-pass over the section headers. The loader's own section
+    merge cannot carry this information — merged sections keep the
+    first contributor's flags — and archive members are recorded
+    only when actually extracted, matching ld's "considered inputs".
+    Shared-library inputs are not tracked: ld does not propagate
+    their stack flags (measured). (3) `layout_sections` emits
+    PT_GNU_STACK for every executable/shared-library output, flags
+    computed by ld's rule: PF_R|PF_W, plus PF_X when `-z execstack`
+    was given, when any input note is executable (an in-state
+    `.note.GNU-stack` with SHF_EXECINSTR — hand-written assembly
+    compiled and linked in one invocation — counts), or when any
+    input object lacked the note; `-z noexecstack` forces PF_R|PF_W.
+    `tcc_set_linker` now understands `-z execstack`/`-z noexecstack`
+    in all three spellings (separate argument, joined, `=`); other
+    `-z` words remain ignored, as before.
+  - *Deliberate deviations, with evidence:* in the one configuration
+    where ld emits no segment at all (no input carries a note —
+    reachable under phcc only with `-nostdlib` and exclusively
+    pre-F21 objects, since the driver's crt objects are noted and
+    in-state compiled code is vouched for by the compiler itself),
+    phcc emits the segment with RWE flags rather than none; the
+    flags still follow ld's missing-note rule. phcc does not
+    reproduce ld's two warning texts; it applies the same flag rules
+    silently. A bare `-z execstack` on the compiler command line
+    remains an error, as before (the `-Wl,` forms are the supported
+    route). GNU ld -r keeps same-named note sections once per input;
+    phcc -r merges them into one section — the final-link outcome is
+    the same.
+  - *Evidence:* before/after readelf matrix on aletheia-core. Object
+    stage: a phcc C object's note now matches gcc's attributes
+    exactly (PROGBITS, size 0, no flags, align 1); assembly objects
+    keep their parsed flags (AX / none), exactly one section each;
+    `-r` over a non-executable + an executable gcc object yields one
+    section carrying X. GNU ld consuming phcc objects: the zlib
+    shared-library link that warned in the gate now completes with
+    zero bytes of warning output, as do an executable link and the
+    full zlib object set; zlib builds under the fixed phcc and
+    `make test` prints "*** zlib test OK ***". Link stage: phcc
+    executables and shared libraries carry PT_GNU_STACK RW by
+    default (gcc-built equivalents: RW), RWE for an executable-note
+    input and for a note-less (pre-F21) input, RW again when
+    `-z noexecstack` overrides an executable-note input; all three
+    `-z` spellings accepted, last `-z` wins; a freestanding `-static
+    -nostdlib` binary links, runs, and carries RW. (The `-static`
+    hello-world link fails in this environment with unresolved
+    `__ehdr_start`/`__unordtf2` — identically on the unmodified base
+    with F21 stashed, so it is pre-existing and not an F21 effect.)
+    OpenSSL 4.1.0, assembler + shared, `no-tests` (the F17
+    completion configuration): **builds completely, 2,183 of 2,183
+    objects, `make build_sw` exit 0**; `apps/openssl` runs and its
+    SHA-256 of "abc" equals the system tool's; `libcrypto.so.4` and
+    `apps/openssl` now carry PT_GNU_STACK RW. Upstream `make test`
+    ALL TESTS PASSED. Conformance spot re-run unchanged at 328/333
+    (agree 325 + agree_reject 3), the diverging set exactly the
+    documented baseline five (`a_pp_018`, `b_gnu_009`, `b_gnu_015`,
+    `b_gnu_016`, `b_gnu_020`), zero oracle splits. Note for the
+    phext: this entry changes the Source scrolls of `tccelf.c`,
+    `tcc.h` and `libtcc.c` (and their Volume 3 segmentations and
+    Design views), which go STALE at the next refresh, as does the
+    gate verdict; machine #3's binding covers `tccelf.c`, but no
+    machine-description text changes are proposed — machine #3
+    describes symbol resolution and archive extraction, not
+    program-header emission.
 
 ## Maintenance rule
 
