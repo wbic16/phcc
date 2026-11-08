@@ -368,7 +368,7 @@ def place(path):
     if path.startswith("win32/lib/"): return (9, 4)
     if path.startswith("win32/"): return (9, 5)
     if path in ("Makefile", "configure", "conftest.c", ".gitignore",
-                "slurp.sh", "PATCHES.md", "README.md",
+                "slurp.sh", "PATCHES.md", "README.md", "BENCHMARKS.md",
                 "texi2pod.pl"): return (10, 1)
     if path.startswith("tests/"):
         if "/" not in path[len("tests/"):]: return (10, 2)
@@ -451,8 +451,8 @@ One file, whole project. Outer dimensions 1.1.1 throughout.
 - Collection 4 (Source), Volume 2: the phcc tree. Book = module,
   Chapter = component, Section = file (path-sorted within chapter),
   Scroll 1 = file bytes, byte-exact. (Placement: Slice 0 §1 Books,
-  plus tools/** at Book 10 Chapter 9 and README.md at Book 10
-  Chapter 1.)
+  plus tools/** at Book 10 Chapter 9 and README.md + BENCHMARKS.md
+  at Book 10 Chapter 1.)
 - Collection 9 (Docs), Volume 2, Book 1, Chapter 1: the project's
   docs/*.md guides, Section = file (path-sorted within chapter),
   Scroll 1 = file bytes, byte-exact — tree documentation is placed
@@ -555,7 +555,7 @@ def stage_a(tree, base_phext):
     manifest_lines = [
         "# phcc placement manifest — phcc pack (phcc_migrate stage A)",
         "# placement: Slice 0 importer v2 §1 Books (+ tools/** -> Book 10 Ch 9,"
-        " README.md -> Book 10 Ch 1, docs/** -> Docs Collection 9 Vol 2 Book 1 Ch 1)",
+        " README.md + BENCHMARKS.md -> Book 10 Ch 1, docs/** -> Docs Collection 9 Vol 2 Book 1 Ch 1)",
         "# columns: path <TAB> coordinate <TAB> sha256 <TAB> size <TAB> git-mode",
     ]
     total = 0
