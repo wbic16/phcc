@@ -3111,6 +3111,33 @@ structure; the fork's intent is carried, never dropped silently).
     Source scrolls go STALE; cleared by the Wave D5
     phext refresh.
 
+## F35 — arm64: glibc's `_Float128` typedef no longer breaks parsing
+
+On AArch64, glibc's `bits/floatn.h` typedefs `_Float128` to `long
+double` unconditionally for compilers not claiming GCC >= 7 (on
+aarch64 long double IS binary128, `__HAVE_DISTINCT_FLOAT128 == 0`).
+Since F29 made `_Float128` a basic-type keyword, phcc read that
+typedef as a second basic type and failed with "too many basic
+types" — no glibc header parsed on the arm64 target at all.  On
+x86_64 the same header section is gated on `__GNUC_PREREQ(4,3)`,
+which is false for phcc, so the defect was arm64-only (measured:
+gcc-aarch64 never sees the typedef because it claims `__GNUC__`;
+clang-aarch64 takes the branch but its parser is lenient).
+
+Fix (tccgen.c, gated on TCC_TARGET_ARM64): in parse_btype's
+TOK_FLOAT128 case, a `typedef long double _Float128;` declaration
+is recognized (file-static `f128_typedef_name` records the typedef
+name) and parsed as what it is — an alias for the long-double type,
+which on this target has the identical representation.  type_decl's
+declarator-name check accepts the recorded name.  On x86_64 the same
+source text remains an error, matching gcc.  Negative controls
+(`typedef double _Float128`, non-typedef declarations, the
+`__float128` spelling handled symmetrically) verified; F29's
+declaration/layout surface parses on arm64; glibc hello compiles,
+links and runs under qemu-aarch64.  Riscv64's glibc has the same
+pattern; no sysroot was available to verify, so the gate stays
+arm64-only.
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in

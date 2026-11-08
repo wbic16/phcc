@@ -57,6 +57,8 @@ static int typedef_aligned;
    parse_btype() call (typedef_aligned's pattern).  in_decl_btype
    guards the token outside declaration statements. */
 static int auto_type_seen;
+static int f128_typedef_name; /* F35: _Float128/__float128 token accepted
+   as a typedef declarator name (glibc aarch64 floatn.h fallback) */
 static int in_decl_btype;
 ST_DATA char debug_modes;
 
@@ -5449,6 +5451,7 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
     memset(ad, 0, sizeof(AttributeDef));
     typedef_aligned = 0;
     auto_type_seen = 0;
+    f128_typedef_name = 0;
     type_found = 0;
     typespec_found = 0;
     t = VT_INT;
@@ -5531,6 +5534,20 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             tcc_error("_Complex is not yet supported");
         case TOK_FLOAT128:
         case TOK_FLOAT128B:
+#ifdef TCC_TARGET_ARM64
+            /* F35: glibc <bits/floatn.h> on aarch64 emits the fallback
+               `typedef long double _Float128;' for compilers without
+               __GNUC__ >= 7.  There _Float128 is representation-
+               identical to long double (__HAVE_DISTINCT_FLOAT128 == 0),
+               so when the accumulated specifier is exactly that, take
+               the token as the typedef's declarator name instead of a
+               second basic type.  x86_64 keeps the error: its _Float128
+               is a distinct type and the typedef would be false. */
+            if ((t & (VT_TYPEDEF|VT_BTYPE)) == (VT_TYPEDEF|VT_LDOUBLE)) {
+                f128_typedef_name = tok;
+                goto the_end;
+            }
+#endif
             u = VT_F128;
             goto basic_type;
         case TOK_FLOAT:
@@ -6063,12 +6080,16 @@ static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td)
 	    skip(')');
 	} else
 	  goto abstract;
-    } else if (tok >= TOK_IDENT && (td & TYPE_DIRECT)) {
+    } else if ((tok >= TOK_IDENT ||
+                (f128_typedef_name && tok == f128_typedef_name)) &&
+               (td & TYPE_DIRECT)) {
 	/* type identifier */
 	*v = tok;
+	f128_typedef_name = 0;
 	next();
     } else {
   abstract:
+	f128_typedef_name = 0;
 	if (!(td & TYPE_ABSTRACT))
 	  expect("identifier");
 	*v = 0;
