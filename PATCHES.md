@@ -3168,6 +3168,27 @@ matrix: the former segfault cells now fail with
 working cell (defined-in-link, gcc IE objects against DSOs,
 executable links) is unchanged.
 
+## F38 — assignment to a read-only location is an error, not a warning
+
+`verify_assign_cast` diagnosed assignment to a const-qualified
+lvalue with `tcc_warning` — suppressed by `-w`, never blocking
+codegen.  The accepted program then wrote to read-only storage and
+segfaulted at runtime (D7 slice-2 negative probe n2_const_assign).
+gcc and clang both reject this constraint violation.  Fix: promote
+the diagnostic to `tcc_error` (one line, tccgen.c; the check is
+reached from `gen_assign_cast` and `vstore`, so plain, compound and
+increment/decrement assignments are all covered).  Corpus: 8
+violation shapes rejected; initialization, const reads, const-member
+initialization, pointer-to-const reads and the explicit cast escape
+(the standard's own UB door, accepted by both oracles) all still
+compile and run correctly.  Deliberate upstream-test delta: three
+tests2 expectation files (60_errors_and_warnings,
+125_atomic_misc, 149_parameter_qualifier_errors) pinned the old
+"warning:" wording and are updated to "error:"; in
+60_errors_and_warnings' conditional-qualifiers section, four
+warnings become the single first error, as with the oracles'
+fail-fast behaviour.  make test passes in full.
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in

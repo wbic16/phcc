@@ -4196,7 +4196,9 @@ static void verify_assign_cast(CType *dt)
     dbt = dt->t & VT_BTYPE;
     sbt = st->t & VT_BTYPE;
     if (dt->t & VT_CONSTANT)
-        tcc_warning("assignment of read-only location");
+        /* F38: both oracles make this an error, and the accepted
+           program wrote to read-only storage and crashed. */
+        tcc_error("assignment of read-only location");
     switch(dbt) {
     case VT_VOID:
         if (sbt != dbt)

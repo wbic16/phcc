@@ -41,7 +41,7 @@
 60_errors_and_warnings.c:99: warning: assignment discards qualifiers from pointer target type
 60_errors_and_warnings.c:103: warning: assignment discards qualifiers from pointer target type
 60_errors_and_warnings.c:104: warning: assignment discards qualifiers from pointer target type
-60_errors_and_warnings.c:109: warning: assignment of read-only location
+60_errors_and_warnings.c:109: error: assignment of read-only location
 
 [test_enum_compat]
 60_errors_and_warnings.c:119: error: incompatible types for redefinition of 'f3'
@@ -274,10 +274,10 @@ bar 15 12 34
 60_errors_and_warnings.c:591: warning: assignment discards qualifiers from pointer target type
 
 [test_const_array_member_write_bad]
-60_errors_and_warnings.c:601: warning: assignment of read-only location
+60_errors_and_warnings.c:601: error: assignment of read-only location
 
 [test_const_struct_array_member_write_bad]
-60_errors_and_warnings.c:611: warning: assignment of read-only location
+60_errors_and_warnings.c:611: error: assignment of read-only location
 
 [test_volatile_array_member_addr_ok]
 
@@ -292,10 +292,7 @@ bar 15 12 34
 [test_volatile_array_member_write_ok]
 
 [test_conditional_array_qualifiers]
-60_errors_and_warnings.c:676: warning: assignment of read-only location
-60_errors_and_warnings.c:677: warning: assignment of read-only location
-60_errors_and_warnings.c:678: warning: assignment of read-only location
-60_errors_and_warnings.c:679: warning: assignment of read-only location
+60_errors_and_warnings.c:676: error: assignment of read-only location
 
 [test_restrict_scalar]
 60_errors_and_warnings.c:684: error: restrict-qualified type must be a pointer to object or incomplete type

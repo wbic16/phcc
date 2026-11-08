@@ -56,4 +56,4 @@ nand_fetch: SUCCESS
 125_atomic_misc.c:196: warning: assignment from incompatible pointer type
 
 [test_atomic_warn_3]
-125_atomic_misc.c:204: warning: assignment of read-only location
+125_atomic_misc.c:204: error: assignment of read-only location
