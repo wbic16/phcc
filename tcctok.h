@@ -73,6 +73,11 @@
      DEF(TOK_TYPEOF1, "typeof")
      DEF(TOK_TYPEOF2, "__typeof")
      DEF(TOK_TYPEOF3, "__typeof__")
+     DEF(TOK_TYPEOF_UNQUAL1, "typeof_unqual")
+     DEF(TOK_TYPEOF_UNQUAL2, "__typeof_unqual__")
+     DEF(TOK_NULLPTR, "nullptr")
+     DEF(TOK_CONSTEXPR, "constexpr")
+     DEF(TOK_BITINT, "_BitInt")
      DEF(TOK_LABEL, "__label__")
 
 /*********************************************************************/

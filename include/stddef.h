@@ -12,6 +12,10 @@ typedef __SIZE_TYPE__ uintptr_t;
 typedef union { long long __ll; long double __ld; } max_align_t;
 #endif
 
+/* F42: C23's nullptr_t (declared unconditionally, as the nullptr
+   keyword it names is always available in this compiler) */
+typedef typeof(nullptr) nullptr_t;
+
 #ifndef NULL
 #define NULL ((void*)0)
 #endif

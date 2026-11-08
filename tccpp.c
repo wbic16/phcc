@@ -2719,6 +2719,18 @@ static void parse_number(const char *p)
     /* parse all digits. cannot check octal numbers at this stage
        because of floating point constants */
     while (1) {
+        if (ch == '\'' && q > token_buf
+            && (isnum(*(q - 1)) || (b == 16 && ((*(q - 1) >= 'a' && *(q - 1) <= 'f')
+                                                || (*(q - 1) >= 'A' && *(q - 1) <= 'F'))))
+            && (isnum(*p) || (b == 16 && ((*p >= 'a' && *p <= 'f')
+                                          || (*p >= 'A' && *p <= 'F'))))) {
+            /* F42: C23 digit separator (1'000'000): valid only
+               between two digits; never copied into token_buf, so
+               the value conversion below never sees it.  A quote
+               anywhere else falls through and errors as before. */
+            ch = *p++;
+            continue;
+        }
         if (ch >= 'a' && ch <= 'f')
             t = ch - 'a' + 10;
         else if (ch >= 'A' && ch <= 'F')
@@ -2768,9 +2780,18 @@ static void parse_number(const char *p)
                 frac_bits -= bn_lshift(bn, shift, t);
             }
             if (ch == '.') {
+                int sep_prev = 1; /* an integer digit precedes */
                 ch = *p++;
                 q--; /* onto the NUL: fraction digits extend it (F34) */
                 while (1) {
+                    if (ch == '\'' && sep_prev
+                        && (isnum(*p) || (b == 16 && ((*p >= 'a' && *p <= 'f')
+                                                      || (*p >= 'A' && *p <= 'F'))))) {
+                        /* F42: digit separator in the fraction */
+                        ch = *p++;
+                        sep_prev = 0;
+                        continue;
+                    }
                     t = ch;
                     if (t >= 'a' && t <= 'f') {
                         t = t - 'a' + 10;
@@ -2787,6 +2808,7 @@ static void parse_number(const char *p)
                         goto num_too_long;
                     *q++ = ch;
                     f128_nfrac++;
+                    sep_prev = 1;
                     frac_bits -= bn_lshift(bn, shift, t);
                     frac_bits += shift;
                     ch = *p++;
@@ -2811,6 +2833,8 @@ static void parse_number(const char *p)
 		if (exp_val < 100000000)
                     exp_val = exp_val * 10 + ch - '0';
                 ch = *p++;
+                if (ch == '\'' && *p >= '0' && *p <= '9')
+                    ch = *p++; /* F42: digit separator in exponent */
             }
             exp_val = exp_val * s;
 
@@ -2873,11 +2897,24 @@ static void parse_number(const char *p)
                 *q++ = ch;
                 ch = *p++;
             float_frac_parse:
-                while (ch >= '0' && ch <= '9') {
-                    if (q >= token_buf + STRING_MAX_SIZE)
-                        goto num_too_long;
-                    *q++ = ch;
-                    ch = *p++;
+                {
+                    /* F42: digit separators are skipped, not copied;
+                       one is valid only between two fraction digits */
+                    int sep_prev = 0;
+                    while ((ch >= '0' && ch <= '9')
+                           || (ch == '\'' && sep_prev
+                               && *p >= '0' && *p <= '9')) {
+                        if (ch == '\'') {
+                            ch = *p++;
+                            sep_prev = 0;
+                            continue;
+                        }
+                        if (q >= token_buf + STRING_MAX_SIZE)
+                            goto num_too_long;
+                        *q++ = ch;
+                        sep_prev = 1;
+                        ch = *p++;
+                    }
                 }
             }
             if (ch == 'e' || ch == 'E') {
@@ -2893,11 +2930,22 @@ static void parse_number(const char *p)
                 }
                 if (ch < '0' || ch > '9')
                     expect("exponent digits");
-                while (ch >= '0' && ch <= '9') {
-                    if (q >= token_buf + STRING_MAX_SIZE)
-                        goto num_too_long;
-                    *q++ = ch;
-                    ch = *p++;
+                {
+                    int sep_prev = 0;
+                    while ((ch >= '0' && ch <= '9')
+                           || (ch == '\'' && sep_prev
+                               && *p >= '0' && *p <= '9')) {
+                        if (ch == '\'') {
+                            ch = *p++;
+                            sep_prev = 0;
+                            continue;
+                        }
+                        if (q >= token_buf + STRING_MAX_SIZE)
+                            goto num_too_long;
+                        *q++ = ch;
+                        sep_prev = 1;
+                        ch = *p++;
+                    }
                 }
             }
             *q = '\0';
@@ -3355,6 +3403,13 @@ maybe_newline:
             cstr_ccat(&tokcstr, t);
             if (!((isidnum_table[c - CH_EOF] & (IS_ID|IS_NUM))
                   || c == '.'
+                  /* F42: a C23 digit separator inside a pp-number:
+                     a quote right after a digit (or a hex letter)
+                     belongs to the number; parse_number validates
+                     its exact placement */
+                  || (c == '\'' && (isnum(t)
+                                    || (t >= 'a' && t <= 'f')
+                                    || (t >= 'A' && t <= 'F')))
                   || ((c == '+' || c == '-')
                       && (((t == 'e' || t == 'E')
                             && !(parse_flags & PARSE_FLAG_ASM_FILE
@@ -4252,6 +4307,21 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
       putdef(cs, "__STDC__");
       cstr_printf(cs, "#define __STDC_HOSTED__ %d\n", s1->nostdlib ? 0 : 1);
       cstr_printf(cs, "#define __STDC_VERSION__ %dL\n", s1->cversion);
+      if (s1->c23_mode) {
+        /* F42: in C23 mode, bool/true/false and the C11 keyword
+           spellings static_assert/alignas/thread_local are keywords.
+           They are presented as macros onto the underscored core
+           spellings -- exactly the presentation <stdbool.h>,
+           <assert.h> and <stdalign.h> use for them in C11 -- so the
+           headers' own identical definitions remain benign. */
+        cstr_cat(cs,
+          "#define bool _Bool\n"
+          "#define true 1\n"
+          "#define false 0\n"
+          "#define static_assert _Static_assert\n"
+          "#define alignas _Alignas\n"
+          "#define thread_local _Thread_local\n", -1);
+      }
       cstr_cat(cs,
         /* load more predefs and __builtins */
 #if CONFIG_TCC_PREDEFS

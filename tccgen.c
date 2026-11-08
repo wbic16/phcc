@@ -57,6 +57,15 @@ static int typedef_aligned;
    parse_btype() call (typedef_aligned's pattern).  in_decl_btype
    guards the token outside declaration statements. */
 static int auto_type_seen;
+/* F42: set by parse_btype() when the declaration specifiers contain
+   a bare 'auto' in C23 mode with no type specifier seen so far;
+   cleared again if a real type specifier follows (then 'auto' is
+   the plain storage class, as in 'auto int').  decl() consumes it
+   and routes the declaration through the F33 inference machinery. */
+static int c23_auto_seen;
+/* the spelling decl_auto_type() names in its diagnostics:
+   "__auto_type" for the F33 extension, "auto" for C23 inference */
+static const char *auto_type_name = "__auto_type";
 static int f128_typedef_name; /* F35: _Float128/__float128 token accepted
    as a typedef declarator name (glibc aarch64 floatn.h fallback) */
 static int in_decl_btype;
@@ -162,6 +171,8 @@ static int type_qualifiers(CType *type);
 static void parse_btype_qualify(CType *type, int qualifiers);
 static int is_compatible_types(CType *type1, CType *type2);
 static int parse_btype(CType *type, AttributeDef *ad, int ignore_label);
+static int at_c23_attribute(void);
+static void skip_c23_attributes(void);
 static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td);
 static void parse_expr_type(CType *type);
 static void init_putv(init_params *p, CType *type, unsigned long c);
@@ -3270,6 +3281,16 @@ static void type_to_str(char *buf, int buf_size,
     buf_size -= strlen(buf);
     buf += strlen(buf);
 
+    /* F42: nullptr_t has no pointee to recurse into */
+    if (IS_NULLPTR_T(t)) {
+        pstrcat(buf, buf_size, "nullptr_t");
+        if (varstr) {
+            pstrcat(buf, buf_size, " ");
+            pstrcat(buf, buf_size, varstr);
+        }
+        return;
+    }
+
     switch(bt) {
     case VT_VOID:
         tstr = "void";
@@ -3398,6 +3419,11 @@ static int pointed_size(CType *type)
 
 static inline int is_null_pointer(SValue *p)
 {
+    /* F42: a nullptr constant is a null pointer constant, and its
+       type has no pointee to inspect below */
+    if (IS_NULLPTR_T(p->type.t))
+        return (p->r & (VT_VALMASK | VT_LVAL | VT_SYM | VT_NONCONST)) == VT_CONST
+            && p->c.i == 0;
     if ((p->r & (VT_VALMASK | VT_LVAL | VT_SYM | VT_NONCONST)) != VT_CONST)
         return 0;
     return ((p->type.t & VT_BTYPE) == VT_INT && (uint32_t)p->c.i == 0) ||
@@ -3442,6 +3468,13 @@ static int is_compatible_func(CType *type1, CType *type2)
 static int compare_types(CType *type1, CType *type2, int unqualified)
 {
     int bt1, t1, t2;
+
+    /* F42: nullptr_t is a type of its own.  VT_TYPE below masks out
+       the struct-field tag bits that distinguish it from a plain
+       pointer, and pointed_type() on it would dereference its NULL
+       ref, so it is settled here. */
+    if (IS_NULLPTR_T(type1->t) || IS_NULLPTR_T(type2->t))
+        return IS_NULLPTR_T(type1->t) && IS_NULLPTR_T(type2->t);
 
     if (IS_ENUM(type1->t)) {
         if (IS_ENUM(type2->t))
@@ -4241,7 +4274,39 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
         /* NOTE: as an extension, we accept void on only one side */
         type.t = VT_VOID;
     } else if (bt1 == VT_PTR || bt2 == VT_PTR) {
-        if (op == '+') {
+        if (IS_NULLPTR_T(t1) || IS_NULLPTR_T(t2)) {
+          /* F42: nullptr_t has no pointee, so the generic pointer
+             rules below (which call pointed_type) must not run.
+             C23 6.5.15: with a nullptr_t operand the conditional's
+             type is the other operand's type when that is a pointer
+             type, and nullptr_t when the other operand is a null
+             pointer constant; comparisons accept a pointer type, a
+             null pointer constant, or another nullptr_t. */
+          int np1 = IS_NULLPTR_T(t1);
+          CType *otype = np1 ? type2 : type1;
+          int obt = np1 ? bt2 : bt1;
+          SValue *oval = np1 ? op2 : op1;
+          if (op == '?') {
+            if (IS_NULLPTR_T(t1) && IS_NULLPTR_T(t2))
+                type = *type1;
+            else if (is_null_pointer(oval)) {
+                type.t = VT_PTR | VT_NULLPTR_TAG;
+                type.ref = NULL;
+            }
+            else if (obt == VT_PTR)
+                type = *otype;
+            else
+                ret = 0;
+          } else if (op == CMP_OP) {
+            if ((IS_NULLPTR_T(t1) && IS_NULLPTR_T(t2)) || obt == VT_PTR
+                || is_null_pointer(oval))
+                type.t = VT_SIZE_T;
+            else
+                ret = 0;
+          } else
+            ret = 0;
+        }
+        else if (op == '+') {
           if (!is_integer_btype(bt1 == VT_PTR ? bt2 : bt1))
             ret = 0;
         }
@@ -4385,6 +4450,14 @@ ST_FUNC void gen_op(int op)
         return;
     }
 
+    /* F42: nullptr_t takes part in comparisons (and the conditional
+       operator, handled by its caller) but never in arithmetic --
+       and the pointer branches below would dereference its NULL
+       type ref via pointed_type() */
+    if (!TOK_ISCOND(op)
+        && (IS_NULLPTR_T(vtop[-1].type.t) || IS_NULLPTR_T(vtop[0].type.t)))
+        tcc_error("arithmetic on 'nullptr_t'");
+
     if (op == TOK_SHR || op == TOK_SAR || op == TOK_SHL)
         op_class = SHIFT_OP;
     else if (TOK_ISCOND(op)) /* == != > ... */
@@ -4415,8 +4488,26 @@ op_err:
         /* at least one operand is a pointer */
         /* relational op: must be both pointers */
         int align;
-        if (op_class == CMP_OP)
+        if (op_class == CMP_OP) {
+            /* F42: a nullptr_t operand has no pointee for std_op's
+               casts to work through.  For the comparison it takes
+               the other operand's pointer type; against another
+               nullptr_t or a null pointer constant it compares as
+               a plain integer of pointer size.  Its bits are
+               already the null pointer's, so only the type label
+               changes. */
+            if (IS_NULLPTR_T(t1) && bt2 == VT_PTR && !IS_NULLPTR_T(t2))
+                vtop[-1].type = vtop[0].type;
+            else if (IS_NULLPTR_T(t2) && bt1 == VT_PTR && !IS_NULLPTR_T(t1))
+                vtop[0].type = vtop[-1].type;
+            else {
+                if (IS_NULLPTR_T(t1))
+                    vtop[-1].type.t = VT_SIZE_T;
+                if (IS_NULLPTR_T(t2))
+                    vtop[0].type.t = VT_SIZE_T;
+            }
             goto std_op;
+        }
         /* if both pointers, then it must be the '-' op */
         if (bt1 == VT_PTR && bt2 == VT_PTR) {
             if (op != '-')
@@ -4605,6 +4696,24 @@ static void gen_cast(CType *type)
         vtop->type = *type;
         vtop->type.t &= ~(VT_QUAL | VT_ARRAY | VT_TLS);
         return;
+    }
+
+    /* F42: nullptr_t conversions (C23 6.3.2.4).  A cast may take a
+       pointer to nullptr_t (the value passes through; converting a
+       non-null pointer is undefined there, as in the standard), but
+       nullptr_t itself converts only to a pointer type or _Bool --
+       never to an arithmetic type, explicitly or implicitly.  The
+       sanctioned cases fall through to the ordinary pointer
+       machinery below, which sees both sides as VT_PTR. */
+    if (IS_NULLPTR_T(vtop->type.t) || IS_NULLPTR_T(type->t)) {
+        int sbt0 = vtop->type.t & VT_BTYPE, dbt0 = type->t & VT_BTYPE;
+        if (IS_NULLPTR_T(type->t)
+            && !IS_NULLPTR_T(vtop->type.t) && sbt0 != VT_PTR
+            && !is_null_pointer(vtop))
+            tcc_error("conversion to 'nullptr_t' from incompatible type");
+        if (IS_NULLPTR_T(vtop->type.t)
+            && !(dbt0 == VT_PTR || dbt0 == VT_BOOL || dbt0 == VT_VOID))
+            tcc_error("conversion from 'nullptr_t' to incompatible type");
     }
 
     /* special delayed cast for char/short */
@@ -4934,7 +5043,8 @@ static inline CType *pointed_type(CType *type)
 
 static void check_restrict_type(CType *type)
 {
-    while ((type->t & VT_BTYPE) == VT_PTR) {
+    /* F42: the walk stops at nullptr_t, which has no pointee */
+    while ((type->t & VT_BTYPE) == VT_PTR && !IS_NULLPTR_T(type->t)) {
         if ((type->t & VT_RESTRICT)
             && (pointed_type(type)->t & VT_BTYPE) == VT_FUNC)
             tcc_error("restrict-qualified type must be a pointer to object or incomplete type");
@@ -5002,6 +5112,21 @@ static void verify_assign_cast(CType *dt)
         if (sok && dok)
             return;
         cast_error(st, dt);
+        return;
+    }
+    if (IS_NULLPTR_T(dt->t) || IS_NULLPTR_T(st->t)) {
+        /* F42: nullptr_t assignment rules (C23 6.3.2.4): a nullptr_t
+           destination accepts only a nullptr_t source (NULL and 0
+           are not nullptr_t); a nullptr_t source converts implicitly
+           only to a pointer type or _Bool. */
+        if (IS_NULLPTR_T(dt->t) && IS_NULLPTR_T(st->t))
+            return;
+        if (IS_NULLPTR_T(st->t) && (dbt == VT_PTR || dbt == VT_BOOL))
+            return;
+        if (IS_NULLPTR_T(dt->t))
+            tcc_error("conversion to 'nullptr_t' from incompatible type");
+        else
+            tcc_error("conversion from 'nullptr_t' to incompatible type");
         return;
     }
     switch(dbt) {
@@ -5289,6 +5414,9 @@ ST_FUNC void inc(int post, int c)
     if (IS_COMPLEX(vtop->type.t))
         /* F40: ++/-- need a real or pointer operand (C11 6.5.2.4) */
         tcc_error("invalid operand to increment/decrement: _Complex type (F40)");
+    if (IS_NULLPTR_T(vtop->type.t))
+        /* F42: ++/-- on nullptr_t is arithmetic on nullptr_t */
+        tcc_error("arithmetic on 'nullptr_t'");
     test_lvalue();
     vdup(); /* save lvalue */
     if (post) {
@@ -5877,6 +6005,7 @@ static void struct_decl(CType *type, int u)
 {
     int v, c, size, align, flexible;
     int bit_size, bsize, bt, ut;
+    int fwd_bt = 0, was_typed_fwd = 0;
     int btype_aligned, btype_da;
     Sym *s, *ss, **ps;
     AttributeDef ad, ad1;
@@ -5889,6 +6018,9 @@ static void struct_decl(CType *type, int u)
     memset(&ad, 0, sizeof ad);
     next();
     parse_attribute(&ad);
+    /* F42: C23 attributes may sit between the keyword and the tag */
+    if (at_c23_attribute())
+        skip_c23_attributes();
 
     v = 0;
     if (tok >= TOK_IDENT) /* struct/enum tag */
@@ -5912,8 +6044,19 @@ static void struct_decl(CType *type, int u)
         if (s && (s->sym_scope == local_scope || (tok != '{' && tok != ';'))) {
             if (u == s->type.t)
                 goto do_decl;
-            if (u == VT_ENUM && IS_ENUM(s->type.t)) /* XXX: check integral types */
+            if (u == VT_ENUM && IS_ENUM(s->type.t)) { /* XXX: check integral types */
+                /* F42: remember a typed forward declaration (its
+                   tag still has c == 0: declared with a fixed type,
+                   not yet defined).  A definition -- or a repeat
+                   forward declaration with a ':' -- must name the
+                   same fixed type; both oracles reject a mismatch
+                   in every mode, so this check is not mode-gated. */
+                if (s->c == 0) {
+                    was_typed_fwd = 1;
+                    fwd_bt = s->type.t & (VT_BTYPE|VT_LONG|VT_UNSIGNED|VT_DEFSIGN);
+                }
                 goto do_decl;
+            }
             tcc_error("redeclaration of '%s'", get_tok_str(v, NULL));
         }
     } else {
@@ -5931,11 +6074,21 @@ do_decl:
     type->t = s->type.t;
     type->ref = s;
 
+    if (u == VT_ENUM && was_typed_fwd && tok != '{' && bt && bt != fwd_bt)
+        tcc_error("redeclaration of enum '%s' with a different fixed underlying type",
+                  get_tok_str(v, NULL));
     if (tok == '{') {
         next();
         if (s->c != -1
             && !(u == VT_ENUM && s->c == 0)) /* not yet defined typed enum */
             tcc_error("struct/union/enum already defined");
+        /* F42: a definition that omits the ':' (bt == 0) or names a
+           different fixed type than the forward declaration is a
+           constraint violation in both C11 and C23 (the C23 study's
+           WRONG #5: the loose form silently fell back to int). */
+        if (u == VT_ENUM && was_typed_fwd && bt != fwd_bt)
+            tcc_error("definition of enum '%s' does not repeat the fixed underlying type of its forward declaration",
+                      get_tok_str(v, NULL));
         s->c = -2;
         /* cannot be empty */
         /* non empty enums are not allowed */
@@ -5954,6 +6107,9 @@ do_decl:
                 if (v < TOK_UIDENT)
                     expect("identifier");
                 next();
+                /* F42: C23 attributes sit after the enumerator name */
+                if (at_c23_attribute())
+                    skip_c23_attributes();
                 if (tok == '=') {
                     next();
 		    ll = expr_const64();
@@ -6094,6 +6250,10 @@ do_decl:
                             tcc_error("invalid type for '%s'", 
                                   get_tok_str(v, NULL));
                     }
+                    /* F42: C23 attributes may follow a member
+                       declarator (and precede a bit-field colon) */
+                    if (at_c23_attribute())
+                        skip_c23_attributes();
                     if (tok == ':') {
                         next();
                         bit_size = expr_const();
@@ -6253,6 +6413,63 @@ static void sym_to_attr(AttributeDef *ad, Sym *s)
 {
     merge_symattr(&ad->a, &s->a);
     merge_funcattr(&ad->f, &s->f);
+}
+
+/* F42: C23 attribute specifiers, [[ ... ]].  Contents are parsed
+   and ignored -- the F9 accept-and-ignore idiom.  Standard
+   attributes carry no codegen semantics in this implementation,
+   and C23 explicitly permits ignoring unknown (including
+   vendor-prefixed) attributes.  A lone '[' is common in the token
+   positions attributes share (it ends declaration specifiers and
+   begins array declarators), so entry is always through the peek:
+   at_c23_attribute() leaves the stream untouched unless the token
+   after the current '[' is a second '['. */
+static int at_c23_attribute(void)
+{
+    if (tok != '[')
+        return 0;
+    next();
+    if (tok == '[')
+        return 1; /* stream now sits on the second '[' */
+    unget_tok('['); /* push the second token back, restore the '[' */
+    return 0;
+}
+
+/* F42: nonzero if the token stream at tok begins a C23 attribute
+   specifier; unlike at_c23_attribute(), the stream is restored
+   exactly, for use in conditions (declarator suffix parsing, where
+   a lone '[' is an array bracket and only '[[' is an attribute) */
+static int peek_c23_attribute(void)
+{
+    int r;
+    if (tok != '[')
+        return 0;
+    next();
+    r = (tok == '[');
+    unget_tok('['); /* push the probed token back; tok = '[' again */
+    return r;
+}
+
+/* skip one or more [[ ... ]] groups; the first '[' is consumed and
+   tok is the second '[' on entry */
+static void skip_c23_attributes(void)
+{
+    /* depth counts raw brackets, starting at 1 for the first '[',
+       which at_c23_attribute() already consumed */
+    int depth = 1;
+    for (;;) {
+        if (tok == TOK_EOF)
+            tcc_error("unterminated '[[' attribute specifier");
+        if (tok == '[')
+            depth++;
+        else if (tok == ']' && --depth == 0) {
+            next(); /* consume the closing ']' */
+            break;
+        }
+        next();
+    }
+    if (at_c23_attribute())
+        skip_c23_attributes();
 }
 
 /* Add type qualifiers to a type. If the type is an array then the qualifiers
@@ -6470,9 +6687,33 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             next();
             break;
         case TOK_REGISTER:
-        case TOK_AUTO:
             next();
             break;
+        case TOK_AUTO:
+            /* F42: in C23 mode, a bare 'auto' with no type specifier
+               seen yet is the type-inference specifier, and decl()
+               routes the declaration through decl_auto_type().  If
+               a type specifier is (or becomes) present -- 'auto int
+               x' -- it stays the plain storage class; the_end then
+               clears the flag again. */
+            if (TCC_C23_MODE && in_decl_btype && !typespec_found)
+                c23_auto_seen = 1;
+            next();
+            break;
+        case TOK_CONSTEXPR:
+            tcc_error("'constexpr' is not supported yet (F43)");
+            break;
+        case TOK_BITINT:
+            tcc_error("'_BitInt' is not supported yet (F44)");
+            break;
+        case '[':
+            /* F42: C23 attribute specifier in specifier position;
+               a lone '[' simply ends the specifiers, as before */
+            if (at_c23_attribute()) {
+                skip_c23_attributes();
+                continue;
+            }
+            goto the_end;
         case TOK_UNSIGNED:
             if ((t & (VT_DEFSIGN|VT_UNSIGNED)) == VT_DEFSIGN)
                 tcc_error("signed and unsigned modifier");
@@ -6544,6 +6785,21 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
                     type1.t |= VT_BT_ARRAY;
             }
             goto basic_type2;
+        case TOK_TYPEOF_UNQUAL1:
+        case TOK_TYPEOF_UNQUAL2:
+            /* F42: C23 typeof_unqual -- typeof, then strip the
+               top-level qualifiers from the resulting type */
+            next();
+            parse_expr_type(&type1);
+            /* remove all storage modifiers except typedef */
+            type1.t &= ~(VT_STORAGE&~VT_TYPEDEF);
+            type1.t &= ~VT_QUAL;
+            if (type1.ref) {
+                sym_to_attr(ad, type1.ref);
+                if (type1.t & VT_ARRAY)
+                    type1.t |= VT_BT_ARRAY;
+            }
+            goto basic_type2;
         case TOK_THREAD_LOCAL:
         case TOK___thread:
             if (t & VT_TLS)
@@ -6584,6 +6840,10 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         type_found = 1;
     }
 the_end:
+    /* F42: 'auto' combined with a real type specifier was the plain
+       storage class after all ('auto int x'), in every mode */
+    if (typespec_found)
+        c23_auto_seen = 0;
     if (cx_spec) {
         /* F40: resolve the _Complex element type from the
            accumulated specifiers; a bare _Complex (no other
@@ -6685,8 +6945,18 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         ++local_scope;
         sr = sym_push2(ps, SYM_FIELD, 0, 0);
 
-	if (tok == ')')
-	  l = 0;
+	if (tok == ')') {
+	  /* F42: in C23 mode '()' in a declaration means '(void)'
+	     (C23 6.7.6.3).  Give the list the (void) shape -- FUNC_NEW
+	     with no parameter symbols -- instead of FUNC_OLD. */
+	  if (TCC_C23_MODE) {
+	    pt.t = VT_VOID;
+	    pt.ref = NULL;
+	    memset(&ad1, 0, sizeof ad1);
+	    l = FUNC_NEW;
+	  } else
+	    l = 0;
+	}
 	else if (parse_btype(&pt, &ad1, 0))
 	  l = FUNC_NEW;
 	else if (td & (TYPE_DIRECT|TYPE_ABSTRACT)) {
@@ -6694,7 +6964,14 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
             --local_scope;
 	    merge_attr (ad, &ad1);
 	    return 0;
-	} else
+	} else if (TCC_C23_MODE)
+	  /* F42: what remains is an identifier parameter list -- the
+	     old-style form, which C23 removed, in declarations and in
+	     K&R definitions alike.  (clang enforces this in C23 mode;
+	     gcc 13 still accepts, an oracle split recorded in the C23
+	     tier.  The standard's text is clang's side.) */
+	  tcc_error("old-style parameter list is not supported in C23 mode");
+	else
 	  l = FUNC_OLD;
 
         first = NULL;
@@ -6707,6 +6984,10 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
                     if ((pt.t & VT_BTYPE) == VT_VOID && tok == ')')
                         break;
                     type_decl(&pt, &ad1, &n, TYPE_DIRECT | TYPE_ABSTRACT | TYPE_PARAM);
+                    /* F42: C23 attributes may follow a parameter
+                       declarator */
+                    if (at_c23_attribute())
+                        skip_c23_attributes();
                     if ((pt.t & VT_BTYPE) == VT_VOID)
                         tcc_error("parameter declared as void");
                     if (n == 0 || (td & TYPE_PARAM))
@@ -6747,7 +7028,7 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         /* some ancient pre-K&R C allows a function to return an array
            and the array brackets to be put after the arguments, such 
            that "int c()[]" means something like "int[] c()" */
-        if (tok == '[') {
+        if (tok == '[' && !peek_c23_attribute()) {
             next();
             skip(']'); /* only handle simple "[]" */
             mk_pointer(type);
@@ -6764,10 +7045,11 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         sym_pop(ps, sr, 1);
         --local_scope;
 
-    } else if (tok == '[') {
+    } else if (tok == '[' && !peek_c23_attribute()) {
 	int saved_nocode_wanted = nocode_wanted;
         int array_qualifiers = 0;
-        /* array definition */
+        /* array definition (a '[[' here is a C23 attribute after the
+           declarator instead; the caller skips it -- F42) */
         next();
         n = -1;
         t1 = 0;
@@ -6981,6 +7263,9 @@ ST_FUNC void indir(void)
             return;
         expect("pointer");
     }
+    /* F42: nullptr_t has no pointee (its type ref is NULL) */
+    if (IS_NULLPTR_T(vtop->type.t))
+        tcc_error("dereferencing 'nullptr_t'");
     if (vtop->r & VT_LVAL)
         gv(RC_INT);
     vtop->type = *pointed_type(&vtop->type);
@@ -7366,6 +7651,17 @@ ST_FUNC void unary(void)
  push_tokc:
 	type.t = t;
 	vsetc(&type, VT_CONST, &tokc);
+        next();
+        break;
+    case TOK_NULLPTR:
+        /* F42: the C23 nullptr constant.  Its type is nullptr_t
+           (VT_PTR with the F42 tag bits, no pointee); the value is
+           the null pointer.  It is a keyword in C23 mode and an
+           always-on extension otherwise, like __auto_type. */
+        type.t = VT_PTR | VT_NULLPTR_TAG;
+        type.ref = NULL;
+        tokc.i = 0;
+        vsetc(&type, VT_CONST, &tokc);
         next();
         break;
     case TOK_CUINT:
@@ -8073,6 +8369,9 @@ special_math_val:
             if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                 /* pointer test (no array accepted) */
                 if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
+                    /* F42: nullptr_t has no pointee to call through */
+                    if (IS_NULLPTR_T(vtop->type.t))
+                        goto error_func;
                     vtop->type = *pointed_type(&vtop->type);
                     if ((vtop->type.t & VT_BTYPE) != VT_FUNC)
                         goto error_func;
@@ -9121,6 +9420,10 @@ static void block(int flags)
     Sym *s;
 
 again:
+    /* F42: a C23 attribute specifier may precede any statement or
+       declaration ([[fallthrough]] is the canonical case) */
+    if (at_c23_attribute())
+        skip_c23_attributes();
     t = tok;
     /* If the token carries a value, next() might destroy it. Only with
        invalid code such as f(){"123"4;} */
@@ -11093,9 +11396,9 @@ static int decl_auto_type(CType *btype, AttributeDef *adbase, int l)
     int v = 0, parens = 0, r, i, saved_nocode, level, t;
 
     if (btype->t & VT_TYPEDEF)
-        tcc_error("'__auto_type' used with typedef");
+        tcc_error("'%s' used with typedef", auto_type_name);
     if (l == VT_CMP)
-        tcc_error("'__auto_type' may only be used for a variable");
+        tcc_error("'%s' may only be used for a variable", auto_type_name);
 
     /* one parenthesized level around the identifier is accepted,
        as in gcc's '__auto_type (x) = 5' */
@@ -11104,14 +11407,14 @@ static int decl_auto_type(CType *btype, AttributeDef *adbase, int l)
         parens = 1;
     }
     if (tok < TOK_IDENT)
-        tcc_error("'__auto_type' requires a plain identifier as declarator");
+        tcc_error("'%s' requires a plain identifier as declarator", auto_type_name);
     v = tok;
     next();
     if (parens)
         skip(')');
     parse_attribute(&ad);
     if (tok != '=')
-        tcc_error("'__auto_type' requires an initialized data declaration");
+        tcc_error("'%s' requires an initialized data declaration", auto_type_name);
 
     /* Capture the initializer tokens including the terminator so the
        expression can be evaluated twice from the same text (the
@@ -11201,14 +11504,14 @@ static int decl_auto_type(CType *btype, AttributeDef *adbase, int l)
     end_macro();
     tok_str_free(cap);
     if (tok == ',')
-        tcc_error("'__auto_type' may only be used with a single declarator");
+        tcc_error("'%s' may only be used with a single declarator", auto_type_name);
     return v;
 }
 
 
 static int decl(int l)
 {
-    int v, has_init, r, oldint, has_btype;
+    int v, has_init, r, oldint, has_btype, this_c23_auto;
     CType type, btype;
     Sym *sym, *sa;
     AttributeDef ad, adbase;
@@ -11220,6 +11523,11 @@ static int decl(int l)
         in_decl_btype = 1;
         has_btype = parse_btype(&btype, &adbase, l == VT_LOCAL);
         in_decl_btype = 0;
+        /* F42: take (and clear) this declaration's C23 'auto' flag,
+           so a flag raised while parsing some other construct can
+           never leak into a later declaration */
+        this_c23_auto = c23_auto_seen;
+        c23_auto_seen = 0;
         if (!has_btype) {
             if (l == VT_JMP)
                 return 0;
@@ -11260,6 +11568,25 @@ static int decl(int l)
             continue;
         }
 
+        if (this_c23_auto) {
+            /* F42: C23 type inference -- the declaration specifiers
+               were a bare 'auto', so the declared type is the
+               initializer's type.  Same machinery as '__auto_type'
+               (F33), with the C23 spelling in the diagnostics.
+               gcc's restrictions apply (single declarator, plain
+               identifier, initializer required); on the one measured
+               split -- multiple declarators -- clang accepts and
+               gcc rejects, and we follow gcc, the stricter oracle
+               and the owner of the extension this machinery is. */
+            auto_type_name = "auto";
+            v = decl_auto_type(&btype, &adbase, l);
+            auto_type_name = "__auto_type";
+            if (l == VT_JMP)
+                return v;
+            skip(';');
+            continue;
+        }
+
         if (tok == ';') {
             if ((btype.t & VT_BTYPE) == VT_STRUCT
                 && (btype.ref->v & ~SYM_STRUCT) < SYM_FIRST_ANOM)
@@ -11279,6 +11606,9 @@ static int decl(int l)
 	    ad = adbase;
             type_decl(&type, &ad, &v, l == VT_CMP ? TYPE_DIRECT | TYPE_PARAM : TYPE_DIRECT);
             /*ptype("decl", &type, v);*/
+            /* F42: C23 attributes may follow a declarator */
+            if (at_c23_attribute())
+                skip_c23_attributes();
             if ((type.t & VT_BTYPE) == VT_FUNC) {
                 if ((type.t & VT_STATIC) && (l != VT_CONST))
                     tcc_error("function without file scope cannot be static");

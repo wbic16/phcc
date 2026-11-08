@@ -781,6 +781,10 @@ struct TCCState {
     unsigned char option_pthread; /* -pthread option */
     unsigned char enable_new_dtags; /* -Wl,--enable-new-dtags */
     unsigned int  cversion; /* supported C ISO version, 199901 (the default), 201112, ... */
+    unsigned char c23_mode; /* F42: -std=c23/c2x was selected.  Kept
+       separate from cversion so the dialect's breaking semantics can
+       land (F42/F43) before __STDC_VERSION__ advertises 202311,
+       which happens only when the L3 surface completes (F44). */
 
     /* C language options */
     unsigned char char_is_unsigned;
@@ -1198,6 +1202,24 @@ struct filespec {
    element type is recovered from the descriptor, never from BTYPE. */
 #define VT_COMPLEX_TAG (7 << VT_STRUCT_SHIFT)
 #define IS_COMPLEX(t) (((t) & (VT_STRUCT_MASK|VT_BTYPE)) == (VT_COMPLEX_TAG|VT_STRUCT))
+
+/* C23 mode (F42): selected by -std=c23/-std=gnu23/-std=c2x/-std=gnu2x,
+   recorded in the state's c23_mode flag.  The breaking C23 semantics
+   (type inference for bare 'auto', '()' meaning '(void)', rejection
+   of old-style parameter lists) live only in this mode.  The flag is
+   separate from cversion because __STDC_VERSION__ may advertise
+   202311 only once the full L3 surface exists (F44); until then
+   -std=c23 leaves the advertised version at 201710 and the default
+   mode keeps advertising 199901. */
+#define TCC_C23_MODE (tcc_state->c23_mode != 0)
+
+/* 'nullptr' / nullptr_t (F42): the null pointer literal has its own
+   type, as C23 requires -- a pointer-sized type distinct from every
+   pointer type (so typeof and _Generic see it), converting only to
+   pointer types and _Bool.  It rides VT_PTR with this field tag,
+   in the same tag space as VT_COMPLEX_TAG above; ref is NULL. */
+#define VT_NULLPTR_TAG (9 << VT_STRUCT_SHIFT)
+#define IS_NULLPTR_T(t) (((t) & (VT_STRUCT_MASK|VT_BTYPE)) == (VT_NULLPTR_TAG|VT_PTR))
 
 /* general: set/get the pseudo-bitfield value for bit-mask M */
 #define BFVAL(M,N) ((unsigned)((M) & ~((M) << 1)) * (N))
