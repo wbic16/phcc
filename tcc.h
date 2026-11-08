@@ -761,6 +761,7 @@ struct TCCState {
     unsigned char symbolic; /* if true, resolve symbols in the current module first */
     unsigned char znodelete; /* Set DF_1_NODELETE in dynamic section */
     unsigned char allow_multiple_definition; /* if true, --allow-multiple-definition: first strong definition wins */
+    unsigned char loading_object_file; /* true while tcc_load_object_file registers an input file's symbols (F25) */
     unsigned char execstack; /* -z execstack (1) / -z noexecstack (2), 0 = derive from inputs */
     unsigned char inp_execstack; /* an input object requires an executable stack */
     unsigned char inp_no_gnustack; /* an input object has no .note.GNU-stack section */

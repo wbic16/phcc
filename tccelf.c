@@ -1522,6 +1522,29 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
                    here are strong.  Commons are excluded on both
                    sides: their displacement and merging follow their
                    own rules (see the next branches), flag or no flag. */
+            } else if (s1->loading_object_file
+                       && shndx != SHN_COMMON && esym->st_shndx != SHN_COMMON
+                       && (IS_BSS(s1, shndx) || IS_BSS(s1, esym->st_shndx))
+                       && (sym_bind == STB_GLOBAL || sym_bind == STB_GNU_UNIQUE)
+                       && (esym_bind == STB_GLOBAL || esym_bind == STB_GNU_UNIQUE)) {
+                /* Two strong definitions, at least one of them in a
+                   real NOBITS (bss) section, presented by an input
+                   object file: a multiple definition, as GNU ld
+                   reports it (PQ-13).  The IS_BSS precedence rows
+                   below exist for COMMON semantics -- a common is
+                   displaced by a definition and loses silently to
+                   one -- but a definition living in a bss section is
+                   not a common, and IS_BSS() lumping the two together
+                   let these duplicates link silently.  The gate on
+                   loading_object_file is the scoping that keeps the
+                   other regime intact: per-translation-unit
+                   finalization presents the compiler's own tentative
+                   definitions (bss) against its initialized ones
+                   (data) through this same cascade, and C's
+                   tentative-definition rule must merge those
+                   (tests2/120_alias.c is the witness).  Weak pairs
+                   are resolved above and never reach here. */
+                tcc_error_noabort("link symbol '%s' defined twice", name);
             } else if (esym->st_shndx == SHN_COMMON && shndx != SHN_COMMON) {
                 /* a definition in a real section (data or bss)
                    displaces a common */
@@ -4443,6 +4466,13 @@ invalid:
     /* resolve symbols */
     old_to_new_syms = tcc_mallocz(nb_syms * sizeof(int));
 
+    /* F25: while this loop registers the input file's definitions,
+       set_elf_sym applies the object-file duplicate regime; compiler
+       presentations outside object loading keep the merge rows. */
+    {
+        unsigned char loading_saved = s1->loading_object_file;
+        s1->loading_object_file = 1;
+
     sym = symtab + 1;
     for(i = 1; i < nb_syms; i++, sym++) {
         if (sym->st_shndx != SHN_UNDEF &&
@@ -4474,6 +4504,8 @@ invalid:
                                 sym->st_info, sym->st_other,
                                 sym->st_shndx, name);
         old_to_new_syms[i] = sym_index;
+    }
+        s1->loading_object_file = loading_saved;
     }
 
     /* third pass to patch relocation entries */
