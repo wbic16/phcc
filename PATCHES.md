@@ -30,14 +30,15 @@ from this file alone.
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
 | `tcc.h` | +69 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20.F21: `TCCState` gains `execstack` (the `-z execstack`/`noexecstack` state) and the input-object records `inp_execstack`/`inp_no_gnustack`. See F21. |
-| `libtcc.c` | +63 / −2 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. F21: `tcc_set_linker` understands `-z execstack`/`-z noexecstack` in all three spellings (separate argument, joined, `=`). See F21. |
-| `tccelf.c` | +1016 / −16 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. F20: the compat-version binding policy — per-entry compat state recorded in `tcc_load_dll` from the defining library's `.gnu.versym` hidden bit, and the matching gate in `bind_exe_dynsyms`. See F20. F21: the object writer emits `.note.GNU-stack`, the object loader records each input's note state, and the link writer emits PT_GNU_STACK under GNU ld's rules. See F21. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
 | `tccgen.c` | +333 / −18 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. |
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
 | `tcctok.h` | +31 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). F17: nine more `DEF_ASMDIR` tokens (`value`, `hword`, `2byte`, `4byte`, `8byte`, `zero`, `float`, `single`, `double`) after `reloc`; `section` remains the last directive token. |
+| `libtcc.c` | +63 / −2 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. F21: `tcc_set_linker` understands `-z execstack`/`-z noexecstack` in all three spellings (separate argument, joined, `=`). See F21. |
+| `tccelf.c` | +1080 / −17 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. F20: the compat-version binding policy — per-entry compat state recorded in `tcc_load_dll` from the defining library's `.gnu.versym` hidden bit, and the matching gate in `bind_exe_dynsyms`. See F20. F21: the object writer emits `.note.GNU-stack`, the object loader records each input's note state, and the link writer emits PT_GNU_STACK under GNU ld's rules. See F21. F22: `R_X86_64_GOTTPOFF` relocations build their GOT entries (an `R_X86_64_TPOFF64` relocation via `put_got_entry`, or a marker for a defined local TLS symbol, rewritten by `fill_local_got_entries` to the symbol-less form), and the dynsym pass of `relocate_syms` writes TLS-block-relative values for TLS symbols. See F22. |
+| `x86_64-link.c` | +7 / −1 | F22 (first fork change to this file): `relocate()`'s `R_X86_64_GOTTPOFF` case writes the PC-relative address of the symbol's GOT slot (the GOTPCREL formula) instead of a site-independent function of the symbol's own address. See F22. |
 | `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -1826,6 +1827,118 @@ structure; the fork's intent is carried, never dropped silently).
     machine-description text changes are proposed — machine #3
     describes symbol resolution and archive extraction, not
     program-header emission.
+- **F22 — Initial-Exec TLS linking completed: `R_X86_64_GOTTPOFF`
+  slots are allocated and TPOFF64-filled (2026-11-07).** PQ-18: any
+  phcc-linked consumer of Initial-Exec TLS code segfaulted on first
+  TLS touch — measured in the wild as phcc-built `gawk -M` aborting
+  inside static libmpfr.a's `mpfr_set_d`. The recon
+  (~/workspace/phcc-pq18/REPORT.md) pinned the mechanism to the byte:
+  `gotplt_entry_type()` returns `BUILD_GOT_ONLY` for
+  `R_X86_64_GOTTPOFF` and `build_got_entries` met it with a bare
+  `continue`, so no GOT slot was ever allocated; `relocate()`'s
+  GOTTPOFF case then wrote `val - got->sh_addr` — a site-independent
+  value, identical at every site for a given symbol — into the
+  instruction's displacement field, so the "GOT load" read
+  instruction bytes a few hundred bytes before the code as the
+  %fs offset. The archive in the report was incidental (direct
+  objects crash identically); phcc's own code generation was
+  exonerated (it emits Local-Exec accesses, which work).
+
+  - *tccelf.c, `build_got_entries`:* an x86_64-gated branch ahead of
+    the `BUILD_GOT_ONLY` continue routes GOTTPOFF to
+    `put_got_entry(s1, R_X86_64_TPOFF64, sym_index)` — the dynamic
+    (or, without a dynsym, static) TPOFF64 relocation is what fills
+    the slot with the symbol's tp-relative offset. One exception: a
+    *defined local* TLS symbol in a dynamic link, where
+    `put_got_entry` would smuggle an R_RELATIVE marker (wrong value
+    for TLS); there the branch allocates the slot itself and leaves
+    a TPOFF64 marker (index relative to `symtab_section`) in the GOT
+    relocation list. The other architectures' `BUILD_GOT_ONLY`
+    relocations (GOTPC/GOTOFF on i386/arm/c67) keep the bare
+    continue — they name the GOT base, not a per-symbol slot.
+  - *tccelf.c, `fill_local_got_entries`:* a TPOFF64 entry indexing a
+    defined local TLS symbol in `symtab_section` is a marker from
+    the branch above (real TPOFF64 entries index `s1->dynsym`; the
+    marker is told apart by its slot offset, which belongs to the
+    marker's own symbol) and is rewritten to the symbol-less form
+    GNU ld emits: `R_X86_64_TPOFF64`, symbol 0, addend = the
+    symbol's offset within the TLS block (`st_value - tls_start`).
+    On the probe DSO the rewritten addends are 0x10/0x18 — exactly
+    GNU ld's for the same inputs.
+  - *x86_64-link.c, `relocate`:* the GOTTPOFF case writes the
+    PC-relative address of the symbol's GOT slot
+    (`got->sh_addr - addr + got_offset - 4`), the GOTPCREL formula,
+    replacing `val - got->sh_addr`.
+  - *tccelf.c, `relocate_syms` (dynsym pass only):* a defined TLS
+    symbol's dynamic-symbol value is its offset within the TLS
+    block (`+= sec->sh_addr - tls_start`), not its virtual address —
+    the gABI representation ld.so resolves TPOFF64 (and dlsym)
+    against. This third layer only became visible once slots
+    existed: with slots allocated, the defined-symbol cells still
+    crashed because the output dynsym carried `.tdata` vaddrs
+    (0x2db0 where GNU ld writes 0x0). The static symbol table keeps
+    virtual addresses, so every internal consumer of `st_value`
+    (the TPOFF32/64 cases included) is untouched. Note the recon's
+    sketch had the static fill arriving via a new `fill_got` case;
+    as implemented, static links fill the slot through the static
+    TPOFF64 relocation `put_got_entry` leaves against `.got`,
+    applied by `relocate_sections` through the pre-existing
+    TPOFF64 case in `relocate()` (`val - tls_end`) — same value,
+    no `fill_got` change.
+  - *Adjacent cells, as the recon flagged them:* undefined-TLS
+    imports are correct in both shapes that can carry them —
+    executable (TPOFF64 against the symbol; before F22 this cell
+    failed at link time with "unresolved reference", because
+    nothing created the dynsym entry `relocate_syms` excuses) and
+    DLL (same). DLL output is correct in all three sub-cells:
+    defined global (TPOFF64 via `put_got_entry`), defined local
+    (the marker path above), undefined (TPOFF64). A weak undefined
+    TLS symbol accessed via GOTTPOFF links and runs, matching GNU
+    ld's outcome on the probe. A fully static (`-static`) link of
+    gcc-built objects still fails loudly at link time on
+    pre-existing, unrelated unresolved references (`__ehdr_start`,
+    unwind and TF routines from glibc's libc.a — identical on the
+    unpatched base, and phcc-compiled objects never emit GOTTPOFF);
+    the static GOTTPOFF fill itself is the `relocate()` path
+    described above. Observed and left alone: the GD model
+    (`R_X86_64_TLSGD`) against gcc-13 objects is broken on the
+    unpatched base (segfault in an executable, wrong values in a
+    DSO — its byte-pattern rewrite does not match the modern
+    sequence); on the executable cell F22 turns the stock segfault
+    into wrong values, no more (the GD offset slot now receives the
+    block-relative value its TPOFF64 sibling needed). That is a
+    separate pre-existing defect, not PQ-18.
+  - *Evidence:* a six-cell probe matrix (executable × {defined,
+    undefined, archive-delivered} and DLL × {defined global,
+    defined local, undefined}), every cell run with values checked
+    — all pass; before F22 the defined cells segfaulted and the
+    undefined-executable cell failed to link. The gate reproducer
+    (static libmpfr.a consumer) runs to completion on all three
+    routes (phcc-compiled main with `-lmpfr` resolving to the
+    archive; explicit archive path; gcc-compiled main object),
+    printing sqrt(2) = 1.414213562373095, exit 0. **gawk 5.4.1 +
+    MPFR, built by the patched compiler: `gawk -M` works and the
+    full `make check` completes — ALL TESTS PASSED, zero FAILED
+    lines, the five MPFR tests (mpfrrem, mpfrrnd, mpfrrndeval,
+    mpfrsort, mpfrsqrt) among them.** Upstream `make test` ALL
+    TESTS PASSED. Conformance spot re-run unchanged: 328/333,
+    diverge set exactly the five documented class-(b) items
+    (`a_pp_018`, `b_gnu_009`, `b_gnu_015`, `b_gnu_016`,
+    `b_gnu_020`), 0 oracle splits. Link regression battery: zlib
+    1.4 shared build + `*** zlib test OK ***`; OpenSSL 4.1.0
+    asm+shared (benchmark recipe, `no-tests`) builds completely —
+    2,183 objects, 0 errors — `apps/openssl` runs and its SHA-256
+    of "abc" is exact (OpenSSL's outputs carry no TLS dynsyms and
+    no PT_TLS, so the `relocate_syms` change has no footprint
+    there). Note for the phext: this entry changes the Source
+    scrolls of `tccelf.c` and `x86_64-link.c` (and their Volume 3
+    segmentations and Design views) and the gate verdict, which go
+    STALE at the next refresh. Machine #3's description was checked:
+    its states, events and notes cover resolution order, archive
+    extraction, version-script demotion and commons — it makes no
+    TLS or GOT-entry claim, so no machine text changes; machines
+    #1/#2/#4, the libtcc1 receipts, the listings and the
+    Library-10000 region are untouched.
 
 ## Maintenance rule
 

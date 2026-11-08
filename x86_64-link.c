@@ -306,7 +306,13 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
             add64le(ptr, s1->got->sh_addr - addr + rel->r_addend);
             break;
         case R_X86_64_GOTTPOFF:
-            add32le(ptr, val - s1->got->sh_addr);
+            /* Initial-Exec TLS: the field holds the PC-relative address
+               of the symbol's GOT slot, exactly like GOTPCREL.  The slot
+               itself is filled (statically or by ld.so) with the
+               symbol's tp-relative offset via an R_X86_64_TPOFF64
+               relocation created in build_got_entries.  */
+            add32le(ptr, s1->got->sh_addr - addr +
+                         get_sym_attr(s1, sym_index, 0)->got_offset - 4);
             break;
         case R_X86_64_GOT32:
             /* we load the got offset */

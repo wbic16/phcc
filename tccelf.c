@@ -1906,7 +1906,20 @@ ST_FUNC void relocate_syms(TCCState *s1, Section *symtab, int do_resolve)
 
         } else if (sh_num < SHN_LORESERVE) {
             /* add section base */
-            sym->st_value += s1->sections[sym->st_shndx]->sh_addr;
+            if (do_resolve == 2
+                && ELFW(ST_TYPE)(sym->st_info) == STT_TLS
+                && (s1->sections[sh_num]->sh_flags & SHF_TLS)) {
+                /* A TLS symbol in the dynamic symbol table is
+                   block-relative: its value is its offset within the
+                   TLS segment, not its virtual address.  ld.so relies
+                   on this when resolving TPOFF64 relocations (and
+                   dlsym) for the symbol.  The static symbol table
+                   keeps virtual addresses; only the dynsym pass
+                   (do_resolve == 2) converts.  */
+                sym->st_value += s1->sections[sh_num]->sh_addr
+                    - s1->tls_start;
+            } else
+                sym->st_value += s1->sections[sym->st_shndx]->sh_addr;
         }
     found: ;
     }
@@ -2311,6 +2324,34 @@ redo:
             if (!s1->got)
                 got_sym = build_got(s1);
 
+#ifdef TCC_TARGET_X86_64
+            if (type == R_X86_64_GOTTPOFF) {
+                /* Initial-Exec TLS: the GOT slot must end up holding the
+                   symbol's tp-relative offset, delivered by an
+                   R_X86_64_TPOFF64 relocation -- never by the GLOB_DAT
+                   entry the generic data pass would create for it.
+                   put_got_entry provides exactly that, except for a
+                   defined local symbol, where it would smuggle an
+                   R_RELATIVE marker instead: allocate that slot here
+                   and leave a TPOFF64 marker (symbol index relative to
+                   symtab_section) in the GOT relocation list, which
+                   fill_local_got_entries rewrites to the symbol-less
+                   form GNU ld emits.  */
+                if (s1->dynsym
+                    && sym->st_shndx != SHN_UNDEF
+                    && ELFW(ST_BIND)(sym->st_info) == STB_LOCAL) {
+                    attr = get_sym_attr(s1, sym_index, 1);
+                    if (!attr->got_offset) {
+                        attr->got_offset = s1->got->data_offset;
+                        section_ptr_add(s1->got, PTR_SIZE);
+                        put_elf_reloc(s1->dynsym, s1->got, attr->got_offset,
+                                      R_X86_64_TPOFF64, sym_index);
+                    }
+                } else
+                    put_got_entry(s1, R_X86_64_TPOFF64, sym_index);
+                continue;
+            }
+#endif
             if (gotplt_entry == BUILD_GOT_ONLY)
                 continue;
 
@@ -2819,6 +2860,28 @@ static void fill_local_got_entries(TCCState *s1)
     if (!s1->got->reloc)
         return;
     for_each_elem(s1->got->reloc, 0, rel, ElfW_Rel) {
+#ifdef TCC_TARGET_X86_64
+	if (ELFW(R_TYPE)(rel->r_info) == R_X86_64_TPOFF64) {
+	    int sym_index = ELFW(R_SYM) (rel->r_info);
+	    ElfW(Sym) *sym = &((ElfW(Sym) *) symtab_section->data)[sym_index];
+	    struct sym_attr *attr = get_sym_attr(s1, sym_index, 0);
+	    unsigned offset = attr->got_offset;
+	    /* A TPOFF64 entry indexing a defined local TLS symbol in
+	       symtab_section is a marker left by build_got_entries (real
+	       TPOFF64 entries index s1->dynsym; the marker is told apart
+	       by its slot offset, which belongs to the marker's own
+	       symbol).  Rewrite it to the symbol-less form GNU ld emits,
+	       with the symbol's offset within the TLS block as addend.  */
+	    if (ELFW(ST_BIND)(sym->st_info) == STB_LOCAL
+		&& ELFW(ST_TYPE)(sym->st_info) == STT_TLS
+		&& sym->st_shndx != SHN_UNDEF
+		&& offset == rel->r_offset - s1->got->sh_addr) {
+		rel->r_info = ELFW(R_INFO)(0, R_X86_64_TPOFF64);
+		rel->r_addend = sym->st_value - s1->tls_start;
+	    }
+	    continue;
+	}
+#endif
 	if (ELFW(R_TYPE)(rel->r_info) == R_RELATIVE) {
 	    int sym_index = ELFW(R_SYM) (rel->r_info);
 	    ElfW(Sym) *sym = &((ElfW(Sym) *) symtab_section->data)[sym_index];
