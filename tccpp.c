@@ -1490,6 +1490,274 @@ static int parse_include(TCCState *s1, int do_next, int test)
 }
 
 /* eval an expression for #if/#elif */
+/* F43: capture the raw text between the '{' at the current input
+   position and its matching '}' (for a #embed prefix/suffix/
+   if_empty parameter).  Strings, character constants and comments
+   do not count braces.  The text is captured verbatim: it becomes
+   part of the expansion buffer and is lexed there, in the
+   including context, so macros inside it expand normally.  The
+   closing '}' is consumed. */
+static void embed_capture_span(CString *out, const char *pn)
+{
+    uint8_t *p = file->buf_ptr;
+    int depth = 1, c;
+    p++; /* the '{' */
+    for (;;) {
+        c = *p;
+        if (c == '\n' || c == CH_EOF || c == '\0')
+            tcc_error("#embed: unterminated '%s' parameter", pn);
+        if (c == '"' || c == '\'') {
+            int q = c;
+            cstr_ccat(out, c);
+            p++;
+            for (;;) {
+                c = *p;
+                if (c == '\n' || c == CH_EOF || c == '\0')
+                    tcc_error("#embed: unterminated '%s' parameter", pn);
+                cstr_ccat(out, c);
+                p++;
+                if (c == '\\') {
+                    if (*p == '\n')
+                        p++; /* spliced newline inside the literal */
+                    c = *p;
+                    if (c == '\n' || c == CH_EOF || c == '\0')
+                        tcc_error("#embed: unterminated '%s' parameter", pn);
+                    cstr_ccat(out, c);
+                    p++;
+                } else if (c == q)
+                    break;
+            }
+            continue;
+        }
+        if (c == '/' && p[1] == '/') {
+            /* a line comment swallows the rest of the line,
+               including any closing brace: unterminated */
+            tcc_error("#embed: unterminated '%s' parameter", pn);
+        }
+        if (c == '/' && p[1] == '*') {
+            cstr_cat(out, "/*", -1);
+            p += 2;
+            for (;;) {
+                c = *p;
+                if (c == '\n' || c == CH_EOF || c == '\0')
+                    tcc_error("#embed: unterminated '%s' parameter", pn);
+                if (c == '*' && p[1] == '/') {
+                    cstr_cat(out, "*/", -1);
+                    p += 2;
+                    break;
+                }
+                cstr_ccat(out, c);
+                p++;
+            }
+            continue;
+        }
+        if (c == '{')
+            depth++;
+        else if (c == '}') {
+            if (--depth == 0) {
+                p++; /* the closing '}' */
+                break;
+            }
+        }
+        cstr_ccat(out, c);
+        p++;
+    }
+    file->buf_ptr = p;
+}
+
+/* F43: C23 #embed -- expand a binary resource, in the directive's
+   place, into a comma-separated list of its byte values.  The
+   standard parameters are supported: limit(N) (N a preprocessor
+   constant expression), prefix { tokens }, suffix { tokens } and
+   if_empty { tokens }; an unrecognized parameter is a named
+   error, never silently dropped.  if_empty supplies the whole
+   expansion when no bytes are embedded -- an empty resource, or
+   a limit of 0.  The resource is located exactly as #include
+   locates a header: absolute path, then (for the '"' form) the
+   directory of the current file, then the include and system
+   include paths.  The expansion is delivered as a memory file
+   pushed on the include stack (the #include mechanism), so its
+   tokens are read in order, ahead of the tokens that follow the
+   directive. */
+static void parse_embed(TCCState *s1)
+{
+    int c, i, k, qform;
+    char name[1024], buf[1024], *p;
+    const char *pn;
+    CString pfx, sfx, iem, out;
+    int have_pfx = 0, have_sfx = 0, have_iem = 0;
+    long limit = -1;
+    unsigned char *data = NULL;
+    long ndata = 0, capdata = 0;
+    FILE *fp = NULL;
+
+    cstr_new(&pfx);
+    cstr_new(&sfx);
+    cstr_new(&iem);
+    cstr_new(&out);
+
+    c = skip_spaces();
+    if (c != '<' && c != '\"')
+        tcc_error("#embed expects \"FILENAME\" or <FILENAME>");
+    qform = c;
+    cstr_reset(&tokcstr);
+    file->buf_ptr = parse_pp_string(file->buf_ptr, c == '<' ? '>' : c, &tokcstr);
+    pstrncpy(name, sizeof name, tokcstr.data, tokcstr.size);
+
+    /* parameters: tokens up to the end of the directive line;
+       'limit' is read as tokens, the brace parameters as raw text */
+    next_nomacro();
+    while (tok != TOK_LINEFEED && tok != TOK_EOF) {
+        CString *slot;
+        if (tok < TOK_IDENT)
+            tcc_error("#embed: expected a parameter name");
+        pn = get_tok_str(tok, NULL);
+        if (!strcmp(pn, "limit")) {
+            TokenString *ls = tok_str_alloc();
+            int depth = 0, saved_tok;
+            int64_t v;
+            if (limit >= 0)
+                tcc_error("#embed: duplicate parameter 'limit'");
+            next();
+            if (tok != '(')
+                tcc_error("#embed: 'limit' expects '(...)'");
+            for (;;) {
+                next();
+                if (tok == '(')
+                    depth++;
+                else if (tok == ')') {
+                    if (depth == 0)
+                        break;
+                    depth--;
+                }
+                if (tok == TOK_LINEFEED || tok == TOK_EOF)
+                    tcc_error("#embed: unterminated 'limit' parameter");
+                tok_str_add_tok(ls);
+            }
+            tok_str_add(ls, TOK_EOF);
+            saved_tok = tok; /* the ')' in the live stream */
+            begin_macro(ls, 1);
+            next();
+            v = expr_const();
+            if (tok != TOK_EOF)
+                tcc_error("#embed: 'limit' is not a constant expression");
+            end_macro();
+            tok = saved_tok;
+            if (v < 0)
+                tcc_error("#embed: 'limit' must be non-negative");
+            if (v > (1 << 28))
+                tcc_error("#embed: 'limit' is unreasonably large");
+            limit = (long)v;
+            next(); /* past ')' */
+            continue;
+        }
+        if (!strcmp(pn, "prefix"))
+            slot = &pfx, pn = "prefix";
+        else if (!strcmp(pn, "suffix"))
+            slot = &sfx, pn = "suffix";
+        else if (!strcmp(pn, "if_empty"))
+            slot = &iem, pn = "if_empty";
+        else
+            tcc_error("#embed: unrecognized parameter '%s'", pn);
+        if ((slot == &pfx && have_pfx) || (slot == &sfx && have_sfx)
+            || (slot == &iem && have_iem))
+            tcc_error("#embed: duplicate parameter '%s'", pn);
+        if (slot == &pfx) have_pfx = 1;
+        if (slot == &sfx) have_sfx = 1;
+        if (slot == &iem) have_iem = 1;
+        c = skip_spaces();
+        if (c != '{')
+            tcc_error("#embed: '%s' expects '{ ... }'", pn);
+        embed_capture_span(slot, pn);
+        next_nomacro(); /* token after the '}' */
+    }
+
+    /* resolve the resource, mirroring parse_include's search */
+    i = -1;
+    for (;;) {
+        ++i;
+        if (i == 0) {
+            if (!IS_ABSPATH(name))
+                continue;
+            buf[0] = '\0';
+        } else if (i == 1) {
+            if (qform != '\"')
+                continue;
+            p = file->true_filename;
+            pstrncpy(buf, sizeof buf, p, tcc_basename(p) - p);
+        } else {
+            int j = i - 2, kk = j - s1->nb_include_paths;
+            if (kk < 0)
+                p = s1->include_paths[j];
+            else if (kk < s1->nb_sysinclude_paths)
+                p = s1->sysinclude_paths[kk];
+            else
+                tcc_error("#embed: resource '%s' not found", name);
+            pstrcpy(buf, sizeof buf, p);
+            pstrcat(buf, sizeof buf, "/");
+        }
+        pstrcat(buf, sizeof buf, name);
+        fp = fopen(buf, "rb");
+        if (fp)
+            break;
+    }
+
+    /* read the bytes to embed: the whole resource, or 'limit' bytes */
+    while (limit < 0 || ndata < limit) {
+        long want = 8192;
+        size_t got;
+        if (limit >= 0 && want > limit - ndata)
+            want = limit - ndata;
+        if (ndata + want > capdata) {
+            capdata = capdata ? capdata * 2 : 8192;
+            data = tcc_realloc(data, capdata);
+        }
+        got = fread(data + ndata, 1, want, fp);
+        ndata += got;
+        if (got < (size_t)want)
+            break; /* EOF (or error): nothing more to read */
+    }
+    fclose(fp);
+
+    /* compose the expansion text */
+    if (ndata == 0) {
+        if (have_iem)
+            cstr_cat(&out, iem.data, iem.size);
+    } else {
+        if (have_pfx)
+            cstr_cat(&out, pfx.data, pfx.size);
+        for (k = 0; k < ndata; k++) {
+            if (k)
+                cstr_ccat(&out, ',');
+            cstr_printf(&out, "%d", data[k]);
+        }
+        if (have_sfx) {
+            if (pfx.size || ndata)
+                cstr_ccat(&out, ' ');
+            cstr_cat(&out, sfx.data, sfx.size);
+        }
+    }
+    cstr_ccat(&out, '\n');
+    tcc_free(data);
+    cstr_free(&pfx);
+    cstr_free(&sfx);
+    cstr_free(&iem);
+
+    /* deliver it as a memory file on the include stack */
+    if (s1->gen_deps && (i == 1 || i - 2 < s1->nb_include_paths
+                         || s1->include_sys_deps))
+        dynarray_add(&s1->target_deps, &s1->nb_target_deps,
+                     tcc_strdup(buf));
+    if (s1->include_stack_ptr >= s1->include_stack + INCLUDE_STACK_SIZE)
+        tcc_error("#embed recursion too deep");
+    tcc_open_bf(s1, ":embed:", out.size);
+    memcpy(file->buffer, out.data, out.size);
+    *s1->include_stack_ptr++ = file->prev;
+    file->include_next_index = i;
+    tcc_debug_bincl(s1);
+    cstr_free(&out);
+}
+
 static int expr_preprocess(TCCState *s1)
 {
     int c, t;
@@ -1885,6 +2153,11 @@ ST_FUNC void preprocess(int is_bof)
     case TOK_INCLUDE:
     case TOK_INCLUDE_NEXT:
         parse_include(s1, tok - TOK_INCLUDE, 0);
+        goto the_end;
+    case TOK_EMBED:
+        /* F43: the expansion is already pushed as a macro stream;
+           like #include, there is no rest-of-line to skip */
+        parse_embed(s1);
         goto the_end;
     case TOK_IFNDEF:
         c = 1;

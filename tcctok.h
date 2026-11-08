@@ -86,6 +86,7 @@
      DEF(TOK_DEFINE, "define")
      DEF(TOK_INCLUDE, "include")
      DEF(TOK_INCLUDE_NEXT, "include_next")
+     DEF(TOK_EMBED, "embed")
      DEF(TOK_IFDEF, "ifdef")
      DEF(TOK_IFNDEF, "ifndef")
      DEF(TOK_ELIF, "elif")

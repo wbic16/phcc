@@ -66,6 +66,35 @@ static int c23_auto_seen;
 /* the spelling decl_auto_type() names in its diagnostics:
    "__auto_type" for the F33 extension, "auto" for C23 inference */
 static const char *auto_type_name = "__auto_type";
+/* F43: set by parse_btype() when the declaration specifiers contain
+   'constexpr'; consumed by decl() the same way as c23_auto_seen */
+static int constexpr_seen;
+/* F43: recorded constant values of scalar constexpr objects, keyed
+   by the object's Sym.  The Sym's own constexpr_obj attribute bit
+   is the guard: unary() consults this table only for a sym whose
+   bit is set, and a sym gets the bit only together with a record
+   here, so a recycled Sym address can never produce a stale
+   substitution.  Lookup takes the latest record (a same-scope
+   redefinition is an error anyway). */
+static Sym **cxpr_syms;
+static CValue *cxpr_vals;
+static int nb_cxpr;
+static const CValue *cxpr_value(Sym *s)
+{
+    int i;
+    for (i = nb_cxpr - 1; i >= 0; i--)
+        if (cxpr_syms[i] == s)
+            return &cxpr_vals[i];
+    return NULL;
+}
+static void cxpr_record(Sym *s, const CValue *v)
+{
+    cxpr_syms = tcc_realloc(cxpr_syms, (nb_cxpr + 1) * sizeof *cxpr_syms);
+    cxpr_vals = tcc_realloc(cxpr_vals, (nb_cxpr + 1) * sizeof *cxpr_vals);
+    cxpr_syms[nb_cxpr] = s;
+    cxpr_vals[nb_cxpr] = *v;
+    nb_cxpr++;
+}
 static int f128_typedef_name; /* F35: _Float128/__float128 token accepted
    as a typedef declarator name (glibc aarch64 floatn.h fallback) */
 static int in_decl_btype;
@@ -6701,7 +6730,16 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             next();
             break;
         case TOK_CONSTEXPR:
-            tcc_error("'constexpr' is not supported yet (F43)");
+            /* F43: C23 constexpr specifier.  Only its presence is
+               recorded here; decl() enforces the object rules
+               (initialized, constant, statically stored).  Like
+               nullptr it is always available, not mode-gated. */
+            if (!in_decl_btype)
+                tcc_error("'constexpr' is only valid in a declaration");
+            if (constexpr_seen)
+                tcc_error("duplicate 'constexpr' in declaration specifiers");
+            constexpr_seen = 1;
+            next();
             break;
         case TOK_BITINT:
             tcc_error("'_BitInt' is not supported yet (F44)");
@@ -8315,6 +8353,23 @@ special_math_val:
 #endif
         } else if (r == VT_CONST && IS_ENUM_VAL(s->type.t)) {
             vtop->c.i = s->enum_val;
+        }
+
+        /* F43: in a constant context (array bound, case label,
+           enum value, _Static_assert, another constexpr
+           initializer), a scalar constexpr object reads as its
+           recorded constant value.  Outside constant contexts the
+           object itself is read, from its static storage. */
+        if (s->a.constexpr_obj && CONST_WANTED) {
+            const CValue *cv = cxpr_value(s);
+            if (cv) {
+                /* replace the lvalue just pushed with the constant
+                   (vsetc would push a second value and leak) */
+                vtop->type = s->type;
+                vtop->r = VT_CONST;
+                vtop->r2 = VT_CONST;
+                vtop->c = *cv;
+            }
         }
         break;
     }
@@ -11509,9 +11564,100 @@ static int decl_auto_type(CType *btype, AttributeDef *adbase, int l)
 }
 
 
+/* F43: the definition of one constexpr declarator.  On entry tok
+   is the '=' of the initializer; the initializer tokens are
+   captured and used twice (the decl_auto_type idiom): pass 1
+   evaluates the constant value -- for a scalar type it is cast to
+   the declared type and recorded for constant contexts -- and
+   pass 2 runs the ordinary static-initializer path, which gives
+   the object its storage.  The stream is left at the ',' or ';'
+   terminator, exactly where the ordinary path leaves it. */
+static void decl_constexpr_init(CType *type, AttributeDef *ad, int r, int v, int l)
+{
+    TokenString *cap = tok_str_alloc(), *w;
+    int i, level, t, saved_nocode, is_scalar;
+    Sym *sym;
+    CValue val;
+
+    next(); /* the '=' */
+    level = 0;
+    for (;;) {
+        t = tok;
+        if (t == TOK_EOF)
+            tcc_error("unexpected end of file");
+        tok_str_add_tok(cap);
+        if (level == 0 && (t == ',' || t == ';'))
+            break;
+        next();
+        if (t == '{' || t == '(' || t == '[')
+            level++;
+        else if (t == '}' || t == ')' || t == ']')
+            level--;
+    }
+    tok_str_add(cap, TOK_EOF);
+
+    is_scalar = is_integer_btype(type->t & VT_BTYPE)
+        || is_float(type->t & VT_BTYPE) || IS_ENUM(type->t);
+
+    /* pass 1: evaluate as a constant expression */
+    saved_nocode = nocode_wanted;
+    nocode_wanted++;
+    nocode_wanted += CONST_WANTED_BIT;
+    w = tok_str_alloc();
+    for (i = 0; i < cap->len; i++)
+        tok_str_add(w, cap->str[i]);
+    begin_macro(w, 1);
+    next();
+    if (tok == '{') { /* a braced scalar initializer: { expr } */
+        next();
+        expr_eq();
+        skip('}');
+    } else
+        expr_eq();
+    if (is_scalar) {
+        gen_cast(type);
+        if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST)
+            tcc_error("constexpr initializer for '%s' is not a constant expression",
+                      get_tok_str(v, NULL));
+        val = vtop->c;
+    } else {
+        /* a pointer constexpr: an address constant is accepted but
+           not recorded -- no constant-context substitution is
+           claimed for pointer values */
+        if (!(vtop->r & VT_SYM)
+            && (vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST)
+            tcc_error("constexpr initializer for '%s' is not a constant expression",
+                      get_tok_str(v, NULL));
+    }
+    vpop();
+    if (macro_ptr && *macro_ptr == 0)
+        end_macro();
+    end_macro();
+    nocode_wanted = saved_nocode;
+
+    /* pass 2: the ordinary definition path, from a fresh copy */
+    w = tok_str_alloc();
+    for (i = 0; i < cap->len; i++)
+        tok_str_add(w, cap->str[i]);
+    begin_macro(w, 1);
+    next();
+    decl_initializer_alloc(type, ad, r, 1, v, l);
+    if (macro_ptr && *macro_ptr == 0)
+        end_macro();
+    end_macro();
+    tok_str_free(cap);
+
+    sym = sym_find(v);
+    if (sym) {
+        sym->a.constexpr_obj = 1;
+        if (is_scalar)
+            cxpr_record(sym, &val);
+    }
+}
+
 static int decl(int l)
 {
-    int v, has_init, r, oldint, has_btype, this_c23_auto;
+    int v, has_init, r, oldint, has_btype, this_c23_auto, this_constexpr;
     CType type, btype;
     Sym *sym, *sa;
     AttributeDef ad, adbase;
@@ -11528,6 +11674,11 @@ static int decl(int l)
            never leak into a later declaration */
         this_c23_auto = c23_auto_seen;
         c23_auto_seen = 0;
+        /* F43: same discipline for the constexpr flag */
+        this_constexpr = constexpr_seen;
+        constexpr_seen = 0;
+        if (this_constexpr && l == VT_CMP)
+            tcc_error("'constexpr' may only be used for a variable");
         if (!has_btype) {
             if (l == VT_JMP)
                 return 0;
@@ -11609,6 +11760,13 @@ static int decl(int l)
             /* F42: C23 attributes may follow a declarator */
             if (at_c23_attribute())
                 skip_c23_attributes();
+            /* F43: constexpr qualifies objects only */
+            if (this_constexpr) {
+                if (type.t & VT_TYPEDEF)
+                    tcc_error("'constexpr' used with typedef");
+                if ((type.t & VT_BTYPE) == VT_FUNC)
+                    tcc_error("'constexpr' may only be used for an object");
+            }
             if ((type.t & VT_BTYPE) == VT_FUNC) {
                 if ((type.t & VT_STATIC) && (l != VT_CONST))
                     tcc_error("function without file scope cannot be static");
@@ -11749,6 +11907,25 @@ static int decl(int l)
                     if (tok == '=')
                         has_init = 1;
 
+                    /* F43: a constexpr definition (an extern
+                       constexpr is a plain declaration and only
+                       gains the const qualification): the object is
+                       initialized, constant, and statically stored,
+                       of a scalar or pointer type */
+                    if (this_constexpr && (!(type.t & VT_EXTERN) || has_init)) {
+                        if ((type.t & VT_BTYPE) == VT_STRUCT)
+                            tcc_error("'constexpr' with a struct or union type is not supported (F43)");
+                        if (type.t & VT_ARRAY)
+                            tcc_error("'constexpr' with an array type is not supported (F43)");
+                        if (!has_init)
+                            tcc_error("constexpr object '%s' must be initialized",
+                                      get_tok_str(v, NULL));
+                        type.t |= VT_CONSTANT;
+                        if (l != VT_CONST)
+                            type.t |= VT_STATIC;
+                    } else if (this_constexpr)
+                        type.t |= VT_CONSTANT;
+
                     if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
 		        || (type.t & VT_BTYPE) == VT_FUNC
                         /* as with GCC, uninitialized global arrays with no size
@@ -11765,12 +11942,16 @@ static int decl(int l)
                         else
                             r |= VT_LOCAL;
                         type.t &= ~VT_EXTERN;
-                        if (has_init)
-                            next();
-                        else if (l == VT_CONST)
-                            /* uninitialized global variables may be overridden */
-                            type.t |= VT_EXTERN;
-                        decl_initializer_alloc(&type, &ad, r, has_init, v, l);
+                        if (this_constexpr)
+                            decl_constexpr_init(&type, &ad, r, v, l);
+                        else {
+                            if (has_init)
+                                next();
+                            else if (l == VT_CONST)
+                                /* uninitialized global variables may be overridden */
+                                type.t |= VT_EXTERN;
+                            decl_initializer_alloc(&type, &ad, r, has_init, v, l);
+                        }
                     }
 
                     if (ad.alias_target && l == VT_CONST) {

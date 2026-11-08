@@ -512,7 +512,9 @@ struct SymAttr {
     dllimport   : 1,
     addrtaken   : 1,
     nodebug     : 1,
-    xxxx        : 2; /* not used */
+    constexpr_obj : 1, /* F43: a C23 constexpr object; unary() reads
+                          its recorded constant in constant contexts */
+    xxxx        : 1; /* not used */
 };
 
 /* function attributes or temporary attributes for parsing */
