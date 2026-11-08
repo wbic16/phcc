@@ -274,6 +274,10 @@ static int arm64_type_size(int t)
     case VT_DOUBLE: return 3;
     case VT_LDOUBLE: return 4;
     case VT_BOOL: return 0;
+    case VT_F128:
+        /* F36: declarations/layout only on this target (F29); value
+           codegen is x86_64-only (F34).  Fail by name, not assert. */
+        tcc_error("_Float128 values are not supported on the AArch64 target (F29/F34)");
     }
     assert(0);
     return 0;

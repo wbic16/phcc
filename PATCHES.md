@@ -3138,6 +3138,20 @@ links and runs under qemu-aarch64.  Riscv64's glibc has the same
 pattern; no sysroot was available to verify, so the gate stays
 arm64-only.
 
+## F36 — arm64: `_Float128` value use fails by name, not by assert
+
+On the arm64 target, any `_Float128` VALUE use (assignment, argument,
+arithmetic, struct member, cast, initializer) reached
+`arm64_type_size`'s catch-all `assert(0)` and killed the compiler
+with SIGABRT instead of the named F29 error the x86_64 target
+produces.  Verified pre-existing on the D5 tip (independent of F35).
+Fix (arm64-gen.c): `case VT_F128: tcc_error("_Float128 values are
+not supported on the AArch64 target (F29/F34)");` ahead of the
+assert — arm64_type_size is reached only from codegen value paths
+(load/store/struct copy), never from declarations, so F29's
+declaration surface is unaffected.  Seven value-use shapes verified
+to fail with the named error; declarations still parse (F35 battery).
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in
