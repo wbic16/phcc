@@ -29,11 +29,11 @@ from this file alone.
 | `slurp`-era versioning: `VERSION` | 1 line changed | Upstream `VERSION` (0.9.28rc) set to `1.0.0` — the fork's version identity from commit "Forking to v1.0". See rebase resolution R3. |
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
-| `tcc.h` | +69 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20.F21: `TCCState` gains `execstack` (the `-z execstack`/`noexecstack` state) and the input-object records `inp_execstack`/`inp_no_gnustack`. See F21. F25: `TCCState` gains `loading_object_file`. See F25. F27: `TCCState` gains `rela_iplt` and the `iplt`/`nb_iplt` entry array (plus `struct iplt_ent`). See F27. F28: `TCCState` gains the `ver_reqs`, `def_vers` and `symver_recs` arrays and the `dynsym_version_hidden` flags. See F28. |
+| `tcc.h` | +69 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20.F21: `TCCState` gains `execstack` (the `-z execstack`/`noexecstack` state) and the input-object records `inp_execstack`/`inp_no_gnustack`. See F21. F25: `TCCState` gains `loading_object_file`. See F25. F27: `TCCState` gains `rela_iplt` and the `iplt`/`nb_iplt` entry array (plus `struct iplt_ent`). See F27. F28: `TCCState` gains the `ver_reqs`, `def_vers` and `symver_recs` arrays and the `dynsym_version_hidden` flags. See F28. F29: `VT_F128` (basic type 15) for `_Float128`/`__float128`. See F29. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
-| `tccgen.c` | +444 / −23 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. F23: dead loops inside constant-dead branches stay suppressed -- the loop handlers no longer resurrect them at the loop head (`scan_save_span()`). See F23. F24: the label scan discounts ternary colons (pending-'?' count in `scan_save_span()`). See F24. |
+| `tccgen.c` | +444 / −23 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. F23: dead loops inside constant-dead branches stay suppressed -- the loop handlers no longer resurrect them at the loop head (`scan_save_span()`). See F23. F24: the label scan discounts ternary colons (pending-'?' count in `scan_save_span()`). See F24.F29: `_Float128` parses as basic type `VT_F128`; `type_size` gives it 16/16; value materialization, initializers and arguments fail by name until the TF128 codegen lands. See F29. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
-| `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. F28: the `.symver` directive is parsed in full and recorded for the linker's version passes (it was a token-skipping stub). See F28. |
+| `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. F28: the `.symver` directive is parsed in full and recorded for the linker's version passes (it was a token-skipping stub). See F28. F29: `_Float128` and `__float128` keywords. See F29. |
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
 | `tcctok.h` | +31 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). F17: nine more `DEF_ASMDIR` tokens (`value`, `hword`, `2byte`, `4byte`, `8byte`, `zero`, `float`, `single`, `double`) after `reloc`; `section` remains the last directive token. |
 | `libtcc.c` | +63 / −2 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. F21: `tcc_set_linker` understands `-z execstack`/`-z noexecstack` in all three spellings (separate argument, joined, `=`). See F21. |
@@ -2484,6 +2484,90 @@ structure; the fork's intent is carried, never dropped silently).
     `tccasm.c` Source scrolls and Design views are STALE;
     machine #3's description needs the version pin pass
     recorded. Cleared by the Wave D2 phext refresh (below).
+
+- **F29 — tccgen.c, tcc.h, tcctok.h: `_Float128` — the
+  declaration half lands; value codegen is designed, not built
+  (2026-11-07).**
+  - *Files:* `tccgen.c` (+28/−0), `tcc.h` (+3/−0),
+    `tcctok.h` (+2/−0).
+  - *Outcome, stated plainly:* PARTIAL, by the wave plan's own
+    rule. The TF128 runtime was never the problem — D1's census
+    found it in libgcc and F26/F27 made static links reach it.
+    The compiler half is not contained: `_Float128` needs a new
+    basic type whose values live in a register class the vstack
+    does not model (a 16-byte SSE/memory value, not the x87
+    stack slot `VT_LDOUBLE` rides), an ABI class of its own in
+    every backend's call machinery, binary128 constant parsing,
+    and a full conversion matrix. What lands here is the safe
+    front end: the type exists, declares, and lays out exactly
+    as gcc's does — and every use as a value fails with a named
+    error instead of today's behaviour (the word was not a
+    keyword at all, so `_Float128 x;` died as an undeclared
+    identifier, and `__float128` declarations in real headers
+    were the same).
+  - *Change:* `VT_F128` takes basic-type value 15 (the last
+    free value under the 4-bit `VT_BTYPE` mask). `_Float128`
+    and `__float128` are keywords (own tokens, gcc-spelling
+    variant like `__const__`). `parse_btype` maps them to
+    `VT_F128`; `type_size` returns 16 bytes / 16 alignment
+    (IEEE 754 binary128, x86-64 psABI); the type printer names
+    it `_Float128`, so diagnostics read correctly. Three gates
+    keep the half honest: `gv()` refuses to materialize an
+    F128 value ("_Float128 values are not supported yet (F29:
+    declarations only)"), `init_putv` refuses F128
+    initializers by name, and `gfunc_param_typed` refuses F128
+    parameters by name — without the last, an F128 argument
+    reached the x86-64 ABI classifier and aborted on its
+    assertion instead of erroring.
+  - *Evidence (aletetheia-core, this build):* the layout probe
+    is byte-identical to gcc's: `sizeof(_Float128)` 16,
+    `sizeof(struct { char; _Float128; int; })` 48 with the int
+    at offset 32, `_Alignof` 16/16, array stride 16; the
+    `__float128` spelling declares identically. Value uses all
+    fail by name: assignment, cast to double, scalar
+    initializer, an `f128`-suffixed literal ("invalid number"),
+    calls with F128 arguments (direct and through a function
+    pointer). What correctly still works: pointers to F128,
+    address-of, arrays, struct members, and whole-struct copies
+    of F128-carrying structs (byte copies — layout territory).
+    A call to an F128-returning function whose result is
+    discarded compiles and calls normally. Regression net:
+    `make test` ALL TESTS PASSED; conformance 328/333 with the
+    standing five; the D1 static census programs are untouched
+    (no linker change in this item).
+  - *The remaining design, sized:* (1) *Representation:* keep
+    `VT_F128`; values ride the vstack as an lvalue-in-memory
+    or an SSE register pair — the backend's `load`/`store`
+    need a 16-byte SSE move class (movaps/movups) on x86-64.
+    (2) *Operations:* binary ops and comparisons dispatch in
+    `gen_opf` to the TF128 helpers (`__addtf3`, `__subtf3`,
+    `__multf3`, `__divtf3`, `__letf2`/`__getf2` family,
+    `__negtf2`), following the fork's existing helper-call
+    idiom in `gen_opl`; unary minus is `__negtf2` or a sign-bit
+    xor in place. (3) *Conversions:* `gen_cvt` gains the
+    `__floatsitf`/`__fixtfsi`/`__fixtfdi`/`__extenddftf2`/
+    `__trunctfdf2`/`__extendsftf2`/`__trunctfsf2`/
+    `__floattidf`/`__floatuntitf` family; long double ↔ F128
+    goes through double or a memory round-trip (no direct
+    helper exists). (4) *ABI:* the x86-64 classifier gives
+    F128 the SSE/SSEUP pair class (arguments in xmm, result in
+    xmm0) — `VT_QFLOAT` (14) is the existing precedent for a
+    16-byte float in that code; other backends follow their
+    own psABIs (AArch64: a real hardware type there). (5)
+    *Constants:* `f128`/`F128` literal suffixes plus a
+    binary128 parser (the host's long double is 80-bit and
+    cannot hold the value — parse decimal→binary128 in
+    software, or route through the correctly-rounded cases:
+    integers and dyadic rationals first). (6) *printf:* no
+    work — glibc has no `%Qf` in the default build; gcc
+    programs print F128 via `__printf_fp` internals or casts,
+    and the cast path arrives with (3). Estimate: the x86-64
+    slice of (1)–(3)+(5) is a focused patch on the scale of
+    F22; (4) is the delicate part and wants its own probes
+    against gcc-compiled callees in both directions.
+  - *Note for the phext:* the `tccgen.c`, `tcc.h` and
+    `tcctok.h` Source scrolls are STALE. Cleared by the Wave
+    D2 phext refresh (below).
 
 ## Maintenance rule
 

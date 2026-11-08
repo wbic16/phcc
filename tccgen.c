@@ -1858,6 +1858,13 @@ ST_FUNC int gv(int rc)
     int r, r2, r_ok, r2_ok, rc2, bt;
     int bit_pos, bit_size, size, align;
 
+    /* F29: _Float128 is declaration-only.  Materializing a value
+       would need the TF128 codegen designed in PATCHES F29; fail
+       by name instead of miscompiling. */
+    if ((vtop->type.t & VT_BTYPE) == VT_F128)
+        tcc_error("_Float128 values are not supported yet "
+                  "(F29: declarations only)");
+
     /* NOTE: get_reg can modify vstack[] */
     if (vtop->type.t & VT_BITFIELD) {
         CType type;
@@ -2729,6 +2736,9 @@ static void type_to_str(char *buf, int buf_size,
             goto add_tstr;
         tstr = "enum ";
         goto tstruct;
+    case VT_F128:
+        tstr = "_Float128";
+        goto add_tstr;
     case VT_FLOAT:
         tstr = "float";
         goto add_tstr;
@@ -3553,6 +3563,9 @@ ST_FUNC int type_size(CType *type, int *a)
     } else if (bt == VT_SHORT) {
         *a = 2;
         return 2;
+    } else if (bt == VT_F128) {
+        *a = 16;
+        return 16;
     } else if (bt == VT_QLONG || bt == VT_QFLOAT) {
         *a = 8;
         return 16;
@@ -4977,6 +4990,10 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             goto basic_type;
         case TOK_COMPLEX:
             tcc_error("_Complex is not yet supported");
+        case TOK_FLOAT128:
+        case TOK_FLOAT128B:
+            u = VT_F128;
+            goto basic_type;
         case TOK_FLOAT:
             u = VT_FLOAT;
             goto basic_type;
@@ -5539,6 +5556,14 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
 {
     int func_type;
     CType type;
+
+    /* F29: an _Float128 argument would reach the ABI classifier,
+       which has no class for it; fail by name first.  An actual
+       _Float128 expression errors in gv() before this point, so
+       this catches arguments whose declared parameter type is
+       _Float128 regardless of the expression's shape. */
+    if (arg && (arg->type.t & VT_BTYPE) == VT_F128)
+        tcc_error("_Float128 arguments are not supported yet (F29)");
 
     func_type = func->f.func_type;
     if (func_type == FUNC_OLD ||
@@ -8337,6 +8362,9 @@ static void write_ldouble(unsigned char *d, void *s)
 static void init_putv(init_params *p, CType *type, unsigned long c)
 {
     int bt;
+    if ((type->t & VT_BTYPE) == VT_F128)
+        tcc_error("initializers for _Float128 are not supported "
+                  "yet (F29)");
     void *ptr;
     CType dtype;
     int size, align;

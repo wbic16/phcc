@@ -51,6 +51,8 @@
      DEF(TOK_DOUBLE, "double")
      DEF(TOK_BOOL, "_Bool")
      DEF(TOK_COMPLEX, "_Complex")
+     DEF(TOK_FLOAT128, "_Float128")
+     DEF(TOK_FLOAT128B, "__float128") /* gcc keyword */
      DEF(TOK_SHORT, "short")
      DEF(TOK_LONG, "long")
      DEF(TOK_STRUCT, "struct")
