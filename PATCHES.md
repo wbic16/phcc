@@ -29,15 +29,15 @@ from this file alone.
 | `slurp`-era versioning: `VERSION` | 1 line changed | Upstream `VERSION` (0.9.28rc) set to `1.0.0` — the fork's version identity from commit "Forking to v1.0". See rebase resolution R3. |
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
-| `tcc.h` | +59 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. |
+| `tcc.h` | +60 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
 | `tccgen.c` | +333 / −18 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. |
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
 | `tcctok.h` | +31 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). F17: nine more `DEF_ASMDIR` tokens (`value`, `hword`, `2byte`, `4byte`, `8byte`, `zero`, `float`, `single`, `double`) after `reloc`; `section` remains the last directive token. |
-| `libtcc.c` | +40 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. |
-| `tccelf.c` | +891 / −15 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. |
+| `libtcc.c` | +53 / −1 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. |
+| `tccelf.c` | +899 / −15 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. |
 | `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -1528,6 +1528,87 @@ structure; the fork's intent is carried, never dropped silently).
     Source scroll, its Volume 3 segmentation and Design view,
     machine #2's binding, and the gate verdict, which go STALE
     at the next refresh.
+- **F19 — `--allow-multiple-definition`: accepted, with GNU ld's
+  first-strong-definition-wins semantics (2026-11-07).**
+  - *Files:* `tcc.h` (+1), `libtcc.c` (+13/−1), `tccelf.c` (+8).
+  - *Reason:* PQ-20 — the link driver rejected the option outright
+    ("unsupported linker option '--allow-multiple-definition'"),
+    which stopped git 2.56.0's `make all` at its oss-fuzz helper
+    binaries; nothing else in the eleven-project matrix asks for
+    the flag. The option's semantics were measured against GNU ld
+    (binutils 2.42, via gcc 13.3.0) before implementing, over a
+    15-cell probe corpus — plain objects, archive members,
+    commons, weaks; every cell's winner value-observable (bss/bss
+    read off ld's output symbol size, since both copies are zero).
+  - *Measured ld semantics.* Unflagged, ld errors on every
+    strong/strong duplicate (data, text, bss, ABS, archive-pulled).
+    Flagged, the **first** strong definition wins in every cell —
+    including the two cells that decide the design: order-swapped
+    data/data keeps whichever definition came first (order, not
+    identity), and a bss definition placed first beats a later
+    data definition (the program reads 0, not the initializer),
+    so under the flag "first" outranks any section-type
+    precedence. Commons and weaks are not the flag's territory:
+    common-vs-definition (definition wins) and weak-vs-strong
+    (strong wins) resolve identically flagged and unflagged.
+    Spellings ld accepts: `--allow-multiple-definition`,
+    `-z muldefs` (keyword as a separate argument), `-zmuldefs`.
+    Spellings ld does **not** accept: `-z allow-multiple-definition`
+    and `-z=muldefs` — both are warn-ignored ("-z … ignored"), the
+    flag stays unset, and duplicates still error.
+  - *phcc before the fix.* Unflagged, phcc matched ld's errors in
+    13 of 15 cells; the two exceptions are PQ-13's known family —
+    bss+data and bss+bss link silently (in bss+data the *data*
+    definition wins, by `set_elf_sym`'s data-over-bss precedence) —
+    and are unchanged by this entry (below). The flag itself was
+    a hard error in the long and `-zmuldefs` spellings, and fell
+    into the generic `-z` warn-ignore as `-z muldefs` (then died
+    on "defined twice" anyway).
+  - *The fix.* `TCCState.allow_multiple_definition` (tcc.h).
+    `tcc_set_linker` (libtcc.c) sets it from
+    `allow-multiple-definition` / `zmuldefs`, and in the `-z=`
+    branch only when the keyword `muldefs` arrived as a separate
+    argument: `link_option` advances `link_optind` past the `-z`
+    token only in that form, which is how `-z muldefs` is told
+    apart from the `-z=muldefs` ld ignores (which keeps the
+    pre-existing warn-ignore). In `set_elf_sym` (tccelf.c), one
+    branch placed after weak resolution and the dynsym case and
+    before the common/data precedence branches: with the flag
+    set and neither the standing entry nor the new symbol a
+    COMMON, the new definition is ignored — the first strong
+    definition wins. The placement is the substance: it pre-empts
+    the data-over-bss patch in exactly the flagged A4 shape (bss
+    first, data second — flagged phcc now reads 0, as ld does),
+    while commons are excluded on both sides so F16's
+    displacement/merging rules run identically, flag or no flag.
+  - *Unflagged behaviour is unchanged, deliberately.* PQ-13 —
+    phcc links bss+data and bss+bss duplicates silently where ld
+    errors — stays open, exactly as measured; accepting this flag
+    does not fix it, and the verification below proves the
+    unflagged probe column is outcome-identical before and after.
+  - *Evidence.* The 15-cell corpus under the fixed build with
+    `-Wl,--allow-multiple-definition` matches ld's flagged column
+    cell-for-cell (marker/who 11, 22, 11, 0, 11; ABS 0x11;
+    archive cells who=11 with the member's second symbol still
+    pulled; commons and weaks at their unflagged outcomes), and
+    all four `-z` spellings reproduce ld's acceptance exactly.
+    Git 2.56.0, gate recipe verbatim from a fresh extract:
+    `make all` completes — exit 0, zero error lines, all nine
+    oss-fuzz binaries linked (the gate's build stopped at six of
+    the nine LINK steps) — and the four gate test scripts pass in
+    full on the result: t0000-basic 92/92, t0001-init 103/103,
+    t1400-update-ref 316/316, t3200-branch 195/195 — 706 tests,
+    0 failures. phcc `make test` ALL TESTS PASSED; conformance
+    spot re-run unchanged at 328/333, same five documented
+    class-(b) divergences, zero oracle splits. Note for the
+    phext: this entry changes the Source scrolls of `tcc.h`,
+    `libtcc.c` and `tccelf.c` (and their Volume 3 segmentations
+    and Design views), which go STALE at the next refresh;
+    machine #3's description needs the flag-gated branch added
+    to its `set_elf_sym` cascade at the same pass — no invariant
+    changes, as the branch fires only under a flag the machine's
+    default-link model does not carry — and the gate verdict
+    scroll goes stale with the rest.
 
 ## Maintenance rule
 

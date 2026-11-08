@@ -1510,6 +1510,14 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
                 /* ignore hidden symbols after */
             } else if (s->sh_flags & SHF_DYNSYM) {
                 /* we accept that two DLL define the same symbol */
+            } else if (s1->allow_multiple_definition
+                       && esym->st_shndx != SHN_COMMON && shndx != SHN_COMMON) {
+                /* --allow-multiple-definition (GNU ld): the first
+                   strong definition wins; ignore this one.  Weak
+                   resolution above has already run, so both entries
+                   here are strong.  Commons are excluded on both
+                   sides: their displacement and merging follow their
+                   own rules (see the next branches), flag or no flag. */
             } else if (esym->st_shndx == SHN_COMMON && shndx != SHN_COMMON) {
                 /* a definition in a real section (data or bss)
                    displaces a common */

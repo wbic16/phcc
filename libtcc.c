@@ -1464,6 +1464,7 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
         int ignoring = 0;
         struct lopt o = {0};
         int r;
+        int optind0 = s->link_optind;
         o.s = s;
         o.opt = s->link_argv[s->link_optind];
 
@@ -1522,6 +1523,8 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
             SET_OR_CLEAR(s->filetype, AFF_WHOLE_ARCHIVE);
         } else if (link_option(&o, "znodelete")) {
             s->znodelete = 1;
+        } else if (link_option(&o, "allow-multiple-definition|zmuldefs")) {
+            s->allow_multiple_definition = 1;
 #ifdef TCC_TARGET_PE
         } else if (link_option(&o, "large-address-aware")) {
             s->pe_characteristics |= 0x20;
@@ -1553,7 +1556,16 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
         } else if (link_option(&o, "O")) {
             ignoring = 1;
         } else if (link_option(&o, "z=")) {
-            ignoring = 1;
+            /* GNU ld: '-z muldefs' (keyword as a separate argument) is
+               a synonym of --allow-multiple-definition; '-z=muldefs'
+               is not -- ld warn-ignores the keyword '=muldefs' there.
+               link_option advances link_optind past the '-z' token
+               only for the separate-argument form, which is how the
+               two are told apart. */
+            if (s->link_optind > optind0 && 0 == strcmp(o.arg, "muldefs"))
+                s->allow_multiple_definition = 1;
+            else
+                ignoring = 1;
         } else if (link_option(&o, "L:")) {
             tcc_add_library_path(s, o.arg);
         } else if (link_option(&o, "l:")) {
