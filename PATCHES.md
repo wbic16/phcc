@@ -3152,6 +3152,22 @@ assert — arm64_type_size is reached only from codegen value paths
 declaration surface is unaffected.  Seven value-use shapes verified
 to fail with the named error; declarations still parse (F35 battery).
 
+## F37 — linker: undefined TLS symbol in a TPOFF relocation errors by name (PQ-25)
+
+In x86_64-link.c `relocate()`, the TPOFF32/64 fallthrough anchors
+the value on `s1->sections[sym->st_shndx]` whenever `s1->tls_end`
+is 0 — the shape of a shared-object link.  For an undefined TLS
+symbol `st_shndx` is SHN_UNDEF and `sections[SHN_UNDEF]` is NULL:
+the linker segfaulted on any `-shared` link carrying a local-exec
+TLS reference to an undefined symbol (the same defect family F30
+fixed for the TLSGD case).  Fix: detect SHN_UNDEF, record a named
+error via `tcc_error_noabort` (the link fails on it; no output is
+produced), and use a deterministic value.  Verified on the PQ-25
+matrix: the former segfault cells now fail with
+"undefined TLS symbol '<name>' in TLS relocation"; every previously
+working cell (defined-in-link, gcc IE objects against DSOs,
+executable links) is unchanged.
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in

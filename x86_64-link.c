@@ -479,8 +479,21 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
                     x = val - s1->tls_end;
                 } else {
                     ElfW(Sym) *sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
-                    Section *sec = s1->sections[sym->st_shndx];
-                    x = val - sec->sh_addr - sec->data_offset;
+                    Section *sec;
+                    if (sym->st_shndx == SHN_UNDEF) {
+                        /* F37: no section anchors an undefined symbol;
+                           sections[SHN_UNDEF] is NULL and dereferencing
+                           it segfaulted the linker (PQ-25).  Record the
+                           error (the link fails on it) and use a
+                           deterministic value. */
+                        tcc_error_noabort("undefined TLS symbol '%s' in TLS relocation",
+                                  (char *)symtab_section->link->data
+                                  + sym->st_name);
+                        x = 0;
+                    } else {
+                        sec = s1->sections[sym->st_shndx];
+                        x = val - sec->sh_addr - sec->data_offset;
+                    }
                 }
                 switch (type) {
                 case R_X86_64_DTPOFF64:
