@@ -7403,6 +7403,48 @@ static void gexpr_decl(void)
     }
 }
 
+
+/* F23 (PQ-21): loop statements entered in dead code.
+   Code in a constant-dead branch (or after an unconditional jump) is
+   suppressed via CODE_OFF_BIT, but the loop handlers below call
+   gind() at the loop head, which clears the bit -- so a dead loop
+   used to be emitted in full, including references to symbols that
+   exist only on the live path (e.g. FFmpeg's nasm-only SIMD
+   functions behind constant-0 EXTERNAL_* guards).
+   A loop head, however, is a jump target only for the loop's own
+   jumps; outside code can enter the body solely through a label
+   defined in it (a goto target, possibly written later in the
+   function).  So when a loop is entered dead, its parenthesised
+   part and -- if braced -- its body are first saved as a token
+   string and scanned for a label definition; if there is none, the
+   loop is replayed with the suppression kept in force (the
+   "nocode_wanted |= ..." lines in the handlers).  If there is one,
+   or the body is not a braced block (whose extent a token scan
+   cannot delimit), the loop is parsed exactly as before;
+   tests/tests2/87_dead_code.c exercises both sides of this.
+   The scan is deliberately crude: any identifier directly followed
+   by ':' counts (ternaries, case constants and bitfield members
+   also match); a false hit only forfeits the suppression.  */
+static void scan_save_span(TokenString *str, int open, int close,
+                           int *saw_label)
+{
+    int level = 0, prev = 0;
+    for (;;) {
+        int t = tok;
+        if (t == TOK_EOF)
+            tcc_error("unexpected end of file");
+        if (prev >= TOK_UIDENT && t == ':')
+            *saw_label = 1;
+        tok_str_add_tok(str);
+        prev = t;
+        next();
+        if (t == open)
+            level++;
+        else if (t == close && --level == 0)
+            break;
+    }
+}
+
 static void block(int flags)
 {
     int a, b, c, d, e, t;
@@ -7439,8 +7481,25 @@ again:
         prev_scope_s(&o);
 
     } else if (t == TOK_WHILE) {
+        int ncw = nocode_wanted, suppress = 0;
         new_scope_s(&o);
+        if (ncw & CODE_OFF_BIT) {
+            /* F23: save/scan the condition and body, see above */
+            int saw_label = 0;
+            TokenString *str = tok_str_alloc();
+            scan_save_span(str, '(', ')', &saw_label);
+            if (tok == '{') {
+                scan_save_span(str, '{', '}', &saw_label);
+                suppress = !saw_label;
+            }
+            tok_str_add(str, 0); /* macro strings end at 0: a TOK_EOF would park next() on it forever */
+            unget_tok(0);
+            begin_macro(str, 1);
+            next();
+        }
         d = gind();
+        if (suppress)
+            nocode_wanted |= ncw & CODE_OFF_BIT;
         skip('(');
         gexpr();
         a = gvtst(1, 0);
@@ -7532,7 +7591,22 @@ again:
         skip(';');
 
     } else if (t == TOK_FOR) {
+        int ncw = nocode_wanted, suppress = 0;
         new_scope(&o);
+        if (ncw & CODE_OFF_BIT) {
+            /* F23: save/scan the (...) part and body, see TOK_WHILE */
+            int saw_label = 0;
+            TokenString *str = tok_str_alloc();
+            scan_save_span(str, '(', ')', &saw_label);
+            if (tok == '{') {
+                scan_save_span(str, '{', '}', &saw_label);
+                suppress = !saw_label;
+            }
+            tok_str_add(str, 0); /* macro strings end at 0: a TOK_EOF would park next() on it forever */
+            unget_tok(0);
+            begin_macro(str, 1);
+            next();
+        }
 
         skip('(');
         if (tok != ';') {
@@ -7546,6 +7620,8 @@ again:
         skip(';');
         a = b = 0;
         c = d = gind();
+        if (suppress)
+            nocode_wanted |= ncw & CODE_OFF_BIT;
         if (tok != ';') {
             gexpr();
             a = gvtst(1, 0);
@@ -7554,6 +7630,8 @@ again:
         if (tok != ')') {
             e = gjmp(0);
             d = gind();
+            if (suppress)
+                nocode_wanted |= ncw & CODE_OFF_BIT;
             gexpr();
             vpop();
             gjmp_addr(c);
@@ -7567,9 +7645,23 @@ again:
         prev_scope(&o, 0);
 
     } else if (t == TOK_DO) {
+        int ncw = nocode_wanted, suppress = 0;
         new_scope_s(&o);
         a = b = 0;
+        if ((ncw & CODE_OFF_BIT) && tok == '{') {
+            /* F23: save/scan the braced body, see TOK_WHILE */
+            int saw_label = 0;
+            TokenString *str = tok_str_alloc();
+            scan_save_span(str, '{', '}', &saw_label);
+            tok_str_add(str, 0); /* macro strings end at 0: a TOK_EOF would park next() on it forever */
+            suppress = !saw_label;
+            unget_tok(0);
+            begin_macro(str, 1);
+            next();
+        }
         d = gind();
+        if (suppress)
+            nocode_wanted |= ncw & CODE_OFF_BIT;
         lblock(&a, &b);
         gsym(b);
         skip(TOK_WHILE);

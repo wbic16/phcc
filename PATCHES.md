@@ -31,7 +31,7 @@ from this file alone.
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
 | `tcc.h` | +69 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20.F21: `TCCState` gains `execstack` (the `-z execstack`/`noexecstack` state) and the input-object records `inp_execstack`/`inp_no_gnustack`. See F21. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
-| `tccgen.c` | +333 / −18 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. |
+| `tccgen.c` | +425 / −18 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. F23: dead loops inside constant-dead branches stay suppressed -- the loop handlers no longer resurrect them at the loop head (`scan_save_span()`). See F23. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. |
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
@@ -1939,6 +1939,93 @@ structure; the fork's intent is carried, never dropped silently).
     TLS or GOT-entry claim, so no machine text changes; machines
     #1/#2/#4, the libtcc1 receipts, the listings and the
     Library-10000 region are untouched.
+- **F23 — tccgen.c: dead loops no longer resurrect at the loop head
+  (PQ-21) (2026-11-07).**
+  - *File:* `tccgen.c` only (+92/−0): a new helper `scan_save_span()`
+    above `block()`, plus an entry-state snapshot and a
+    save/scan/replay prelude in the `TOK_WHILE`, `TOK_FOR` and
+    `TOK_DO` handlers.
+  - *Reason:* phcc suppresses code generation in constant-dead
+    branches through `CODE_OFF_BIT` in `nocode_wanted`: unconditional
+    jumps set it (the `gjmp`/`gjmp_addr` macros redirect to `_acs`
+    variants), and `gsym()`/`gind()` clear it because a jump target
+    may be live. Every loop handler calls `gind()` at the loop head,
+    so any loop inside a dead region was emitted in full — references
+    and all. A loop head, however, is a jump target only for the
+    loop's own jumps; outside code can enter the body solely through
+    a label defined in it. FFmpeg under `--disable-x86asm` is the
+    witness: the `EXTERNAL_*` guards are constant 0 and the guarded
+    `RANGE_CONVERT_FUNCS(...)` invocations are `do { if/else }
+    while (0)` macro blocks naming nasm-only SIMD functions; phcc
+    emitted all 16 `ff_*Range*` references and the final
+    ffmpeg/ffprobe link failed on phantoms gcc -O0 never emits.
+    Bisection of the extract's shapes (31 probes, base phcc vs
+    gcc -O0/-O2): the defeating construct is the loop scaffolding
+    itself — do-while, while and for all leak, with or without an
+    inner conditional; a plain block holding the same if/else does
+    not; code after `return;` leaks through the same bit (F13 fixed a
+    neighbouring escape — asm constraint checks under suppression;
+    this one is statement-level).
+  - *Change:* when a loop is entered with `CODE_OFF_BIT` set, the
+    handler first saves its parenthesised part (while/for) and — if
+    braced — its body into a token string, using the machinery the
+    declaration code uses for initializer dry-runs
+    (`tok_str_add_tok`, `unget_tok(0)`, `begin_macro(str, 1)`),
+    scanning the saved tokens for a label definition (an identifier
+    directly followed by `:`). If none is found, the loop is
+    replayed with `CODE_OFF_BIT` re-asserted after each loop-head
+    `gind()`; if one is found — or the body is unbraced, whose
+    extent a token scan cannot delimit — the loop is parsed exactly
+    as before. The saved string is terminated with 0 (the
+    macro-stream end marker), not `TOK_EOF`: `next()` parks on a
+    `TOK_EOF` inside a macro string instead of popping it, which
+    would strand the token after the loop.
+  - *Why not always suppress:* upstream's own
+    `tests/tests2/87_dead_code.c` is the regression test for exactly
+    this tension — gotos from live code jump into loops inside
+    `if (0)` ("even the first loop statements aren't actually
+    dead"); suppressing a labelled loop's head leaves its back-edge
+    targeting never-emitted code, and the program hangs (an earlier
+    unconditional version of this fix did exactly that). The label
+    scan is what makes suppression safe. It is deliberately crude —
+    ternaries, `case ENUM:` and bitfield member syntax also match
+    the `ident :` pattern — a false hit only forfeits the
+    suppression, never correctness.
+  - *Evidence:* the 31-shape probe matrix: every label-free dead
+    loop shape now emits 0 external references (base emitted 1–4 per
+    shape, gcc 0); label-bearing shapes match gcc exactly (a goto
+    into a dead loop body still emits its reference, both
+    compilers); a static local inside a dead loop body keeps its
+    data (suppression stays a code-off bit, not the statement
+    counter, so statics are unaffected); live controls
+    (constant-true and non-constant guards, live loops) have
+    `.text` byte-identical to base. One measured residual: a label
+    defined immediately *before* a dead loop still resurrects the
+    loop (1 ref vs gcc's 0) — the label's own definition site
+    clears the bit, and at definition time a backward goto is
+    unknowable; documented here, not chased. The faithful FFmpeg
+    extract compiles with 0 `ff_*` undefineds and links and runs
+    against a stub providing only `av_get_cpu_flags`. Upstream
+    `make test` ALL TESTS PASSED, 87_dead_code included (byte-exact
+    under `-run`). Conformance spot re-run unchanged at 328/333
+    with the same five documented class-(b) divergences and zero
+    oracle splits; F13's dead-code mini-corpus is unchanged,
+    including the live unsatisfiable-`"i"` negative control, which
+    still hard-errors identically. **Headline (throwaway stack of
+    F20 + F23, gate recipe verbatim): FFmpeg 9.0.2 builds
+    completely — `make` exit 0, `ffmpeg` and `ffprobe` link,
+    `HAVE_SYSCTL 0` — and the gate transcode is byte-identical to
+    the gcc-built oracle (SHA-256
+    fe93761b29c11da087d776ec86e4632acfa39643863c7d4c1abfd6939712f056),
+    where the gate tip stopped at 1,902 of 1,903 units with the
+    final link failing.**
+  - *Note for the phext:* this entry changes the Source scroll of
+    `tccgen.c` (and its Volume 3 segmentation and Design view),
+    which go STALE at the next refresh; the gate verdict scroll
+    goes STALE with them. No machine-description changes: none of
+    the four §A.3 machines covers statement-level code suppression
+    (they are the preprocessor conditional stack, the value stack,
+    linker resolution, and register allocation).
 
 ## Maintenance rule
 
