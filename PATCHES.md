@@ -3669,6 +3669,33 @@ directions.  `make test`: ALL TESTS PASSED (see the wave
 record); the F42 and F43 spot suites still pass 37/37 and
 21/21.
 
+Tier-found fix (same wave, separate commit): the extended
+C23 tier receipted both oracles accepting `nullptr_t np =
+NULL;` and `nullptr_t np = 0;` — a null pointer constant
+converts to `nullptr_t` (C23 6.3.2.3), which F42's first
+reading refused.  `verify_assign_cast` now admits a null
+pointer constant source for a `nullptr_t` destination (via
+the existing `is_null_pointer`); a general pointer or integer
+value still fails by the same named error.  The F42 spot
+suite's strict case was updated to the conforming reading
+(a non-constant source is still rejected) and an accept case
+added; the suite passes 38/38.
+
+Further tier residues, receipted in the tier report and
+recorded here rather than silently carried: (1) a pointer
+`constexpr` object may be initialized with a string literal
+— gcc 13 rejects every non-null pointer constexpr
+initializer (its support is partial) and the C23 text wants
+the pointee to be a constexpr object, so phcc's acceptance
+is permissive; tightening it is future work, not a silent
+behaviour.  (2) `alignas`/`_Alignas` over-alignment is
+honoured for static storage in all modes, but frame locals
+are not over-aligned past the frame alignment and
+`_Alignof` of a variable expression reports the type's
+alignment rather than the declared one — pre-existing
+upstream behaviour, mode-independent, unchanged by this
+wave.
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in

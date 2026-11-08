@@ -6140,10 +6140,14 @@ static void verify_assign_cast(CType *dt)
     }
     if (IS_NULLPTR_T(dt->t) || IS_NULLPTR_T(st->t)) {
         /* F42: nullptr_t assignment rules (C23 6.3.2.4): a nullptr_t
-           destination accepts only a nullptr_t source (NULL and 0
-           are not nullptr_t); a nullptr_t source converts implicitly
-           only to a pointer type or _Bool. */
+           source converts implicitly only to a pointer type or
+           _Bool.  F44 (tier-found): a nullptr_t destination also
+           accepts a null pointer constant -- 0, or NULL in its
+           (void*)0 form (C23 6.3.2.3), as both oracles receipt;
+           a general pointer value still does not convert. */
         if (IS_NULLPTR_T(dt->t) && IS_NULLPTR_T(st->t))
+            return;
+        if (IS_NULLPTR_T(dt->t) && is_null_pointer(vtop))
             return;
         if (IS_NULLPTR_T(st->t) && (dbt == VT_PTR || dbt == VT_BOOL))
             return;
