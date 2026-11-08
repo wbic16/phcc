@@ -158,6 +158,26 @@ ST_FUNC void tccelf_delete(TCCState *s1)
     tcc_free(sym_versions);
     tcc_free(sym_to_version);
     tcc_free(dynsym_compat_only);
+    /* F27/F28 state */
+    tcc_free(s1->iplt);
+    for (i = 0; i < s1->nb_ver_reqs; i++) {
+        tcc_free(s1->ver_reqs[i].version);
+        tcc_free(s1->ver_reqs[i].literal);
+    }
+    tcc_free(s1->ver_reqs);
+    for (i = 0; i < s1->nb_def_vers; i++) {
+        tcc_free(s1->def_vers[i].name);
+        tcc_free(s1->def_vers[i].lib);
+        tcc_free(s1->def_vers[i].version);
+    }
+    tcc_free(s1->def_vers);
+    for (i = 0; i < s1->nb_symver_recs; i++) {
+        tcc_free(s1->symver_recs[i].sym);
+        tcc_free(s1->symver_recs[i].base);
+        tcc_free(s1->symver_recs[i].version);
+    }
+    tcc_free(s1->symver_recs);
+    tcc_free(s1->dynsym_version_hidden);
     vscript_free(s1);
     tcc_free(s1->dynsym_version);
 #endif
@@ -1344,6 +1364,135 @@ static void vscript_set_dynsym_version(TCCState *s1, int dynindex, int node)
     s1->dynsym_version[dynindex] = node + 1;
 }
 
+static void add_ver_req(TCCState *s1, int sym, const char *version,
+                        int is_default, const char *literal);
+static int find_sym_version_g(TCCState *s1, const char *lib,
+                              const char *version);
+static void set_dynsym_version_hidden(TCCState *s1, int dynindex);
+
+/* F28: interpret the recorded versioned references and .symver
+   records now that every input is loaded and the defining
+   libraries are known.  Reference records whose symbol stayed
+   undefined become version requests on the base-name entry;
+   requests are then verified against the defining library's
+   recorded versioned definitions and pinned by replacing the
+   name's entry in sym_to_version (the table the VERNEED pass
+   reads).  A request the defining library cannot satisfy is an
+   unresolved reference to the literal versioned name, as in
+   GNU ld; two different versions requested for one name in one
+   link are a conflict (this linker's dynsym carries one entry
+   per name). */
+static void apply_ver_reqs(TCCState *s1)
+{
+    int i, j;
+    for (i = 0; i < s1->nb_symver_recs; i++) {
+        struct symver_rec *r = &s1->symver_recs[i];
+        int idx = find_elf_sym(symtab_section, r->sym);
+        ElfW(Sym) *esym;
+        if (!idx)
+            idx = set_elf_sym(symtab_section, 0, 0,
+                              ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0,
+                              SHN_UNDEF, r->sym);
+        esym = &((ElfW(Sym) *)symtab_section->data)[idx];
+        if (esym->st_shndx == SHN_UNDEF) {
+            char lit[1024];
+            snprintf(lit, sizeof(lit), "%s@%s%s", r->sym,
+                     r->is_default ? "@" : "", r->version);
+            add_ver_req(s1, idx, r->version, r->is_default, lit);
+        }
+    }
+    if (!s1->dynsymtab_section)
+        return;
+    for (i = 0; i < s1->nb_ver_reqs; i++) {
+        struct ver_req *q = &s1->ver_reqs[i];
+        ElfW(Sym) *esym = &((ElfW(Sym) *)symtab_section->data)[q->sym];
+        const char *name = (char *)symtab_section->link->data
+                           + esym->st_name;
+        int dllindex, gver, found;
+        const char *lib;
+        for (j = 0; j < i; j++) {
+            struct ver_req *p = &s1->ver_reqs[j];
+            if (p->sym == q->sym && strcmp(p->version, q->version)) {
+                tcc_error_noabort("conflicting version requirements "
+                                  "for '%s'", name);
+                break;
+            }
+        }
+        if (esym->st_shndx != SHN_UNDEF)
+            continue; /* defined by an object or archive member:
+                         the base binding already resolved it */
+        dllindex = find_elf_sym(s1->dynsymtab_section, name);
+        gver = (dllindex && dllindex < nb_sym_to_version)
+               ? sym_to_version[dllindex] : -1;
+        if (gver < 0)
+            continue; /* no DLL defines it: ordinary resolution
+                         (and its unresolved error) decides */
+        lib = sym_versions[gver].lib;
+        found = -1;
+        for (j = 0; j < s1->nb_def_vers; j++)
+            if (!strcmp(s1->def_vers[j].name, name)
+                && !strcmp(s1->def_vers[j].lib, lib)
+                && !strcmp(s1->def_vers[j].version, q->version)) {
+                found = j;
+                break;
+            }
+        if (found < 0 || (q->is_default && s1->def_vers[found].compat))
+            tcc_error_noabort("unresolved reference to '%s'",
+                              q->literal);
+        else
+            sym_to_version[dllindex] = find_sym_version_g(s1, lib,
+                                                          q->version);
+    }
+}
+
+/* F28: honour .symver definitions when a shared library is
+   written: each defined record contributes one extra dynsym
+   entry under its alias base name, carrying the record's
+   version (with the versym hidden bit for a non-default "@"
+   version, as GNU ld emits).  As in GNU ld, the version must
+   be declared by a version-script node. */
+static void apply_symver_defs(TCCState *s1)
+{
+    int i;
+    if (!s1->dynsym)
+        return;
+    for (i = 0; i < s1->nb_symver_recs; i++) {
+        struct symver_rec *r = &s1->symver_recs[i];
+        int idx = find_elf_sym(symtab_section, r->sym);
+        ElfW(Sym) *esym;
+        int node, v, dynindex;
+        if (!idx)
+            continue;
+        esym = &((ElfW(Sym) *)symtab_section->data)[idx];
+        if (esym->st_shndx == SHN_UNDEF)
+            continue;
+        node = -1;
+        if (s1->vscript)
+            for (v = 0; v < s1->vscript->nb_nodes; v++)
+                if (s1->vscript->nodes[v]->name
+                    && !strcmp(s1->vscript->nodes[v]->name,
+                               r->version)) {
+                    node = v;
+                    break;
+                }
+        if (node < 0) {
+            /* GNU ld: a .symver version must be declared by a
+               version-script node; there is no implicit node */
+            tcc_error_noabort("version node not found for symbol "
+                              "%s@%s%s", r->base,
+                              r->is_default ? "@" : "", r->version);
+            continue;
+        }
+        dynindex = put_elf_sym(s1->dynsym, esym->st_value,
+                               esym->st_size, esym->st_info,
+                               esym->st_other, esym->st_shndx,
+                               r->base);
+        vscript_set_dynsym_version(s1, dynindex, node);
+        if (!r->is_default)
+            set_dynsym_version_hidden(s1, dynindex);
+    }
+}
+
 /* GNU ld exports one absolute symbol per named version node. */
 static void vscript_add_version_symbols(TCCState *s1)
 {
@@ -1395,6 +1544,9 @@ static void version_def_add(TCCState *s1, const char *filename)
         for (i = 1; i < end_sym; i++) {
             v = i < s1->nb_dynsym_version ? s1->dynsym_version[i] : 0;
             versym[i] = v ? (ElfW(Half))(v + 1) : 1; /* ordinal+1 -> index */
+            if (v && i < s1->nb_dynsym_version_hidden
+                && s1->dynsym_version_hidden[i])
+                versym[i] |= 0x8000; /* non-default .symver version */
         }
     }
     s1->verdef_next_index = 2 + vs->nb_named;
@@ -4209,11 +4361,15 @@ static int elf_output_file(TCCState *s1, const char *filename)
 	    /* fill with initial data */
 	    tcc_eh_frame_hdr(s1, 0);
 #endif
+	    apply_symver_defs(s1);
 	    vscript_add_version_symbols(s1);
 	    dyninf.gnu_hash = create_gnu_hash(s1);
         } else {
             build_got_entries(s1, 0);
         }
+	apply_ver_reqs(s1);
+	if (s1->nb_errors)
+	    goto the_end;
 	version_def_add (s1, filename);
 	version_add (s1);
 
@@ -4449,6 +4605,42 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
 #endif
     }
     return 0;
+}
+
+/* ---------------- F28: versioned references and .symver ------- */
+/* A request to bind the (base-name) symtab entry SYM to VERSION of
+   its defining library: from a literal name@VER undefined symbol in
+   an object file, or from a .symver directive naming an undefined
+   symbol.  IS_DEFAULT records the @@ spelling, whose target must
+   be the version the library itself treats as default. */
+static void add_ver_req(TCCState *s1, int sym, const char *version,
+                        int is_default, const char *literal)
+{
+    struct ver_req *q;
+    s1->ver_reqs = tcc_realloc(s1->ver_reqs,
+                               (s1->nb_ver_reqs + 1) * sizeof(*q));
+    q = &s1->ver_reqs[s1->nb_ver_reqs++];
+    q->sym = sym;
+    q->version = tcc_strdup(version);
+    q->is_default = is_default;
+    q->literal = tcc_strdup(literal);
+}
+
+/* Record a .symver directive (called from the assembler).  The
+   record is interpreted at output time, when the symbol's final
+   defined/undefined state is known. */
+ST_FUNC void tcc_add_symver_rec(TCCState *s1, const char *sym,
+                                const char *base, const char *version,
+                                int is_default)
+{
+    struct symver_rec *r;
+    s1->symver_recs = tcc_realloc(s1->symver_recs,
+                                  (s1->nb_symver_recs + 1) * sizeof(*r));
+    r = &s1->symver_recs[s1->nb_symver_recs++];
+    r->sym = tcc_strdup(sym);
+    r->base = tcc_strdup(base);
+    r->version = tcc_strdup(version);
+    r->is_default = is_default;
 }
 
 /* load an object file and merge it with current files */
@@ -4712,6 +4904,29 @@ invalid:
         }
         /* add symbol */
         name = strtab + sym->st_name;
+        if (sym->st_shndx == SHN_UNDEF
+            && ELFW(ST_BIND)(sym->st_info) != STB_LOCAL) {
+            const char *at = strchr(name, '@');
+            if (at && at != name && at[1]) {
+                /* F28: a versioned reference (name@VER or
+                   name@@VER).  Bind the base name like any other
+                   undefined symbol; the requested version is
+                   recorded and pinned at output time, after the
+                   defining library is known. */
+                char *base = tcc_malloc(at - name + 1);
+                int is_def = at[1] == '@';
+                memcpy(base, name, at - name);
+                base[at - name] = 0;
+                sym_index = set_elf_sym(symtab_section, 0, 0,
+                                        sym->st_info, sym->st_other,
+                                        SHN_UNDEF, base);
+                add_ver_req(s1, sym_index, at + 1 + is_def, is_def,
+                            name);
+                tcc_free(base);
+                old_to_new_syms[i] = sym_index;
+                continue;
+            }
+        }
         sym_index = set_elf_sym(symtab_section, sym->st_value, sym->st_size,
                                 sym->st_info, sym->st_other,
                                 sym->st_shndx, name);
@@ -5071,6 +5286,64 @@ static int dynsym_is_compat_only(TCCState *s1, int sym_index)
         && dynsym_compat_only[sym_index] == 1;
 }
 
+/* ---------------- F28: versioned references and .symver ------- */
+
+
+/* One versioned definition instance seen in a loaded DLL: symbol
+   NAME is defined by LIB with version VERSION; COMPAT is the
+   versym hidden bit (a non-default, "@", instance).  Recorded so
+   versioned references can be verified against what the defining
+   library actually offers (F20 recorded only a per-name summary
+   for its compat policy). */
+static void add_def_ver(TCCState *s1, const char *name, const char *lib,
+                        const char *version, int compat)
+{
+    struct def_ver *d;
+    s1->def_vers = tcc_realloc(s1->def_vers,
+                               (s1->nb_def_vers + 1) * sizeof(*d));
+    d = &s1->def_vers[s1->nb_def_vers++];
+    d->name = tcc_strdup(name);
+    d->lib = tcc_strdup(lib);
+    d->version = tcc_strdup(version);
+    d->compat = compat;
+}
+
+/* Find (LIB, VERSION) in the global sym_versions table, appending
+   it when new; returns the table index.  Mirrors the append logic
+   of set_ver_to_ver, applied to the globals. */
+static int find_sym_version_g(TCCState *s1, const char *lib,
+                              const char *version)
+{
+    int v, prev_same_lib = -1;
+    for (v = 0; v < nb_sym_versions; v++) {
+        if (strcmp(sym_versions[v].lib, lib))
+            continue;
+        prev_same_lib = v;
+        if (!strcmp(sym_versions[v].version, version))
+            return v;
+    }
+    sym_versions = tcc_realloc(sym_versions,
+                               (v + 1) * sizeof(*sym_versions));
+    sym_versions[v].lib = tcc_strdup(lib);
+    sym_versions[v].version = tcc_strdup(version);
+    sym_versions[v].out_index = 0;
+    sym_versions[v].prev_same_lib = prev_same_lib;
+    nb_sym_versions++;
+    return v;
+}
+
+
+static void set_dynsym_version_hidden(TCCState *s1, int dynindex)
+{
+    if (dynindex >= s1->nb_dynsym_version_hidden) {
+        int n = dynindex + 16, o = s1->nb_dynsym_version_hidden;
+        s1->dynsym_version_hidden = tcc_realloc(s1->dynsym_version_hidden, n);
+        memset(s1->dynsym_version_hidden + o, 0, n - o);
+        s1->nb_dynsym_version_hidden = n;
+    }
+    s1->dynsym_version_hidden[dynindex] = 1;
+}
+
 struct versym_info {
     int nb_versyms;
     ElfW(Verdef) *verdef;
@@ -5250,6 +5523,17 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
             ElfW(Half) vsym = v.versym[i];
             if ((vsym & 0x8000) == 0 && vsym > 0 && vsym < v.nb_local_ver)
                 set_sym_version(s1, sym_index, v.local_ver[vsym]);
+            /* F28: record every versioned definition instance so
+               versioned references can be verified against what
+               this library actually offers */
+            if (sym->st_shndx != SHN_UNDEF && (vsym & ~0x8000) > 0
+                && (vsym & ~0x8000) < v.nb_local_ver
+                && v.local_ver[vsym & ~0x8000] >= 0) {
+                int lv = v.local_ver[vsym & ~0x8000];
+                add_def_ver(s1, name, sym_versions[lv].lib,
+                            sym_versions[lv].version,
+                            (vsym & 0x8000) != 0);
+            }
         }
     }
 

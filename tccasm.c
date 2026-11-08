@@ -1525,14 +1525,50 @@ static void asm_parse_directive(TCCState *s1, int global)
         }
         break;
 #endif
-    /* TODO: Implement symvar support. FreeBSD >= 14 needs this */
     case TOK_ASMDIR_symver:
-	next();
-	next();
-        skip(',');
-	next();
-        skip('@');
-	next();
+        {
+            /* .symver name, alias@version / alias@@version
+               (F28: recorded; interpreted at output time, when
+               the symbol's defined/undefined state is final) */
+            char sbuf[256], abuf[256], vbuf[256];
+            int is_default = 0;
+            sbuf[0] = abuf[0] = vbuf[0] = '\0';
+            next();
+            while (tok != ',' && tok != ';' && tok != TOK_LINEFEED
+                   && tok != TOK_EOF) {
+                if (tok == TOK_STR)
+                    pstrcat(sbuf, sizeof(sbuf), tokc.str.data);
+                else
+                    pstrcat(sbuf, sizeof(sbuf), get_tok_str(tok, NULL));
+                next();
+            }
+            skip(',');
+            while (tok != '@' && tok != ';' && tok != TOK_LINEFEED
+                   && tok != TOK_EOF) {
+                if (tok == TOK_STR)
+                    pstrcat(abuf, sizeof(abuf), tokc.str.data);
+                else
+                    pstrcat(abuf, sizeof(abuf), get_tok_str(tok, NULL));
+                next();
+            }
+            while (tok == '@') {
+                is_default++;
+                next();
+            }
+            while (tok != ';' && tok != TOK_LINEFEED && tok != TOK_EOF
+                   && tok != ',') {
+                if (tok == TOK_STR)
+                    pstrcat(vbuf, sizeof(vbuf), tokc.str.data);
+                else
+                    pstrcat(vbuf, sizeof(vbuf), get_tok_str(tok, NULL));
+                next();
+            }
+            if (sbuf[0] && abuf[0] && vbuf[0])
+                tcc_add_symver_rec(s1, sbuf, abuf, vbuf,
+                                   is_default >= 2);
+            else
+                tcc_error_noabort("malformed .symver directive");
+        }
 	break;
     case TOK_ASMDIR_reloc:
 	{

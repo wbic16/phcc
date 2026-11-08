@@ -942,9 +942,20 @@ struct TCCState {
     /* got & plt handling */
     Section *got, *plt;
     /* static-executable IFUNC resolution (F27) */
-    Section *rela_iplt; /* .rela.plt section, when emitted */
+    Section *rela_iplt;
     struct iplt_ent *iplt;
     int nb_iplt;
+    /* F28: versioned references (name@VER in objects, .symver in
+       source), the versioned definitions seen in loaded DLLs, and
+       .symver records awaiting the output pass */
+    struct ver_req { int sym; char *version; int is_default; char *literal; } *ver_reqs;
+    int nb_ver_reqs;
+    struct def_ver { char *name; char *lib; char *version; int compat; } *def_vers;
+    int nb_def_vers;
+    struct symver_rec { char *sym; char *base; char *version; int is_default; } *symver_recs;
+    int nb_symver_recs;
+    unsigned char *dynsym_version_hidden;
+    int nb_dynsym_version_hidden;
     /* exception handling */
     Section *eh_frame_section;
     Section *eh_frame_hdr_section;
@@ -1647,6 +1658,7 @@ ST_FUNC void *load_data(int fd, unsigned long file_offset, unsigned long size);
 ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h);
 ST_FUNC int tcc_load_object_file(TCCState *s1, int fd, unsigned long file_offset);
 ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte);
+ST_FUNC void tcc_add_symver_rec(TCCState *s1, const char *sym, const char *base, const char *version, int is_default);
 ST_FUNC void add_array(TCCState *s1, const char *sec, int c);
 
 ST_FUNC struct sym_attr *get_sym_attr(TCCState *s1, int index, int alloc);
