@@ -226,6 +226,7 @@ ST_INLN int is_float(int t)
     return bt == VT_LDOUBLE
         || bt == VT_DOUBLE
         || bt == VT_FLOAT
+        || bt == VT_F128
         || bt == VT_QFLOAT;
 }
 
@@ -1864,13 +1865,6 @@ ST_FUNC int gv(int rc)
     int r, r2, r_ok, r2_ok, rc2, bt;
     int bit_pos, bit_size, size, align;
 
-    /* F29: _Float128 is declaration-only.  Materializing a value
-       would need the TF128 codegen designed in PATCHES F29; fail
-       by name instead of miscompiling. */
-    if ((vtop->type.t & VT_BTYPE) == VT_F128)
-        tcc_error("_Float128 values are not supported yet "
-                  "(F29: declarations only)");
-
     /* NOTE: get_reg can modify vstack[] */
     if (vtop->type.t & VT_BITFIELD) {
         CType type;
@@ -2569,6 +2563,525 @@ gv2:
 }
 #endif
 
+
+/* ------------------------------------------------------------------------- */
+/* F34: _Float128 (TF128) code generation.
+   A _Float128 value rides the vstack as a single SSE register
+   (RC_FLOAT class, 16-byte movups moves in the backend), matching
+   the x86-64 psABI: arguments and results in one xmm register.
+   Arithmetic and the conversion matrix dispatch to the libgcc
+   TF128 helpers; constant conversions are computed exactly on
+   the pattern words. */
+
+static void gen_tf_call(int func, int nargs, int rett)
+{
+    vpush_helper_func(func);
+    vrott(nargs + 1);
+    gfunc_call(nargs);
+    vpushi(0);
+    vtop->type.t = rett;
+    vtop->type.ref = NULL;
+    PUT_R_RET(vtop, rett);
+}
+
+/* compare two binary128 patterns exactly (for constant folds):
+   -1/0/1, or -2 when either is a NaN (unordered) */
+static int f128c_cmp(const uint32_t *a, const uint32_t *b)
+{
+    int sa = (a[3] >> 31) & 1, sb = (b[3] >> 31) & 1;
+    int ea = (a[3] >> 16) & 0x7fff, eb = (b[3] >> 16) & 0x7fff;
+    int na = (ea == 0x7fff) && ((a[3] & 0xffff) || a[0] || a[1] || a[2]);
+    int nb = (eb == 0x7fff) && ((b[3] & 0xffff) || b[0] || b[1] || b[2]);
+    int za = !ea && !(a[3] & 0xffff) && !a[0] && !a[1] && !a[2];
+    int zb = !eb && !(b[3] & 0xffff) && !b[0] && !b[1] && !b[2];
+    int i, ma = 0, mb = 0;
+    if (na || nb)
+        return -2;
+    if (za && zb)
+        return 0;
+    if (sa != sb)
+        return sa ? -1 : 1;
+    for (i = 3; i >= 0; i--) {
+        uint32_t xa = (i == 3) ? (a[3] & 0x7fffffffu) : a[i];
+        uint32_t xb = (i == 3) ? (b[3] & 0x7fffffffu) : b[i];
+        if (xa != xb) { ma = xa > xb ? 1 : -1; break; }
+    }
+    if (sa)
+        ma = -ma;
+    (void)mb;
+    return ma;
+}
+
+static void gen_opf128(int op)
+{
+    int func, c1, c2, i;
+    if (op == TOK_NEG) {
+        if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST) {
+            /* exact: flip the sign bit of the pattern */
+            vtop->c.tab[3] ^= 0x80000000u;
+            return;
+        }
+        gen_tf_call(TOK___negtf2, 1, VT_F128);
+        return;
+    }
+    c1 = (vtop[-1].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
+    c2 = (vtop[0].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
+    if (c1 && c2) {
+        int r = f128c_cmp(vtop[-1].c.tab, vtop[0].c.tab);
+        switch (op) {
+        case TOK_EQ: i = (r == 0); break;
+        case TOK_NE: i = (r != 0); break;
+        case TOK_LT: i = (r == -1); break;
+        case TOK_LE: i = (r == -1 || r == 0); break;
+        case TOK_GT: i = (r == 1); break;
+        case TOK_GE: i = (r == 1 || r == 0); break;
+        default: goto runtime;
+        }
+        vtop -= 2;
+        vpushi(i);
+        return;
+    }
+runtime:
+    switch (op) {
+    case '+': func = TOK___addtf3; break;
+    case '-': func = TOK___subtf3; break;
+    case '*': func = TOK___multf3; break;
+    case '/': func = TOK___divtf3; break;
+    case TOK_EQ: func = TOK___eqtf2; goto cmp;
+    case TOK_NE: func = TOK___netf2; goto cmp;
+    case TOK_LT: func = TOK___lttf2; goto cmp;
+    case TOK_LE: func = TOK___letf2; goto cmp;
+    case TOK_GT: func = TOK___gttf2; goto cmp;
+    case TOK_GE: func = TOK___getf2; goto cmp;
+    default:
+        tcc_error("unsupported _Float128 operation (F34)");
+    }
+    gen_tf_call(func, 2, VT_F128);
+    return;
+cmp:
+    gen_tf_call(func, 2, VT_INT);
+    vpushi(0);
+    gen_opi(op);
+}
+
+/* ---- constant conversions on the pattern words ---- */
+
+/* decode the significand (with implicit bit for normals) as a
+   128-bit integer split in hi:lo, plus sign and unbiased exponent */
+static void f128c_sig(const uint32_t *p, int *sign, int *e,
+                      uint64_t *hi, uint64_t *lo)
+{
+    *sign = (p[3] >> 31) & 1;
+    /* invariant: value = sig * 2^(e-112); for subnormals (no
+       implicit bit) the effective exponent is -16382, not -16383 */
+    *e = ((p[3] >> 16) & 0x7fff) ? (int)((p[3] >> 16) & 0x7fff) - 16383 : -16382;
+    *lo = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+    *hi = (uint64_t)p[2] | ((uint64_t)(p[3] & 0xffff) << 32);
+    if (((p[3] >> 16) & 0x7fff) != 0)
+        *hi |= 1ULL << 48; /* implicit bit at position 112 */
+}
+
+/* round-to-nearest-even right shift of a 128-bit value by sh bits,
+   also accounting sticky_in */
+static void u128_shr_rne(uint64_t *hi, uint64_t *lo, int sh, int sticky_in)
+{
+    uint64_t dhi, dlo;
+    int guard = 0, rest, i;
+    if (sh <= 0)
+        return;
+    dhi = *hi; dlo = *lo;
+    rest = sticky_in;
+    for (i = 0; i < sh; i++) {
+        int bit = 0;
+        if (i < 64)
+            bit = (int)((dlo >> i) & 1);
+        else if (i < 128)
+            bit = (int)((dhi >> (i - 64)) & 1);
+        if (i == sh - 1)
+            guard = bit;
+        else if (bit)
+            rest = 1;
+    }
+    if (sh >= 128) {
+        *hi = *lo = 0;
+    } else if (sh >= 64) {
+        *lo = *hi >> (sh - 64);
+        *hi = 0;
+    } else {
+        *lo = (*lo >> sh) | (*hi << (64 - sh));
+        *hi = *hi >> sh;
+    }
+    if (guard && (rest || (*lo & 1))) {
+        *lo += 1;
+        if (!*lo)
+            *hi += 1;
+    }
+}
+
+static void f128c_pack_from_sig(uint32_t *out, int sign, int e,
+                                uint64_t hi, uint64_t lo)
+{
+    /* the significand occupies the low 113 bits of hi:lo */
+    out[0] = (uint32_t)lo;
+    out[1] = (uint32_t)(lo >> 32);
+    out[2] = (uint32_t)hi;
+    out[3] = ((uint32_t)sign << 31) | ((uint32_t)(e + 16383) << 16)
+           | (uint32_t)(hi >> 32) & 0xffffu;
+}
+
+/* integer (v interpreted per the source type's width by the caller)
+   -> binary128: always exact */
+static void f128c_from_int(uint32_t *out, uint64_t mag, int sign)
+{
+    int top;
+    uint64_t hi, lo;
+    if (mag == 0) {
+        out[0] = out[1] = out[2] = out[3] = 0;
+        return;
+    }
+    top = 63;
+    while (!((mag >> top) & 1))
+        top--;
+    /* significand = mag << (112 - top) */
+    if (112 - top >= 64) {
+        hi = mag << (112 - top - 64);
+        lo = 0;
+    } else {
+        hi = mag >> (64 - (112 - top));
+        lo = mag << (112 - top);
+    }
+    f128c_pack_from_sig(out, sign, top, hi, lo);
+}
+
+/* binary128 -> integer bits (truncation); *ovf on range overflow */
+static uint64_t f128c_to_int(const uint32_t *p, int *ovf, int *isnan)
+{
+    int sign, e;
+    uint64_t hi, lo;
+    *ovf = 0; *isnan = 0;
+    if (((p[3] >> 16) & 0x7fff) == 0x7fff) {
+        if ((p[3] & 0xffff) || p[0] || p[1] || p[2])
+            *isnan = 1;
+        *ovf = 1;
+        return 0;
+    }
+    f128c_sig(p, &sign, &e, &hi, &lo);
+    if (e < 0)
+        return 0;
+    if (e >= 112) {
+        /* value >= 2^112, far past uint64 */
+        if (hi || lo)
+            *ovf = 1;
+        return 0;
+    }
+    /* value = sig >> (112 - e), plain truncating shift */
+    {
+        int sh = 112 - e;
+        if (sh >= 64) { lo = hi >> (sh - 64); hi = 0; }
+        else { lo = (lo >> sh) | (hi << (64 - sh)); hi >>= sh; }
+    }
+    if (hi)
+        *ovf = 1;
+    (void)sign;
+    return lo;
+}
+
+/* binary32/64 pattern -> binary128: always exact */
+static void f128c_from_ieee(uint32_t *out, uint64_t bits, int is64)
+{
+    int sign, p = is64 ? 53 : 24, bias = is64 ? 1023 : 127;
+    int ebits = is64 ? 11 : 8;
+    uint64_t frac, sig;
+    int e;
+    uint64_t hi, lo;
+    sign = (int)(bits >> (is64 ? 63 : 31)) & 1;
+    e = (int)((bits >> (p - 1)) & ((1 << ebits) - 1));
+    frac = bits & ((1ULL << (p - 1)) - 1);
+    if (e == (1 << ebits) - 1) {
+        /* inf / nan: the payload widens into the top fraction
+           bits (frac << (113 - p)) */
+        out[0] = out[1] = out[2] = 0;
+        out[3] = ((uint32_t)sign << 31) | 0x7fff0000u;
+        if (frac) {
+            if (is64) {
+                out[1] = (uint32_t)(frac << 28);
+                out[2] = (uint32_t)(frac >> 4);
+                out[3] |= (uint32_t)(frac >> 36);
+            } else {
+                out[2] = (uint32_t)(frac << 25);
+                out[3] |= (uint32_t)(frac >> 7);
+            }
+        }
+        return;
+    }
+    if (e == 0 && frac == 0) {
+        out[0] = out[1] = out[2] = 0;
+        out[3] = (uint32_t)sign << 31;
+        return;
+    }
+    if (e == 0) {
+        /* subnormal source: normalize */
+        sig = frac;
+        e = 1 - bias;
+        while (!(sig & (1ULL << (p - 1)))) {
+            sig <<= 1;
+            e--;
+        }
+    } else {
+        sig = frac | (1ULL << (p - 1));
+        e = e - bias;
+    }
+    /* significand = sig << (113 - p) */
+    {
+        int sh = 113 - p;
+        if (sh >= 64) { hi = sig << (sh - 64); lo = 0; }
+        else { hi = sig >> (64 - sh); lo = sig << sh; }
+    }
+    f128c_pack_from_sig(out, sign, e, hi, lo);
+}
+
+/* binary128 -> binary32/64 pattern, round-to-nearest-even */
+static uint64_t f128c_to_ieee(const uint32_t *p, int is64)
+{
+    int sign, e, prec = is64 ? 53 : 24, bias = is64 ? 1023 : 127;
+    int emin = 1 - bias, emax = bias;
+    uint64_t hi, lo, sig, result;
+    int raw_exp = (int)((p[3] >> 16) & 0x7fff);
+    sign = (p[3] >> 31) & 1;
+    if (raw_exp == 0x7fff) {
+        /* inf / nan */
+        result = ((uint64_t)sign << (is64 ? 63 : 31))
+               | ((uint64_t)((1 << (is64 ? 11 : 8)) - 1) << (prec - 1));
+        if ((p[3] & 0xffff) || p[0] || p[1] || p[2]) {
+            /* nan: set the quiet bit */
+            result |= 1ULL << (prec - 2);
+        }
+        return is64 ? result : (result & 0xffffffffu);
+    }
+    f128c_sig(p, &sign, &e, &hi, &lo);
+    if (raw_exp == 0 && hi == 0 && lo == 0)
+        return (uint64_t)sign << (is64 ? 63 : 31);
+    if (e >= emin) {
+        u128_shr_rne(&hi, &lo, 113 - prec, 0);
+        sig = lo;
+        if (hi || (sig >> prec)) {
+            /* rounding carried out: renormalize */
+            sig >>= 1;
+            e++;
+        }
+        if (e > emax) {
+            result = ((uint64_t)sign << (is64 ? 63 : 31))
+                   | ((uint64_t)((1 << (is64 ? 11 : 8)) - 1) << (prec - 1));
+            return is64 ? result : (result & 0xffffffffu);
+        }
+        result = ((uint64_t)sign << (is64 ? 63 : 31))
+               | ((uint64_t)(e + bias) << (prec - 1))
+               | (sig & ((1ULL << (prec - 1)) - 1));
+    } else {
+        /* subnormal target or zero: sig * 2^(e-112), target LSB is
+           2^(emin-(p-1)); sh > 0 always here */
+        int sh = (emin - (prec - 1)) - (e - 112);
+        u128_shr_rne(&hi, &lo, sh, 0);
+        sig = lo;
+        if (sig >= (1ULL << (prec - 1))) {
+            /* rounded up to the smallest normal */
+            result = ((uint64_t)sign << (is64 ? 63 : 31))
+                   | (1ULL << (prec - 1));
+        } else {
+            result = ((uint64_t)sign << (is64 ? 63 : 31)) | sig;
+        }
+    }
+    return is64 ? result : (result & 0xffffffffu);
+}
+
+static long double f128c_to_ld(const uint32_t *p)
+{
+    int sign, e;
+    uint64_t hi, lo;
+    int raw_exp = (int)((p[3] >> 16) & 0x7fff);
+    sign = (p[3] >> 31) & 1;
+    if (raw_exp == 0x7fff) {
+        if ((p[3] & 0xffff) || p[0] || p[1] || p[2])
+            return sign ? -NAN : NAN;
+        return sign ? -INFINITY : INFINITY;
+    }
+    f128c_sig(p, &sign, &e, &hi, &lo);
+    if (raw_exp == 0 && hi == 0 && lo == 0)
+        return sign ? -0.0L : 0.0L;
+    /* round the 113-bit significand to 64 bits (RNE), then scale */
+    u128_shr_rne(&hi, &lo, 49, 0);
+    return ldexpl((long double)lo * (sign ? -1 : 1), e - 63);
+}
+
+static void f128c_from_ld(uint32_t *out, long double v)
+{
+    int e, sign = 0;
+    long double f;
+    uint64_t m;
+    if (v == 0) {
+        out[0] = out[1] = out[2] = 0;
+        out[3] = signbit(v) ? 0x80000000u : 0;
+        return;
+    }
+    if (!isfinite(v)) {
+        out[0] = out[1] = out[2] = 0;
+        out[3] = (signbit(v) ? 0x80000000u : 0) | 0x7fff0000u;
+        if (isnan(v))
+            out[3] |= 0x8000u;
+        return;
+    }
+    if (v < 0) { sign = 1; v = -v; }
+    f = frexpl(v, &e); /* v = f * 2^e, f in [0.5, 1) */
+    m = (uint64_t)ldexpl(f, 64); /* exact: 64-bit significand */
+    /* value = m * 2^(e-64); as a 113-bit significand that is
+       m << 49, and the unbiased exponent is e - 1 */
+    {
+        uint64_t hi = m >> 15, lo = m << 49;
+        f128c_pack_from_sig(out, sign, e - 1, hi, lo);
+    }
+}
+
+/* constant conversion involving _Float128: vtop holds a VT_CONST;
+   produce the converted constant in vtop->c (the caller stamps
+   the destination type) */
+static void f128c_const_convert(int sbt, int dbt)
+{
+    int sbt_bt = sbt & VT_BTYPE, dbt_bt = dbt & VT_BTYPE;
+    uint32_t out[4];
+    if (dbt_bt == VT_F128) {
+        if (sbt_bt == VT_FLOAT) {
+            uint32_t b;
+            memcpy(&b, &vtop->c.f, 4);
+            f128c_from_ieee(out, b, 0);
+        } else if (sbt_bt == VT_DOUBLE) {
+            uint64_t b;
+            memcpy(&b, &vtop->c.d, 8);
+            f128c_from_ieee(out, b, 1);
+        } else if (sbt_bt == VT_LDOUBLE) {
+            f128c_from_ld(out, vtop->c.ld);
+        } else {
+            /* integer source: width/sign per the source type */
+            uint64_t mag;
+            int sign = 0;
+            if (sbt_bt == VT_LLONG || sbt_bt == VT_PTR) {
+                sign = !(sbt & VT_UNSIGNED) && ((int64_t)vtop->c.i < 0);
+                mag = sign ? -vtop->c.i : vtop->c.i;
+            } else {
+                uint32_t v32 = (uint32_t)vtop->c.i;
+                sign = !(sbt & VT_UNSIGNED) && ((int32_t)v32 < 0);
+                mag = sign ? -(uint64_t)(int64_t)(int32_t)v32 : v32;
+            }
+            f128c_from_int(out, mag, sign);
+        }
+        memcpy(vtop->c.tab, out, 16);
+        return;
+    }
+    /* source is _Float128 */
+    if (dbt_bt == VT_FLOAT) {
+        uint64_t b = f128c_to_ieee(vtop->c.tab, 0);
+        uint32_t b32 = (uint32_t)b;
+        memcpy(&vtop->c.f, &b32, 4);
+    } else if (dbt_bt == VT_DOUBLE) {
+        uint64_t b = f128c_to_ieee(vtop->c.tab, 1);
+        memcpy(&vtop->c.d, &b, 8);
+    } else if (dbt_bt == VT_LDOUBLE) {
+        vtop->c.ld = f128c_to_ld(vtop->c.tab);
+    } else if (dbt_bt == VT_BOOL) {
+        const uint32_t *p = vtop->c.tab;
+        vtop->c.i = (p[0] || p[1] || p[2] || (p[3] & 0x7fffffffu)) != 0;
+    } else {
+        /* integer target: clamp to the target's range the way the
+           libgcc __fixtfsi/__fixtfdi family saturates */
+        int ovf, isnan, sign;
+        uint64_t mag, tmax, bits;
+        int64_t tmin;
+        sign = (vtop->c.tab[3] >> 31) & 1;
+        mag = f128c_to_int(vtop->c.tab, &ovf, &isnan);
+        if (dbt & VT_UNSIGNED) {
+            tmin = 0;
+            tmax = (dbt_bt == VT_LLONG) ? ~0ULL
+                 : (dbt_bt == VT_INT) ? 0xffffffffULL
+                 : (dbt_bt == VT_SHORT) ? 0xffffULL : 0xffULL;
+        } else {
+            tmin = (dbt_bt == VT_LLONG) ? INT64_MIN
+                 : (dbt_bt == VT_INT) ? (int64_t)INT32_MIN
+                 : (dbt_bt == VT_SHORT) ? -32768 : -128;
+            tmax = (dbt_bt == VT_LLONG) ? (uint64_t)INT64_MAX
+                 : (dbt_bt == VT_INT) ? 0x7fffffffULL
+                 : (dbt_bt == VT_SHORT) ? 0x7fffULL : 0x7fULL;
+        }
+        if (isnan)
+            bits = 0;
+        else if (dbt & VT_UNSIGNED) {
+            /* a negative value converts to 0 (__fixunstfsi) */
+            bits = sign ? 0 : ((ovf || mag > tmax) ? tmax : mag);
+        } else if (sign) {
+            uint64_t tminmag = (uint64_t)(-(tmin + 1)) + 1;
+            bits = (ovf || mag > tminmag) ? (uint64_t)tmin : -mag;
+        } else {
+            bits = (ovf || mag > tmax) ? tmax : mag;
+        }
+        vtop->c.i = bits;
+    }
+}
+
+/* runtime conversion involving _Float128 (non-constant vtop);
+   the value is produced with the destination type's registers,
+   narrowed further by the caller's normal cast path when the
+   destination is a sub-int type */
+static void gen_cvt_f128(int sbt, int dbt)
+{
+    int sbt_bt = sbt & VT_BTYPE, dbt_bt = dbt & VT_BTYPE, func;
+    if (dbt_bt == VT_F128) {
+        switch (sbt_bt) {
+        case VT_FLOAT: func = TOK___extendsftf2; break;
+        case VT_DOUBLE: func = TOK___extenddftf2; break;
+        case VT_LDOUBLE: func = TOK___extendxftf2; break;
+        case VT_LLONG:
+        case VT_PTR:
+            func = (sbt & VT_UNSIGNED) ? TOK___floatunditf : TOK___floatditf;
+            break;
+        default:
+            gen_cast_s((sbt & VT_UNSIGNED) ? (VT_INT | VT_UNSIGNED) : VT_INT);
+            func = (sbt & VT_UNSIGNED) ? TOK___floatunsitf : TOK___floatsitf;
+            break;
+        }
+        gen_tf_call(func, 1, VT_F128);
+        return;
+    }
+    switch (dbt_bt) {
+    case VT_FLOAT: gen_tf_call(TOK___trunctfsf2, 1, VT_FLOAT); return;
+    case VT_DOUBLE: gen_tf_call(TOK___trunctfdf2, 1, VT_DOUBLE); return;
+    case VT_LDOUBLE: gen_tf_call(TOK___trunctfxf2, 1, VT_LDOUBLE); return;
+    case VT_BOOL: {
+        /* any nonzero value converts to 1, even one that would
+           underflow double on the way; compare at F128 precision */
+        CType zt; CValue zv;
+        memset(&zv, 0, sizeof zv);
+        zt.t = VT_F128; zt.ref = NULL;
+        vsetc(&zt, VT_CONST, &zv);
+        gen_tf_call(TOK___netf2, 2, VT_INT);
+        vpushi(0);
+        gen_opi(TOK_NE);
+        gen_cast_s(VT_BOOL);
+        return;
+    }
+    case VT_LLONG:
+        gen_tf_call((dbt & VT_UNSIGNED) ? TOK___fixunstfdi : TOK___fixtfdi,
+                    1, VT_LLONG | (dbt & VT_UNSIGNED));
+        return;
+    default:
+        gen_tf_call((dbt & VT_UNSIGNED) ? TOK___fixunstfsi : TOK___fixtfsi,
+                    1, VT_INT | (dbt & VT_UNSIGNED));
+        if (dbt_bt != VT_INT) {
+            CType t2;
+            t2.t = dbt; t2.ref = NULL;
+            gen_cast(&t2);
+        }
+        return;
+    }
+}
+
 /* generate a floating point operation with constant propagation */
 static void gen_opif(int op)
 {
@@ -2585,6 +3098,11 @@ static void gen_opif(int op)
     if (op == TOK_NEG)
         v1 = v2;
     bt = v1->type.t & VT_BTYPE;
+
+    if (bt == VT_F128) {
+        gen_opf128(op);
+        return;
+    }
 
     /* currently, we cannot do computations with forward symbols */
     c1 = (v1->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
@@ -3038,7 +3556,9 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
           ret = 0;
         type = *type1;
     } else if (is_float(bt1) || is_float(bt2)) {
-        if (bt1 == VT_LDOUBLE || bt2 == VT_LDOUBLE) {
+        if (bt1 == VT_F128 || bt2 == VT_F128) {
+            type.t = VT_F128;
+        } else if (bt1 == VT_LDOUBLE || bt2 == VT_LDOUBLE) {
             type.t = VT_LDOUBLE;
         } else if (bt1 == VT_DOUBLE || bt2 == VT_DOUBLE) {
             type.t = VT_DOUBLE;
@@ -3325,6 +3845,18 @@ error:
         if (df && !sf && !is_integer_btype(sbt_bt))
             goto error;
         c = (vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
+        if (sbt_bt == VT_F128 || dbt_bt == VT_F128) {
+            /* F34: _Float128 conversions */
+            if (c) {
+                f128c_const_convert(sbt, dbt);
+            } else if (nocode_wanted & DATA_ONLY_WANTED) {
+                if (df)
+                    vtop->r = get_reg(RC_FLOAT); /* don't confuse backends */
+            } else {
+                gen_cvt_f128(sbt, dbt);
+            }
+            goto done;
+        }
         if (c) {
             /* constant case: we can do it now */
             /* XXX: in ISOC, cannot do it if error in convert */
@@ -5578,13 +6110,6 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
     int func_type;
     CType type;
 
-    /* F29: an _Float128 argument would reach the ABI classifier,
-       which has no class for it; fail by name first.  An actual
-       _Float128 expression errors in gv() before this point, so
-       this catches arguments whose declared parameter type is
-       _Float128 regardless of the expression's shape. */
-    if (arg && (arg->type.t & VT_BTYPE) == VT_F128)
-        tcc_error("_Float128 arguments are not supported yet (F29)");
 
     func_type = func->f.func_type;
     if (func_type == FUNC_OLD ||
@@ -5966,6 +6491,9 @@ ST_FUNC void unary(void)
 #else
         t = VT_LDOUBLE;
 #endif
+	goto push_tokc;
+    case TOK_CF128:
+        t = VT_F128;
 	goto push_tokc;
     case TOK_CLONG:
         t = (LONG_SIZE == 8 ? VT_LLONG : VT_INT) | VT_LONG;
@@ -8468,9 +8996,6 @@ static void write_ldouble(unsigned char *d, void *s)
 static void init_putv(init_params *p, CType *type, unsigned long c)
 {
     int bt;
-    if ((type->t & VT_BTYPE) == VT_F128)
-        tcc_error("initializers for _Float128 are not supported "
-                  "yet (F29)");
     void *ptr;
     CType dtype;
     int size, align;
@@ -8580,6 +9105,10 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
 		break;
 	    case VT_LDOUBLE:
                 write_ldouble(ptr, &vtop->c.ld);
+		break;
+	    case VT_F128:
+                /* F34: the pattern words are in host order */
+                memcpy(ptr, vtop->c.tab, 16);
 		break;
 
 #if PTR_SIZE == 8

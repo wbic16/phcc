@@ -601,6 +601,8 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
         return strcpy(p, "<double>");
     case TOK_CLDOUBLE:
         return strcpy(p, "<long double>");
+    case TOK_CF128:
+        return strcpy(p, "<float128>");
     case TOK_LINENUM:
         return strcpy(p, "<linenumber>");
 
@@ -1011,6 +1013,8 @@ static inline int tok_size(const int *p)
         return 1 + 2;
     case TOK_CLDOUBLE:
         return 1 + LDOUBLE_WORDS;
+    case TOK_CF128:
+        return 1 + 4;
     default:
         return 1 + 0;
     }
@@ -1159,6 +1163,11 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
         str[len++] = cv->tab[2];
         if (LDOUBLE_WORDS >= 4)
         str[len++] = cv->tab[3];
+    case TOK_CF128:
+        str[len++] = cv->tab[0];
+        str[len++] = cv->tab[1];
+        str[len++] = cv->tab[2];
+        str[len++] = cv->tab[3];
     default:
         break;
     }
@@ -1237,6 +1246,9 @@ static inline void tok_get(int *t, const int **pp, CValue *cv)
         goto copy;
     case TOK_CLDOUBLE:
         n = LDOUBLE_WORDS;
+        goto copy;
+    case TOK_CF128:
+        n = 4;
     copy:
         do
             *tab++ = *p++;
@@ -2347,11 +2359,326 @@ static void bn_zero(unsigned int *bn)
 
 /* parse number in null terminated string 'p' and return it in the
    current token */
+
+/* ------------------------------------------------------------------------- */
+/* F34: exact decimal/hex -> IEEE binary128 conversion for f128 literals.
+   The host long double is 80-bit and cannot hold these values, so the
+   conversion is done on a small bignum: the literal's value is built as
+   an exact integer significand times a power of two (decimal exponents
+   go through an exact division by 10^k), then packed with
+   round-to-nearest-even, subnormals included. */
+#define F128_BN_WORDS 640 /* 20480 bits: enough for 10^4932 headroom */
+typedef struct { uint32_t w[F128_BN_WORDS]; } F128BN;
+
+static void f128bn_zero(F128BN *a)
+{
+    memset(a->w, 0, sizeof a->w);
+}
+
+static int f128bn_bitlen(const F128BN *a)
+{
+    int i;
+    for (i = F128_BN_WORDS - 1; i >= 0; i--) {
+        uint32_t x = a->w[i];
+        if (x) {
+            int b = i * 32 + 32;
+            while (!(x & 0x80000000u)) { x <<= 1; b--; }
+            return b;
+        }
+    }
+    return 0;
+}
+
+static int f128bn_getbit(const F128BN *a, int i)
+{
+    if (i < 0 || i >= F128_BN_WORDS * 32)
+        return 0;
+    return (a->w[i >> 5] >> (i & 31)) & 1;
+}
+
+static void f128bn_mul_u32(F128BN *a, uint32_t m)
+{
+    uint64_t carry = 0;
+    int i;
+    for (i = 0; i < F128_BN_WORDS; i++) {
+        uint64_t cur = (uint64_t)a->w[i] * m + carry;
+        a->w[i] = (uint32_t)cur;
+        carry = cur >> 32;
+    }
+    /* a carry out of the top word means the value outgrew the buffer;
+       parse_binary128's callers keep inputs far below this (the
+       product saturates the top word, which the pack step reads as
+       overflow to infinity for the multiply-by-10^E path). */
+    if (carry)
+        a->w[F128_BN_WORDS - 1] |= 0x80000000u;
+}
+
+static void f128bn_add_u32(F128BN *a, uint32_t v)
+{
+    uint64_t carry = v;
+    int i;
+    for (i = 0; carry && i < F128_BN_WORDS; i++) {
+        uint64_t cur = (uint64_t)a->w[i] + carry;
+        a->w[i] = (uint32_t)cur;
+        carry = cur >> 32;
+    }
+}
+
+static int f128bn_cmp(const F128BN *a, const F128BN *b)
+{
+    int i;
+    for (i = F128_BN_WORDS - 1; i >= 0; i--) {
+        if (a->w[i] != b->w[i])
+            return a->w[i] > b->w[i] ? 1 : -1;
+    }
+    return 0;
+}
+
+/* a -= b; requires a >= b */
+static void f128bn_sub(F128BN *a, const F128BN *b)
+{
+    uint64_t borrow = 0;
+    int i;
+    for (i = 0; i < F128_BN_WORDS; i++) {
+        uint64_t cur = (uint64_t)a->w[i] - b->w[i] - borrow;
+        a->w[i] = (uint32_t)cur;
+        borrow = (cur >> 63) & 1;
+    }
+}
+
+static void f128bn_shl(F128BN *a, int k)
+{
+    int words, bits, i;
+    if (k <= 0)
+        return;
+    words = k >> 5;
+    bits = k & 31;
+    for (i = F128_BN_WORDS - 1; i >= 0; i--) {
+        uint32_t lo = 0, hi = 0;
+        if (i - words >= 0) {
+            lo = a->w[i - words] << bits;
+            if (bits && i - words - 1 >= 0)
+                hi = a->w[i - words - 1] >> (32 - bits);
+        }
+        a->w[i] = lo | hi;
+    }
+}
+
+/* shift right by k bits; returns the OR of all dropped bits */
+static int f128bn_shr_sticky(F128BN *a, int k)
+{
+    int sticky = 0, words, bits, i;
+    if (k <= 0)
+        return 0;
+    words = k >> 5;
+    bits = k & 31;
+    /* the dropped region is bits [0, k) of the original value */
+    sticky = 0;
+    for (i = 0; i < k && i < F128_BN_WORDS * 32; i++)
+        if (f128bn_getbit(a, i))
+            sticky = 1;
+    for (i = 0; i < F128_BN_WORDS; i++) {
+        uint32_t lo = 0, hi = 0;
+        if (i + words < F128_BN_WORDS) {
+            lo = a->w[i + words] >> bits;
+            if (bits && i + words + 1 < F128_BN_WORDS)
+                hi = a->w[i + words + 1] << (32 - bits);
+        }
+        a->w[i] = lo | hi;
+    }
+    return sticky;
+}
+
+/* Round the exact value sig * 2^lsb_exp (+ sticky tail) to binary128
+   and write the 4 pattern words (host order, w[3] most significant). */
+static void f128_pack(int sign, F128BN *sig, int lsb_exp, int sticky,
+                      uint32_t out[4])
+{
+    int L, e, sh, guard, rest;
+    out[0] = out[1] = out[2] = out[3] = 0;
+    L = f128bn_bitlen(sig);
+    if (L == 0) {
+        out[3] = (uint32_t)sign << 31;
+        return;
+    }
+    e = (L - 1) + lsb_exp; /* unbiased exponent of the top bit */
+    if (e >= -16382) {
+        /* normal: reduce the significand to exactly 113 bits */
+        sh = L - 113;
+        if (sh > 0) {
+            int i;
+            guard = f128bn_getbit(sig, sh - 1);
+            rest = sticky;
+            for (i = 0; i < sh - 1; i++)
+                if (f128bn_getbit(sig, i))
+                    rest = 1;
+            f128bn_shr_sticky(sig, sh);
+            if (guard && (rest || f128bn_getbit(sig, 0)))
+                f128bn_add_u32(sig, 1);
+            if (f128bn_bitlen(sig) > 113) {
+                f128bn_shr_sticky(sig, 1);
+                e++;
+            }
+        } else if (sh < 0) {
+            f128bn_shl(sig, -sh);
+        }
+        if (e > 16383) {
+            /* overflow: infinity */
+            out[3] = ((uint32_t)sign << 31) | 0x7fff0000u;
+            return;
+        }
+        out[0] = sig->w[0];
+        out[1] = sig->w[1];
+        out[2] = sig->w[2];
+        out[3] = ((uint32_t)sign << 31) | ((uint32_t)(e + 16383) << 16)
+               | (sig->w[3] & 0xffffu);
+    } else {
+        /* subnormal or zero: the result LSB weighs 2^-16494;
+           sh is the number of significand bits to DROP */
+        sh = -lsb_exp - 16494;
+        if (sh > 0) {
+            guard = f128bn_getbit(sig, sh - 1);
+            rest = sticky;
+            {
+                int i;
+                for (i = 0; i < sh - 1; i++)
+                    if (f128bn_getbit(sig, i))
+                        rest = 1;
+            }
+            f128bn_shr_sticky(sig, sh);
+            if (guard && (rest || f128bn_getbit(sig, 0)))
+                f128bn_add_u32(sig, 1);
+        } else if (sh < 0) {
+            f128bn_shl(sig, -sh);
+        }
+        if (f128bn_bitlen(sig) > 112) {
+            /* rounded up to the smallest normal */
+            out[3] = ((uint32_t)sign << 31) | (1u << 16);
+            return;
+        }
+        out[0] = sig->w[0];
+        out[1] = sig->w[1];
+        out[2] = sig->w[2];
+        out[3] = ((uint32_t)sign << 31) | (sig->w[3] & 0xffffu);
+    }
+}
+
+/* exact quotient: q = floor(num / den) with the quotient scaled to
+   about 118 bits; *rem_nonzero reports whether a remainder exists.
+   The returned q satisfies value = q * 2^lsb + fraction, computed by
+   the caller from the returned shift. */
+static void f128_divmod_scaled(F128BN *q, const F128BN *num,
+                               const F128BN *den, int *lsb_exp,
+                               int *rem_nonzero)
+{
+    F128BN rem, dsh;
+    int e_est, s, i, top;
+    e_est = f128bn_bitlen(num) - f128bn_bitlen(den);
+    /* value = num/den * 2^0; choose s so q = floor(num * 2^s / den)
+       has 118 or 119 bits */
+    s = 118 - e_est;
+    rem = *num;
+    if (s >= 0)
+        f128bn_shl(&rem, s);
+    else
+        f128bn_shr_sticky(&rem, -s);
+    f128bn_zero(q);
+    top = f128bn_bitlen(&rem) - f128bn_bitlen(den);
+    for (i = top; i >= 0; i--) {
+        dsh = *den;
+        f128bn_shl(&dsh, i);
+        if (f128bn_cmp(&rem, &dsh) >= 0) {
+            f128bn_sub(&rem, &dsh);
+            q->w[i >> 5] |= 1u << (i & 31);
+        }
+    }
+    *lsb_exp = -s;
+    *rem_nonzero = f128bn_bitlen(&rem) != 0;
+}
+
+/* Parse a decimal literal body (digits, optional '.', optional
+   exponent; the text strtod would accept) into a binary128 pattern. */
+static void f128_from_decimal(const char *str, uint32_t out[4])
+{
+    static F128BN a, den, q;
+    const char *p = str;
+    int frac_digits = 0, exp10 = 0, esign = 1, ndig = 0, i;
+    int lsb_exp, sticky;
+    f128bn_zero(&a);
+    while (*p >= '0' && *p <= '9') {
+        f128bn_mul_u32(&a, 10);
+        f128bn_add_u32(&a, *p++ - '0');
+        ndig++;
+    }
+    if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9') {
+            f128bn_mul_u32(&a, 10);
+            f128bn_add_u32(&a, *p++ - '0');
+            frac_digits++;
+            ndig++;
+        }
+    }
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '-') { esign = -1; p++; }
+        else if (*p == '+') p++;
+        while (*p >= '0' && *p <= '9')
+            exp10 = exp10 * 10 + (*p++ - '0');
+    }
+    exp10 = exp10 * esign - frac_digits;
+    if (exp10 > 20000) {
+        /* far beyond the binary128 range: infinity */
+        out[0] = out[1] = out[2] = 0;
+        out[3] = 0x7fff0000u;
+        return;
+    }
+    if (exp10 < -20000) {
+        out[0] = out[1] = out[2] = out[3] = 0;
+        return;
+    }
+    if (f128bn_bitlen(&a) == 0 || ndig == 0) {
+        out[0] = out[1] = out[2] = out[3] = 0;
+        return;
+    }
+    if (exp10 >= 0) {
+        for (i = 0; i < exp10; i++)
+            f128bn_mul_u32(&a, 10);
+        f128_pack(0, &a, 0, 0, out);
+    } else {
+        f128bn_zero(&den);
+        f128bn_add_u32(&den, 1);
+        for (i = 0; i < -exp10; i++)
+            f128bn_mul_u32(&den, 10);
+        f128_divmod_scaled(&q, &a, &den, &lsb_exp, &sticky);
+        f128_pack(0, &q, lsb_exp, sticky, out);
+    }
+}
+
+/* Parse an integer of hex digits (the concatenated integer+fraction
+   digits parse_number collected) scaled by 2^bin_exp. */
+static void f128_from_hex(const char *digits, int bin_exp, uint32_t out[4])
+{
+    static F128BN a;
+    const char *p = digits;
+    f128bn_zero(&a);
+    while (*p) {
+        int t = *p++;
+        if (t >= 'a') t = t - 'a' + 10;
+        else if (t >= 'A') t = t - 'A' + 10;
+        else t = t - '0';
+        f128bn_mul_u32(&a, 16);
+        f128bn_add_u32(&a, t);
+    }
+    f128_pack(0, &a, bin_exp, 0, out);
+}
+
 static void parse_number(const char *p)
 {
     int b, t, shift, frac_bits, s, exp_val, ch;
     char *q;
     unsigned int bn[BN_SIZE];
+    int f128_nfrac;
     long double d;
 
     /* number */
@@ -2404,6 +2731,7 @@ static void parse_number(const char *p)
             /* hexadecimal or binary floats */
             /* XXX: handle overflows */
             frac_bits = 0;
+            f128_nfrac = 0;
             *q = '\0';
             if (b == 16)
                 shift = 4;
@@ -2426,6 +2754,7 @@ static void parse_number(const char *p)
             }
             if (ch == '.') {
                 ch = *p++;
+                q--; /* onto the NUL: fraction digits extend it (F34) */
                 while (1) {
                     t = ch;
                     if (t >= 'a' && t <= 'f') {
@@ -2439,10 +2768,15 @@ static void parse_number(const char *p)
                     }
                     if (t >= b)
                         tcc_error("invalid digit");
+                    if (q >= token_buf + STRING_MAX_SIZE)
+                        goto num_too_long;
+                    *q++ = ch;
+                    f128_nfrac++;
                     frac_bits -= bn_lshift(bn, shift, t);
                     frac_bits += shift;
                     ch = *p++;
                 }
+                *q = '\0';
             }
             if (ch != 'p' && ch != 'P')
                 expect("exponent");
@@ -2466,6 +2800,18 @@ static void parse_number(const char *p)
             exp_val = exp_val * s;
 
             /* now we can generate the number */
+            t = toup(ch);
+            if (b == 16 && t == 'F' && p[0] == '1' && p[1] == '2' && p[2] == '8') {
+                /* F34: _Float128 hex literal: convert exactly from
+                   the collected digits (integer and fraction) and
+                   the binary scale counted from them, not from bn
+                   (bn drops digits past 128 bits) */
+                ch = p[3];
+                p += 4;
+                tok = TOK_CF128;
+                f128_from_hex(token_buf, exp_val - shift * f128_nfrac, tokc.tab);
+                return;
+            }
             /* XXX: should patch directly float number */
             d = (long double)bn[3] * 79228162514264337593543950336.0L +
 	        (long double)bn[2] * 18446744073709551616.0L +
@@ -2524,7 +2870,15 @@ static void parse_number(const char *p)
             *q = '\0';
             t = toup(ch);
             errno = 0;
-            if (t == 'F') {
+            if (t == 'F' && p[0] == '1' && p[1] == '2' && p[2] == '8') {
+                /* F34: _Float128 decimal literal: exact conversion,
+                   the host long double cannot hold the value */
+                ch = p[3];
+                p += 4;
+                tok = TOK_CF128;
+                f128_from_decimal(token_buf, tokc.tab);
+                return;
+            } else if (t == 'F') {
                 ch = *p++;
                 tok = TOK_CFLOAT;
                 tokc.f = strtof(token_buf, NULL);

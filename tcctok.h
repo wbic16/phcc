@@ -320,8 +320,11 @@
 #ifdef TCC_TARGET_RISCV64
      DEF(TOK___riscv64_clear_cache, "__riscv64_clear_cache")
 #endif
-#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64
+/* TF128 helper tokens (F34 uses them on x86-64 too; the tokens
+   are target-independent names for libgcc entry points) */
      DEF(TOK___addtf3, "__addtf3")
+     DEF(TOK___extendxftf2, "__extendxftf2")
+     DEF(TOK___trunctfxf2, "__trunctfxf2")
      DEF(TOK___subtf3, "__subtf3")
      DEF(TOK___multf3, "__multf3")
      DEF(TOK___divtf3, "__divtf3")
@@ -344,7 +347,6 @@
      DEF(TOK___letf2, "__letf2")
      DEF(TOK___gttf2, "__gttf2")
      DEF(TOK___getf2, "__getf2")
-#endif
 
 /* bound checking symbols */
 #ifdef CONFIG_TCC_BCHECK

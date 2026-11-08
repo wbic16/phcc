@@ -3108,8 +3108,16 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
             tcc_add_library(s1, "c");
         }
 #if !defined(TCC_TARGET_MACHO)
-        if (s1->static_link) {
-            /* Static links got no libgcc at all from the TCC_LIBGCC
+        if (1) {
+            /* F34: dynamic links search libgcc.a too -- the TF128
+               helpers (__addtf3 and family) live only in the
+               archive, not in libgcc_s.so, exactly as with the GNU
+               driver, which links -lgcc in both modes (the archive
+               contributes members only for still-undefined
+               symbols).  gcc_eh stays static-only: dynamic
+               unwinding comes from libgcc_s.  The original F26
+               case continues below.
+               Static links got no libgcc at all from the TCC_LIBGCC
                block above (it is dynamic-only), but glibc's own
                archive members reference its runtime: the TF128
                compares (__letf2, __unordtf2, ...) from printf_fp.o
@@ -3153,9 +3161,9 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
 #endif
             if (have_gcc_dir) {
                 static const char *const gcc_ar[] = { "gcc", "gcc_eh" };
-                int ai, added = 0;
+                int ai, added = 0, na = s1->static_link ? 2 : 1;
                 tcc_add_library_path(s1, gcc_dir);
-                for (ai = 0; ai < 2; ai++) {
+                for (ai = 0; ai < na; ai++) {
                     char ar_path[1056];
                     FILE *arf;
                     snprintf(ar_path, sizeof(ar_path), "%s/lib%s.a",

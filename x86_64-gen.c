@@ -455,6 +455,9 @@ void load(int r, SValue *sv)
         } else if ((ft & VT_BTYPE) == VT_DOUBLE) {
             b = 0x7e0ff3; /* movq */
             r = REG_VALUE(r);
+        } else if ((ft & VT_BTYPE) == VT_F128) {
+            b = 0x100f; /* movups */
+            r = REG_VALUE(r);
         } else if ((ft & VT_BTYPE) == VT_LDOUBLE) {
             b = 0xdb, r = 5; /* fldt */
         } else if ((ft & VT_TYPE) == VT_BYTE || (ft & VT_TYPE) == VT_BOOL) {
@@ -553,7 +556,9 @@ void load(int r, SValue *sv)
                     o(0xf024);
                 } else {
                     assert((v >= TREG_XMM0) && (v <= TREG_XMM7));
-                    if ((ft & VT_BTYPE) == VT_FLOAT) {
+                    if ((ft & VT_BTYPE) == VT_F128) {
+                        o(0x280f); /* movaps */
+                    } else if ((ft & VT_BTYPE) == VT_FLOAT) {
                         o(0x100ff3);
                     } else {
                         assert((ft & VT_BTYPE) == VT_DOUBLE);
@@ -607,6 +612,9 @@ void store(int r, SValue *v)
         r = REG_VALUE(r);
     } else if (bt == VT_DOUBLE) {
         opc = 0xd60f66;
+        r = REG_VALUE(r);
+    } else if (bt == VT_F128) {
+        opc = 0x110f; /* movups */
         r = REG_VALUE(r);
     } else if (bt == VT_LDOUBLE) {
         o(0xc0d9); /* fld %st(0) */
@@ -1093,7 +1101,8 @@ static X86_64_Mode classify_x86_64_inner(CType *ty)
         return x86_64_mode_integer;
     
     case VT_FLOAT:
-    case VT_DOUBLE: return x86_64_mode_sse;
+    case VT_DOUBLE:
+    case VT_F128: return x86_64_mode_sse;
     
     case VT_LDOUBLE: return x86_64_mode_x87;
       
@@ -1157,7 +1166,13 @@ static X86_64_Mode classify_x86_64_arg(CType *ty, CType *ret, int *psize, int *p
                 break;
 
             case x86_64_mode_sse:
-                if (size > 8) {
+                if ((ty->t & VT_BTYPE) == VT_F128) {
+                    /* _Float128: one xmm register holds all 16
+                       bytes (the psABI's SSE/SSEUP pair classes
+                       share the register) */
+                    *reg_count = 1;
+                    ret_t = VT_F128;
+                } else if (size > 8) {
                     *reg_count = 2;
                     ret_t = VT_QFLOAT;
                 } else {
@@ -1336,6 +1351,16 @@ void gfunc_call(int nb_args)
 		o(0x24);
 		break;
 
+	    case VT_F128:
+		assert(mode == x86_64_mode_sse);
+		r = gv(RC_FLOAT);
+		oad(0xec8148, size); /* sub $16, %rsp */
+		/* movups %xmmN, (%rsp) */
+		o(0x110f);
+		o(0x04 + REG_VALUE(r)*8);
+		o(0x24);
+		break;
+
 	    default:
 		assert(mode == x86_64_mode_integer);
 		/* simple type */
@@ -1497,12 +1522,8 @@ void gfunc_prolog(Sym *func_sym)
             loc -= 16;
 	    if (!tcc_state->nosse) {
                 /* movq */
-		gen_modrm32(0xd60f66, 7 - i, VT_LOCAL, NULL, loc);
+		gen_modrm32(0x110f, 7 - i, VT_LOCAL, NULL, loc); /* movups (F34) */
 	    }
-            /* movq $0, loc+8(%rbp) */
-            o(0x85c748);
-            gen_le32(loc + 8);
-            gen_le32(0);
         }
         for (i = 0; i < REGN; i++) {
             push_arg_reg(REGN-1-i);
@@ -1528,7 +1549,13 @@ void gfunc_prolog(Sym *func_sym)
         case x86_64_mode_sse:
 	    if (tcc_state->nosse)
 	        tcc_error("SSE disabled but floating point arguments used");
-            if (sse_param_index + reg_count <= 8) {
+            if ((type->t & VT_BTYPE) == VT_F128 && sse_param_index < 8) {
+                /* _Float128: 16 bytes in one xmm register */
+                loc -= 16;
+                param_addr = loc;
+                gen_modrm32(0x110f, sse_param_index, VT_LOCAL, NULL, param_addr);
+                ++sse_param_index;
+            } else if (sse_param_index + reg_count <= 8) {
                 /* save arguments passed by register */
                 loc -= reg_count * 8;
                 param_addr = loc;
@@ -1809,6 +1836,8 @@ void gen_opf(int op)
 {
     int a, ft, fc, swapped, r, opc;
     int bt = vtop->type.t & VT_BTYPE;
+    if (bt == VT_F128)
+        tcc_error("internal: _Float128 operation reached the backend (F34)");
     int float_type = bt == VT_LDOUBLE ? RC_ST0 : RC_FLOAT;
 
     if (op == TOK_NEG) { /* unary minus */

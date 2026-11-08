@@ -1275,9 +1275,10 @@ struct filespec {
 #define TOK_U32CHAR 0xd1 /* char32_t constant in tokc */
 #define TOK_U16STR  0xd2 /* pointer to char16_t string in tokc */
 #define TOK_U32STR  0xd3 /* pointer to char32_t string in tokc */
+#define TOK_CF128   0xd4 /* _Float128 constant (F34): pattern in tokc.tab[0..3] */
 
 #define TOK_HAS_VALUE(t) ((t >= TOK_CCHAR && t <= TOK_LINENUM) \
-    || (t >= TOK_U16CHAR && t <= TOK_U32STR))
+    || (t >= TOK_U16CHAR && t <= TOK_U32STR) || t == TOK_CF128)
 
 #define TOK_EOF              (-1) /* end of file */
 #define TOK_LINEFEED         0x0A /* line feed */
