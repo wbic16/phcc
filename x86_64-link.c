@@ -289,6 +289,24 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
             break;
 
         case R_X86_64_GLOB_DAT:
+            /* In a static executable the value of a defined IFUNC is
+               its resolver; a slot that code reads as the function's
+               address must hold the canonical PLT address instead
+               (F27).  JUMP_SLOT slots below keep the resolver address
+               as their initial content -- glibc's startup overwrites
+               them through the .rela.plt IRELATIVE entries.  */
+            if (s1->static_link && s1->output_type == TCC_OUTPUT_EXE) {
+                ElfW(Sym) *esym = &((ElfW(Sym) *) symtab_section->data)[sym_index];
+                struct sym_attr *a2 = get_sym_attr(s1, sym_index, 0);
+                if (esym->st_shndx != SHN_UNDEF
+                    && ELFW(ST_TYPE)(esym->st_info) == STT_GNU_IFUNC
+                    && a2 && a2->plt_offset && s1->plt) {
+                    write64le(ptr, s1->plt->sh_addr + a2->plt_offset
+                              - rel->r_addend);
+                    break;
+                }
+            }
+            /* fallthrough */
         case R_X86_64_JUMP_SLOT:
             /* They don't need addend */
             write64le(ptr, val - rel->r_addend);
@@ -297,7 +315,8 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
         case R_X86_64_GOTPCRELX:
         case R_X86_64_REX_GOTPCRELX:
             add32le(ptr, s1->got->sh_addr - addr +
-                         get_sym_attr(s1, sym_index, 0)->got_offset - 4);
+                         get_sym_attr(s1, sym_index, 0)->got_offset
+                         + rel->r_addend);
             break;
         case R_X86_64_GOTPC32:
             add32le(ptr, s1->got->sh_addr - addr + rel->r_addend);
@@ -312,7 +331,8 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
                symbol's tp-relative offset via an R_X86_64_TPOFF64
                relocation created in build_got_entries.  */
             add32le(ptr, s1->got->sh_addr - addr +
-                         get_sym_attr(s1, sym_index, 0)->got_offset - 4);
+                         get_sym_attr(s1, sym_index, 0)->got_offset
+                         + rel->r_addend);
             break;
         case R_X86_64_GOT32:
             /* we load the got offset */

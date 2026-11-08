@@ -750,6 +750,13 @@ struct sym_attr {
 #endif
 };
 
+/* one PLT slot owed a runtime IRELATIVE relocation in a static
+   executable (F27): GOT offset + symtab index of the IFUNC symbol */
+struct iplt_ent {
+    unsigned off;
+    int sym;
+};
+
 struct TCCState {
     unsigned char verbose; /* if true, display some information during compilation */
     unsigned char nostdinc; /* if true, no standard headers are added */
@@ -934,6 +941,10 @@ struct TCCState {
     Section *dynsym;
     /* got & plt handling */
     Section *got, *plt;
+    /* static-executable IFUNC resolution (F27) */
+    Section *rela_iplt; /* .rela.plt section, when emitted */
+    struct iplt_ent *iplt;
+    int nb_iplt;
     /* exception handling */
     Section *eh_frame_section;
     Section *eh_frame_hdr_section;

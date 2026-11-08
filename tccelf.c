@@ -1565,6 +1565,21 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
 #endif
                 tcc_error_noabort("link symbol '%s' defined twice", name);
             }
+        } else if (shndx == SHN_UNDEF) {
+            /* Existing and incoming entries are both undefined
+               references.  The standing binding is the stronger of
+               the two (GNU ld): a strong reference makes the symbol
+               eligible for archive extraction, and a later weak
+               reference must not downgrade it -- with last-writer
+               merging, a weak reference loaded after the strong one
+               silently un-pulled archive members such as glibc's
+               C-numeric.o, leaving _nl_C_LC_NUMERIC undefined in
+               static links (found by F27's localeconv probe).  */
+            esym->st_other = other;
+            if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK
+                && sym_bind != STB_WEAK)
+                esym->st_info = ELFW(ST_INFO)(sym_bind,
+                                              ELFW(ST_TYPE)(esym->st_info));
         } else {
             esym->st_other = other;
         do_patch:
@@ -2226,6 +2241,81 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
     return attr;
 }
 
+#ifdef TCC_TARGET_X86_64
+/* In a static executable, a reference to a defined STT_GNU_IFUNC
+   symbol must reach the implementation glibc's startup selects, not
+   the resolver whose address the symbol carries at link time: route
+   the reference through a PLT slot and resolve that slot at runtime
+   with an R_X86_64_IRELATIVE relocation (F27).  Dynamic outputs are
+   the dynamic linker's business and are never touched by this.  */
+static int static_ifunc_ref(TCCState *s1, ElfW(Sym) *sym)
+{
+    return s1->static_link
+        && s1->output_type == TCC_OUTPUT_EXE
+        && sym->st_shndx != SHN_UNDEF
+        && ELFW(ST_TYPE)(sym->st_info) == STT_GNU_IFUNC;
+}
+
+/* Collect the PLT slots that belong to defined IFUNC symbols in a
+   static executable and reserve the output .rela.plt section for
+   them, bounded by the __rela_iplt_start/__rela_iplt_end symbols
+   glibc's _dl_relocate_static_pie walks.  The entries themselves are
+   written by fill_iplt_relocs once symbol values are final.  */
+static void prepare_iplt_relocs(TCCState *s1)
+{
+    Section *s;
+    ElfW_Rel *rel;
+
+    if (!s1->static_link || s1->output_type != TCC_OUTPUT_EXE)
+        return;
+    if (!s1->got || !s1->got->reloc)
+        return;
+    for_each_elem(s1->got->reloc, 0, rel, ElfW_Rel) {
+        int sym_index = ELFW(R_SYM)(rel->r_info);
+        ElfW(Sym) *sym = &((ElfW(Sym) *) symtab_section->data)[sym_index];
+        if (ELFW(R_TYPE)(rel->r_info) == R_X86_64_JUMP_SLOT
+            && static_ifunc_ref(s1, sym)) {
+            s1->iplt = tcc_realloc(s1->iplt,
+                (s1->nb_iplt + 1) * sizeof *s1->iplt);
+            s1->iplt[s1->nb_iplt].off = rel->r_offset;
+            s1->iplt[s1->nb_iplt].sym = sym_index;
+            s1->nb_iplt++;
+        }
+    }
+    if (!s1->nb_iplt)
+        return;
+    s = new_section(s1, ".rela.plt", SHT_RELA, SHF_ALLOC);
+    s->sh_entsize = sizeof(ElfW_Rel);
+    s->sh_addralign = PTR_SIZE;
+    s->sh_info = s1->got->sh_num;
+    memset(section_ptr_add(s, s1->nb_iplt * sizeof(ElfW_Rel)), 0,
+           s1->nb_iplt * sizeof(ElfW_Rel));
+    s1->rela_iplt = s;
+    set_global_sym(s1, "__rela_iplt_start", s, 0);
+    set_global_sym(s1, "__rela_iplt_end", s, -1);
+}
+
+/* Write the .rela.plt entries reserved by prepare_iplt_relocs: the
+   offset is the PLT slot glibc's startup must overwrite with the
+   resolver's return value, the addend the resolver's address.  */
+static void fill_iplt_relocs(TCCState *s1)
+{
+    int i;
+    ElfW_Rel *rela;
+
+    if (!s1->rela_iplt)
+        return;
+    rela = (ElfW_Rel *) s1->rela_iplt->data;
+    for (i = 0; i < s1->nb_iplt; i++) {
+        ElfW(Sym) *sym = &((ElfW(Sym) *) symtab_section->data)
+            [s1->iplt[i].sym];
+        rela[i].r_offset = s1->got->sh_addr + s1->iplt[i].off;
+        rela[i].r_info = ELFW(R_INFO)(0, R_X86_64_IRELATIVE);
+        rela[i].r_addend = sym->st_value;
+    }
+}
+#endif
+
 /* build GOT and PLT entries */
 /* Two passes because R_JMP_SLOT should become first. Some targets
    (arm, arm64) do not allow mixing R_JMP_SLOT and R_GLOB_DAT. */
@@ -2299,6 +2389,20 @@ redo:
 #endif
                     /* from tcc_add_symbol(): on 64 bit platforms these
                        need to go through .got */
+#ifdef TCC_TARGET_X86_64
+                } else if (static_ifunc_ref(s1, sym)) {
+                    /* The canonical address of a defined IFUNC in a
+                       static executable is its PLT entry (as with GNU
+                       ld): the value the symbol carries at link time
+                       is the resolver, which nothing may store or
+                       call directly.  */
+                    if (pass != 0)
+                        continue;
+                    if (!s1->got)
+                        got_sym = build_got(s1);
+                    attr = put_got_entry(s1, R_JMP_SLOT, sym_index);
+                    rel->r_info = ELFW(R_INFO)(attr->plt_sym, type);
+#endif
                 } else
                     continue;
             }
@@ -2320,7 +2424,8 @@ redo:
 		sym->st_shndx != SHN_UNDEF &&
                 (ELFW(ST_VISIBILITY)(sym->st_other) != STV_DEFAULT ||
 		 ELFW(ST_BIND)(sym->st_info) == STB_LOCAL ||
-		 s1->output_type & TCC_OUTPUT_EXE)) {
+		 s1->output_type & TCC_OUTPUT_EXE)
+                && !static_ifunc_ref(s1, sym)) {
 		if (pass != 0)
 		    continue;
                 rel->r_info = ELFW(R_INFO)(sym_index, R_X86_64_PC32);
@@ -2378,6 +2483,17 @@ redo:
             if (gotplt_entry == BUILD_GOT_ONLY)
                 continue;
 
+#ifdef TCC_TARGET_X86_64
+            if (reloc_type == R_GLOB_DAT && static_ifunc_ref(s1, sym)) {
+                /* A GOT slot that code reads as the function's address
+                   must have a PLT entry to name (relocate() fills such
+                   slots with the PLT address): force the entry now;
+                   its own slot joins the IPLT set in
+                   prepare_iplt_relocs.  */
+                if (!get_sym_attr(s1, sym_index, 1)->plt_offset)
+                    put_got_entry(s1, R_JMP_SLOT, sym_index);
+            }
+#endif
             attr = put_got_entry(s1, reloc_type, sym_index);
 
             if (reloc_type == R_JMP_SLOT)
@@ -2389,6 +2505,9 @@ redo:
     /* .rel.plt refers to .got actually */
     if (s1->plt && s1->plt->reloc)
         s1->plt->reloc->sh_info = s1->got->sh_num;
+#ifdef TCC_TARGET_X86_64
+    prepare_iplt_relocs(s1);
+#endif
     if (got_sym) /* set size */
         ((ElfW(Sym)*)symtab_section->data)[got_sym].st_size = s1->got->data_offset;
 }
@@ -4155,7 +4274,13 @@ static int elf_output_file(TCCState *s1, const char *filename)
                 relocate_plt(s1);
             /* relocate symbols in .dynsym now that final addresses are known */
             relocate_syms(s1, s1->dynsym, 2);
-        }
+        } else if (file_type == TCC_OUTPUT_EXE && s1->static_link)
+            /* Static PLT stubs need the same displacement fixups the
+               dynamic path gets -- F27 routes IFUNC calls through
+               them.  The lazy-binding half of relocate_plt does not
+               apply: plt->reloc is empty for static outputs, so the
+               GOT slots keep the values relocate_sections writes.  */
+            relocate_plt(s1);
 
         /* if building executable or DLL, then relocate each section
            except the GOT which is already relocated */
@@ -4173,6 +4298,9 @@ static int elf_output_file(TCCState *s1, const char *filename)
             fill_got(s1);
         else if (s1->got)
             fill_local_got_entries(s1);
+#ifdef TCC_TARGET_X86_64
+        fill_iplt_relocs(s1);
+#endif
 
     if (dyninf.gnu_hash)
         update_gnu_hash(s1, dyninf.gnu_hash);
