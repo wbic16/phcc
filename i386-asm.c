@@ -141,6 +141,10 @@ enum {
 #endif
 
 #define OP_EA     0x40000000u
+#define OP_YMM    (1 << 23) /* %ymm0-%ymm31 (F31) */
+#define OP_ZMM    (1 << 24) /* %zmm0-%zmm31 (F31) */
+#define OP_KREG   (1 << 25) /* %k0-%k7 (F31) */
+#define OP_VEC    (OP_SSE | OP_YMM | OP_ZMM)
 #define OP_REG    (OP_REG8 | OP_REG16 | OP_REG32 | OP_REG64)
 
 #ifdef TCC_TARGET_X86_64
@@ -413,6 +417,21 @@ static void parse_operand(TCCState *s1, Operand *op)
 	       register numbers 8..15 for OP_SSE operands */
 	    op->type = OP_SSE;
 	    op->reg = 8 + tok - TOK_ASM_xmm8;
+	} else if (tok >= TOK_ASM_xmm16 && tok <= TOK_ASM_xmm31) {
+	    /* EVEX-only registers: recognised here so the VEX path can
+	       encode them; legacy instructions reject them in operand
+	       matching (their numbers fall outside every legacy form) */
+	    op->type = OP_SSE;
+	    op->reg = 16 + tok - TOK_ASM_xmm16;
+	} else if (tok >= TOK_ASM_ymm0 && tok <= TOK_ASM_ymm31) {
+	    op->type = OP_YMM;
+	    op->reg = tok - TOK_ASM_ymm0;
+	} else if (tok >= TOK_ASM_zmm0 && tok <= TOK_ASM_zmm31) {
+	    op->type = OP_ZMM;
+	    op->reg = tok - TOK_ASM_zmm0;
+	} else if (tok >= TOK_ASM_k0 && tok <= TOK_ASM_k7) {
+	    op->type = OP_KREG;
+	    op->reg = tok - TOK_ASM_k0;
         } else if ((op->reg = asm_parse_numeric_reg(tok, &op->type)) >= 0) {
 	    ;
 #endif
@@ -762,9 +781,801 @@ static void maybe_print_stats (void)
     }
 }
 
+
+#ifdef TCC_TARGET_X86_64
+
+/* ------------------------------------------------------------------ */
+/* F31: VEX/EVEX assembler support — the prefix frontier recorded in
+   F12.  The measured surface is the OpenSSL 4.1.0 perlasm corpus
+   (42 files, 100 mnemonics, ~130k instruction lines): 2-byte VEX
+   (C5), 3-byte VEX (C4), EVEX (62) with writemask {%k} and zeroing
+   {z} decorations, L'L vector lengths 128/256/512, and BMI2 mulx
+   (which falls out as a general-purpose-register NDS3 form).
+   Anything outside the table fails with the assembler's existing
+   loud errors, never a silent mis-assembly.
+
+   The encoder is an explicit prefix-decoding state machine:
+
+     VSM_OPERANDS  parse operands and {%k}/{z} decorations
+     VSM_CLASSIFY  resolve operand roles per form; choose the prefix
+                   family (C5 when it can express the instruction,
+                   else C4, else EVEX when the operands or the form
+                   demand it: EVEX-only mnemonic, zmm width, any
+                   vector register >= 16, or a writemask decoration)
+     VSM_PREFIX    emit 0x67 if an operand asked for it, then the
+                   C5/C4/62 prefix with all extension bits inverted
+                   in place (R/X/B/R'/V')
+     VSM_OPCODE    emit the opcode byte (the map rides in the
+                   prefix; there is no separate map escape byte)
+     VSM_MODRM     emit ModRM/SIB/displacement via asm_modrm_vex,
+                   which adds EVEX's compressed disp8*N addressing
+                   on top of the legacy displacement logic
+     VSM_IMM       emit the trailing imm8 (or the is4 byte)
+     VSM_DONE
+
+   AT&T operand order is source-first, so for the three-operand
+   forms the roles are [rm, vvvv, reg]: the last-written operand is
+   the destination and lands in ModRM.reg.  mulx is the same role
+   pattern over general-purpose registers. */
+
+enum { MW_FULL, MW_4, MW_8, MW_16, MW_32 }; /* EVEX disp8*N widths */
+
+enum {
+    VF_NDS3,    /* [rm, vvvv, reg]                            */
+    VF_NDS3I,   /* [$imm, rm, vvvv, reg] + imm8               */
+    VF_IS4,     /* AT&T [ctrl, src1, src2, dst] = [is4, rm, vvvv, reg] */
+    VF_MOV2,    /* [a, b]: load or store by operand classes   */
+    VF_EXTRACT, /* [$imm, reg, rm] + imm8                     */
+    VF_SHIFTI,  /* [$imm, rm, dst-in-vvvv] + imm8, /ext       */
+    VF_PERMI,   /* [$imm, rm, reg] + imm8                     */
+    VF_MOVMSK,  /* [vec rm, gpr reg]                          */
+    VF_MOVDQ,   /* [gpr/mem, vec] or [vec, gpr/mem]           */
+    VF_MOVQ,    /* vmovq: four GAS forms by operand classes   */
+    VF_BCAST,   /* [src, reg]                                 */
+    VF_KCMP,    /* [$imm, rm, vvvv, kreg] + imm8              */
+    VF_KMOV,    /* [a, b]: one side is a k register; opcode
+                   holds the memory-load byte (0x90), opcode2
+                   the memory-store byte, pp the memory pp and
+                   ext the GPR pp; GPR forms add 2 to the byte  */
+    VF_ZERO     /* no operands (ext holds the VEX L bit)      */
+};
+
+#define VX_EVEONLY 0x01 /* EVEX encoding exists only */
+#define VX_W0VEX   0x02 /* entry w is the EVEX W; a VEX prefix writes 0 */
+#define VX_RMGPR   0x04 /* rm slot may be a general-purpose register */
+#define VX_SRCGPR  0x08 /* broadcast source may be a GPR */
+#define VX_GPR     0x10 /* NDS3 roles are GPRs, not vectors (mulx) */
+#define VX_WGPR    0x20 /* W comes from the reg operand's width (mulx) */
+#define VX_MIXEDW  0x40 /* vector operand widths may differ (vpmovzxdq) */
+#define VX_SWAPVV  0x80 /* NDS3: vvvv is operand 0, rm operand 1
+                           (the BMI2 shifts, unlike mulx) */
+#define VX_EVEXPREF 0x200 /* EVEX by default, but a VEX encoding
+                           exists and {vex} selects it (vpmadd52) */
+
+#define PP_66 1
+#define PP_F3 2
+#define PP_F2 3
+
+typedef struct VEXInstr {
+    uint16_t sym;
+    uint8_t map;     /* 1 = 0F, 2 = 0F38, 3 = 0F3A */
+    uint8_t opcode;  /* main (load-direction) opcode byte */
+    uint8_t opcode2; /* store-direction opcode for MOV2/MOVDQ, else 0 */
+    uint8_t pp;      /* raw pp bits: 0 none, 1 = 66, 2 = F3, 3 = F2 */
+    uint8_t w;
+    uint8_t form;
+    uint8_t ext;     /* VF_SHIFTI: ModRM.reg extension; VF_ZERO: L bit;
+                        VF_KMOV: the GPR-form pp */
+    uint16_t flags;
+    uint8_t mw;      /* EVEX memory width class for disp8*N */
+} VEXInstr;
+
+#define VEXI(name, map, op, op2, pp, w, form, ext, flags, mw) \
+    { TOK_ASM_ ## name, map, op, op2, pp, w, form, ext, flags, mw }
+
+static const VEXInstr vex_instrs[] = {
+    /* BMI2: NDS3 over GPRs; W is the operand width */
+    VEXI(mulx,  2, 0xf6, 0, PP_F2, 0, VF_NDS3, 0, VX_GPR | VX_WGPR, MW_FULL),
+    VEXI(mulxl, 2, 0xf6, 0, PP_F2, 0, VF_NDS3, 0, VX_GPR, MW_FULL),
+    VEXI(mulxq, 2, 0xf6, 0, PP_F2, 1, VF_NDS3, 0, VX_GPR, MW_FULL),
+    /* AES */
+    VEXI(vaesenc,     2, 0xdc, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vaesenclast, 2, 0xdd, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vaesdec,     2, 0xde, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vaesdeclast, 2, 0xdf, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpclmulqdq,  3, 0x44, 0, PP_66, 0, VF_NDS3I, 0, 0, MW_FULL),
+    /* integer ALU */
+    VEXI(vpaddb, 1, 0xfc, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpaddd, 1, 0xfe, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpaddq, 1, 0xd4, 0, PP_66, 1, VF_NDS3, 0, VX_W0VEX, MW_FULL),
+    VEXI(vpsubd, 1, 0xfa, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpsubq, 1, 0xfb, 0, PP_66, 1, VF_NDS3, 0, VX_W0VEX, MW_FULL),
+    VEXI(vpand,  1, 0xdb, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpandn, 1, 0xdf, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpandd, 1, 0xdb, 0, PP_66, 0, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpandq, 1, 0xdb, 0, PP_66, 1, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpor,   1, 0xeb, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vporq,  1, 0xeb, 0, PP_66, 1, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpxor,  1, 0xef, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpxord, 1, 0xef, 0, PP_66, 0, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpxorq, 1, 0xef, 0, PP_66, 1, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vxorps, 1, 0x57, 0, 0,     0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpshufb, 2, 0x00, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpunpckldq,  1, 0x62, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpunpckhdq,  1, 0x6a, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpunpcklqdq, 1, 0x6c, 0, PP_66, 1, VF_NDS3, 0, VX_W0VEX, MW_FULL),
+    VEXI(vpunpckhqdq, 1, 0x6d, 0, PP_66, 1, VF_NDS3, 0, VX_W0VEX, MW_FULL),
+    VEXI(vpmuludq, 1, 0xf4, 0, PP_66, 1, VF_NDS3, 0, VX_W0VEX, MW_FULL),
+    VEXI(vpsllvq, 2, 0x47, 0, PP_66, 1, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpsrlvq, 2, 0x45, 0, PP_66, 1, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpermd,  2, 0x36, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    /* compares: legacy vector-dst forms, then EVEX mask-dst forms */
+    VEXI(vpcmpeqd, 1, 0x76, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpcmpgtd, 1, 0x66, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpcmpeqq, 2, 0x29, 0, PP_66, 1, VF_NDS3, 0, VX_W0VEX, MW_FULL),
+    VEXI(vpcmpgtq, 2, 0x37, 0, PP_66, 1, VF_NDS3, 0, VX_W0VEX, MW_FULL),
+    /* BMI2 andn: plain NDS3 over GPRs, no pp (measured) */
+    VEXI(andnl, 2, 0xf2, 0, 0, 0, VF_NDS3, 0, VX_GPR, MW_FULL),
+    VEXI(andnq, 2, 0xf2, 0, 0, 1, VF_NDS3, 0, VX_GPR, MW_FULL),
+    /* BMI2 shifts: the mulx role pattern over GPRs (count in
+       vvvv, source in rm, destination in ModRM.reg); the pp
+       values are GAS's bytes (shlx 01, sarx 10, shrx 11) */
+    VEXI(shlxq, 2, 0xf7, 0, PP_66, 1, VF_NDS3, 0, VX_GPR | VX_SWAPVV, MW_FULL),
+    VEXI(sarxq, 2, 0xf7, 0, PP_F3, 1, VF_NDS3, 0, VX_GPR | VX_SWAPVV, MW_FULL),
+    VEXI(shrxq, 2, 0xf7, 0, PP_F2, 1, VF_NDS3, 0, VX_GPR | VX_SWAPVV, MW_FULL),
+    /* opmask moves, VEX-encoded (measured from GAS bytes):
+       memory forms 0x90/0x91 with k in ModRM.reg; GPR forms
+       0x92/0x93, where a GPR store puts the k register in rm */
+    /* for VF_KMOV, w is the memory-form W and ext packs the
+       GPR form as (W << 7) | pp: kmovd's memory form is W1 but
+       its GPR form is W0, which is why GAS gives the GPR form a
+       2-byte VEX and the memory form a 3-byte one */
+    VEXI(kmovw, 1, 0x90, 0x91, 0,     0, VF_KMOV, 0,          0, MW_FULL),
+    VEXI(kmovb, 1, 0x90, 0x91, PP_66, 0, VF_KMOV, PP_66,      0, MW_FULL),
+    VEXI(kmovd, 1, 0x90, 0x91, PP_66, 1, VF_KMOV, PP_F2,      0, MW_FULL),
+    VEXI(kmovq, 1, 0x90, 0x91, 0,     1, VF_KMOV, PP_F2 | 0x80, 0, MW_FULL),
+    VEXI(vpcmpq,   3, 0x1f, 0, PP_66, 1, VF_KCMP, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpcmpuq,  3, 0x1e, 0, PP_66, 1, VF_KCMP, 0, VX_EVEONLY, MW_FULL),
+    /* imm8 forms */
+    VEXI(vpternlogq, 3, 0x25, 0, PP_66, 1, VF_NDS3I, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vperm2i128, 3, 0x46, 0, PP_66, 0, VF_NDS3I, 0, 0, MW_FULL),
+    VEXI(vshufps,    1, 0xc6, 0, 0,     0, VF_NDS3I, 0, 0, MW_FULL),
+    VEXI(vshufi32x4, 3, 0x43, 0, PP_66, 0, VF_NDS3I, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vshufi64x2, 3, 0x43, 0, PP_66, 1, VF_NDS3I, 0, VX_EVEONLY, MW_FULL),
+    VEXI(valignq,    3, 0x03, 0, PP_66, 1, VF_NDS3I, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vblendpd,   3, 0x0d, 0, PP_66, 0, VF_NDS3I, 0, 0, MW_FULL),
+    VEXI(vpblendd,   3, 0x02, 0, PP_66, 0, VF_NDS3I, 0, 0, MW_FULL),
+    VEXI(vpalignr,   3, 0x0f, 0, PP_66, 0, VF_NDS3I, 0, 0, MW_FULL),
+    /* BMI2 rotate: an imm8 GPR form on the PERMI skeleton */
+    VEXI(rorxl,      3, 0xf0, 0, PP_F2, 0, VF_PERMI, 0, VX_GPR, MW_FULL),
+    VEXI(rorxq,      3, 0xf0, 0, PP_F2, 1, VF_PERMI, 0, VX_GPR, MW_FULL),
+    /* AVX512-IFMA: EVEX by default (even at 256 bit), {vex}
+       selects the VEX encoding GAS also carries */
+    VEXI(vpmadd52luq, 2, 0xb4, 0, PP_66, 1, VF_NDS3, 0, VX_EVEXPREF, MW_FULL),
+    VEXI(vpmadd52huq, 2, 0xb5, 0, PP_66, 1, VF_NDS3, 0, VX_EVEXPREF, MW_FULL),
+    VEXI(vblendvpd,  3, 0x4b, 0, PP_66, 0, VF_IS4, 0, 0, MW_FULL),
+    VEXI(vpblendvb,  3, 0x4c, 0, PP_66, 0, VF_IS4, 0, 0, MW_FULL),
+    VEXI(vpblendmb,  2, 0x66, 0, PP_66, 0, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpblendmw,  2, 0x66, 0, PP_66, 1, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpblendmd,  2, 0x64, 0, PP_66, 0, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpblendmq,  2, 0x64, 0, PP_66, 1, VF_NDS3, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vpermq,     3, 0x00, 0, PP_66, 1, VF_PERMI, 0, 0, MW_FULL),
+    VEXI(vpermpd,    3, 0x01, 0, PP_66, 1, VF_PERMI, 0, 0, MW_FULL),
+    VEXI(vpermilps,  3, 0x04, 0, PP_66, 0, VF_PERMI, 0, 0, MW_FULL),
+    VEXI(vpermilpd,  3, 0x05, 0, PP_66, 1, VF_PERMI, 0, 0, MW_FULL),
+    /* register forms of the permutes: dual-form mnemonics, the
+       entry is chosen by whether operand 0 is an immediate */
+    VEXI(vpermq,     2, 0x36, 0, PP_66, 1, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpermpd,    2, 0x36, 0, PP_F3, 1, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpermilps,  2, 0x0C, 0, 0,     0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpermilpd,  2, 0x0D, 0, PP_66, 0, VF_NDS3, 0, 0, MW_FULL),
+    VEXI(vpshufd,    1, 0x70, 0, PP_66, 0, VF_PERMI, 0, 0, MW_FULL),
+    /* shifts by imm8: destination rides in VEX.vvvv, /ext in ModRM.reg */
+    VEXI(vpslld,  1, 0x72, 0, PP_66, 0, VF_SHIFTI, 6, 0, MW_FULL),
+    VEXI(vpsrld,  1, 0x72, 0, PP_66, 0, VF_SHIFTI, 2, 0, MW_FULL),
+    VEXI(vpsllq,  1, 0x73, 0, PP_66, 1, VF_SHIFTI, 6, VX_W0VEX, MW_FULL),
+    VEXI(vpsrlq,  1, 0x73, 0, PP_66, 1, VF_SHIFTI, 2, VX_W0VEX, MW_FULL),
+    VEXI(vpslldq, 1, 0x73, 0, PP_66, 0, VF_SHIFTI, 7, 0, MW_FULL),
+    VEXI(vpsrldq, 1, 0x73, 0, PP_66, 0, VF_SHIFTI, 3, 0, MW_FULL),
+    VEXI(vpsraq,  1, 0x72, 0, PP_66, 1, VF_SHIFTI, 4, VX_EVEONLY, MW_FULL),
+    VEXI(vprold,  1, 0x72, 0, PP_66, 0, VF_SHIFTI, 1, VX_EVEONLY, MW_FULL),
+    VEXI(vprolq,  1, 0x72, 0, PP_66, 1, VF_SHIFTI, 1, VX_EVEONLY, MW_FULL),
+    VEXI(vprord,  1, 0x72, 0, PP_66, 0, VF_SHIFTI, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vprorq,  1, 0x72, 0, PP_66, 1, VF_SHIFTI, 0, VX_EVEONLY, MW_FULL),
+    /* moves */
+    VEXI(vmovdqa,   1, 0x6f, 0x7f, PP_66, 0, VF_MOV2, 0, 0, MW_FULL),
+    VEXI(vmovdqu,   1, 0x6f, 0x7f, PP_F3, 0, VF_MOV2, 0, 0, MW_FULL),
+    VEXI(vmovdqa32, 1, 0x6f, 0x7f, PP_66, 0, VF_MOV2, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vmovdqa64, 1, 0x6f, 0x7f, PP_66, 1, VF_MOV2, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vmovdqu8,  1, 0x6f, 0x7f, PP_F2, 0, VF_MOV2, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vmovdqu32, 1, 0x6f, 0x7f, PP_F3, 0, VF_MOV2, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vmovdqu64, 1, 0x6f, 0x7f, PP_F3, 1, VF_MOV2, 0, VX_EVEONLY, MW_FULL),
+    VEXI(vmovapd,   1, 0x28, 0x29, PP_66, 0, VF_MOV2, 0, 0, MW_FULL),
+    VEXI(vmovupd,   1, 0x10, 0x11, PP_66, 0, VF_MOV2, 0, 0, MW_FULL),
+    VEXI(vmovups,   1, 0x10, 0x11, 0,     0, VF_MOV2, 0, 0, MW_FULL),
+    VEXI(vmovshdup, 1, 0x16, 0,    PP_F3, 0, VF_MOV2, 0, 0, MW_FULL),
+    VEXI(vpmovzxdq, 2, 0x35, 0,    PP_66, 0, VF_MOV2, 0, VX_MIXEDW, MW_8),
+    VEXI(vmovmskpd, 1, 0x50, 0,    PP_66, 0, VF_MOVMSK, 0, 0, MW_FULL),
+    VEXI(vmovd,     1, 0x6e, 0x7e, PP_66, 0, VF_MOVDQ, PP_66, 0, MW_4),
+    VEXI(vmovq,     1, 0x6e, 0x7e, PP_66, 1, VF_MOVQ, 0xd6, 0, MW_8),
+    /* insert / extract */
+    VEXI(vpinsrd, 3, 0x22, 0, PP_66, 0, VF_NDS3I, 0, VX_RMGPR, MW_4),
+    VEXI(vpinsrq, 3, 0x22, 0, PP_66, 1, VF_NDS3I, 0, VX_RMGPR, MW_8),
+    VEXI(vpextrq, 3, 0x16, 0, PP_66, 1, VF_EXTRACT, 0, VX_RMGPR, MW_8),
+    VEXI(vextracti128, 3, 0x39, 0, PP_66, 0, VF_EXTRACT, 0, 0, MW_16),
+    VEXI(vextracti32x4, 3, 0x39, 0, PP_66, 0, VF_EXTRACT, 1, VX_EVEONLY, MW_16),
+    VEXI(vextracti64x2, 3, 0x39, 0, PP_66, 1, VF_EXTRACT, 0, VX_EVEONLY, MW_16),
+    VEXI(vextracti64x4, 3, 0x3b, 0, PP_66, 1, VF_EXTRACT, 1, VX_EVEONLY, MW_32),
+    VEXI(vinserti128, 3, 0x38, 0, PP_66, 0, VF_NDS3I, 0, 0, MW_16),
+    VEXI(vinserti32x4, 3, 0x38, 0, PP_66, 0, VF_NDS3I, 0, VX_EVEONLY, MW_16),
+    VEXI(vinserti64x2, 3, 0x38, 0, PP_66, 1, VF_NDS3I, 0, VX_EVEONLY, MW_16),
+    VEXI(vinserti64x4, 3, 0x3a, 0, PP_66, 1, VF_NDS3I, 0, VX_EVEONLY, MW_32),
+    /* broadcasts */
+    VEXI(vbroadcasti128, 2, 0x5a, 0, PP_66, 0, VF_BCAST, 0, 0, MW_16),
+    VEXI(vbroadcasti32x4, 2, 0x5a, 0, PP_66, 0, VF_BCAST, 0, VX_EVEONLY, MW_16),
+    VEXI(vbroadcastf64x2, 2, 0x1a, 0, PP_66, 1, VF_BCAST, 0, VX_EVEONLY, MW_16),
+    VEXI(vpbroadcastd, 2, 0x58, 0, PP_66, 0, VF_BCAST, 0, 0, MW_4),
+    VEXI(vpbroadcastq, 2, 0x59, 0x7c, PP_66, 1, VF_BCAST, 0, VX_SRCGPR | VX_W0VEX, MW_8),
+    /* zeroing of the upper lanes */
+    VEXI(vzeroupper, 1, 0x77, 0, 0, 0, VF_ZERO, 0, 0, MW_FULL),
+    VEXI(vzeroall,   1, 0x77, 0, 0, 0, VF_ZERO, 1, 0, MW_FULL),
+    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+};
+
+/* ModRM emission for the VEX path: the legacy asm_modrm logic with
+   the register fields pre-masked by the caller (the extension bits
+   live in the prefix, not in a REX) plus EVEX's compressed disp8*N
+   form when eshift > 0: a numeric displacement divisible by
+   (1 << eshift) whose quotient fits in int8 uses mod 01 with the
+   quotient as the byte.  Symbolic and RIP-relative displacements
+   are never scaled (their value is resolved at link time). */
+static void asm_modrm_vex(int reg, Operand *op, int eshift)
+{
+    int mod, reg1, reg2, sib_reg1;
+
+    if (!(op->type & OP_EA)) {
+        /* register form */
+        g(0xc0 + (reg << 3) + (op->reg & 7));
+    } else if (op->reg == -1 && op->reg2 == -1) {
+        /* displacement only */
+        g(0x04 + (reg << 3));
+        g(0x25);
+        gen_expr32(&op->e);
+    } else if (op->reg == -2) {
+        /* RIP-relative */
+        ExprValue *pe = &op->e;
+        g(0x05 + (reg << 3));
+        gen_addrpc32(pe->sym ? VT_SYM : 0, pe->sym, pe->v);
+    } else {
+        int64_t d = op->e.v, q = d;
+        int scaled = 0;
+        if (eshift && !op->e.sym && d % (1 << eshift) == 0) {
+            q = d / (1 << eshift);
+            scaled = 1;
+        }
+        sib_reg1 = op->reg;
+        /* compute displacement encoding */
+        if (sib_reg1 == -1) {
+            sib_reg1 = 5;
+            mod = 0x00;
+        } else if (d == 0 && !op->e.sym && (op->reg & 7) != 5) {
+            /* note: the base test uses the masked register (r13 is
+               base 5 with the B extension bit, like rbp) */
+            mod = 0x00;
+        } else if (!op->e.sym && q == (int8_t)q && (scaled || !eshift)) {
+            mod = 0x40;
+        } else {
+            mod = 0x80;
+        }
+        /* compute if sib byte needed */
+        reg1 = op->reg;
+        if (op->reg2 != -1)
+            reg1 = 4;
+        g(mod + (reg << 3) + (reg1 & 7));
+        if ((reg1 & 7) == 4) {
+            /* add sib byte */
+            reg2 = op->reg2;
+            if (reg2 == -1)
+                reg2 = 4; /* indicate no index */
+            g((op->shift << 6) + ((reg2 & 7) << 3) + (sib_reg1 & 7));
+        }
+        /* add offset */
+        if (mod == 0x40) {
+            g(q);
+        } else if (mod == 0x80 || op->reg == -1) {
+            gen_expr32(&op->e);
+        }
+    }
+}
+
+enum VexSM {
+    VSM_OPERANDS, VSM_CLASSIFY, VSM_PREFIX, VSM_OPCODE,
+    VSM_MODRM, VSM_IMM, VSM_DONE
+};
+
+/* Returns 1 when `opcode` is a VEX-family mnemonic (and has been
+   fully handled or has errored), 0 when it is not ours. */
+static int asm_opcode_vex(TCCState *s1, int opcode)
+{
+    const VEXInstr *vi;
+    Operand ops[5];
+    int mask[5], zero[5];
+    int nb = 0, i, state;
+    Operand *regop = NULL, *vvvvop = NULL, *rmop = NULL;
+    Operand *immop = NULL, *is4op = NULL;
+    int regnum = 0, vvvvnum = 0, rm_is_reg = 0;
+    /* vvvvnum defaults to 0: with no vvvv operand the prefix field
+       ~vvvv must read 1111 (the GAS encoding for vzeroupper, the
+       two-operand moves, the permute-immediates and friends) */
+    int ll = 0, w = 0, use_op2 = 0, regfield = 0;
+    int pp_use = -1, opbyte = -1, kmov_gpr_w = -1;
+    int w_override = -1, use_op3 = 0, force_evex = 0;
+    int evex = 0, c5 = 0, eshift = 0;
+    int ext_b = 0, ext_x = 0; /* rm/base and index extension facts */
+
+    for (vi = vex_instrs; vi->sym != 0; vi++)
+        if (vi->sym == opcode)
+            break;
+    if (vi->sym == 0)
+        return 0;
+
+    state = VSM_OPERANDS;
+    while (state != VSM_DONE) {
+        switch (state) {
+        case VSM_OPERANDS: {
+            for (;;) {
+                if (tok == ';' || tok == TOK_LINEFEED)
+                    break;
+                if (nb >= 5)
+                    tcc_error("incorrect number of operands");
+                mask[nb] = -1;
+                zero[nb] = 0;
+                parse_operand(s1, &ops[nb]);
+                if (ops[nb].type & OP_SEG)
+                    tcc_error("segment prefix with VEX instruction");
+                /* {%kN} / {z} decorations ride on the operand */
+                while (tok == '{') {
+                    next();
+                    if (tok == '%') {
+                        next();
+                        if (tok < TOK_ASM_k0 || tok > TOK_ASM_k7)
+                            tcc_error("expected mask register in decoration");
+                        mask[nb] = tok - TOK_ASM_k0;
+                        next();
+                    } else if (tok >= TOK_IDENT && tok < tok_ident
+                               && !strcmp(get_tok_str(tok, NULL), "z")) {
+                        zero[nb] = 1;
+                        next();
+                    } else {
+                        tcc_error("unsupported EVEX decoration");
+                    }
+                    if (tok != '}')
+                        expect("}");
+                    next();
+                }
+                nb++;
+                if (tok != ',')
+                    goto operands_done;
+                next();
+            }
+        operands_done:
+            state = VSM_CLASSIFY;
+            break;
+        }
+        case VSM_CLASSIFY: {
+            int want;
+            /* dual-form mnemonics (vpermq and friends): pick the
+               entry whose form class matches operand 0 */
+            {
+                const VEXInstr *cand = NULL, *alt = NULL, *vi2;
+                int want_imm = nb > 0
+                    && (ops[0].type & (OP_IM8 | OP_IM16 | OP_IM32 | OP_IM64));
+                for (vi2 = vex_instrs; vi2->sym; vi2++) {
+                    int imm_form;
+                    if (vi2->sym != opcode)
+                        continue;
+                    imm_form = vi2->form == VF_NDS3I
+                        || vi2->form == VF_PERMI
+                        || vi2->form == VF_SHIFTI
+                        || vi2->form == VF_KCMP
+                        || vi2->form == VF_EXTRACT;
+                    if (!alt)
+                        alt = vi2;
+                    if (imm_form == want_imm) {
+                        cand = vi2;
+                        break;
+                    }
+                }
+                vi = cand ? cand : alt;
+            }
+            switch (vi->form) {
+            case VF_ZERO: want = 0; break;
+            case VF_MOV2: case VF_MOVDQ: case VF_MOVQ: case VF_BCAST: case VF_MOVMSK:
+            case VF_KMOV:
+                want = 2; break;
+            case VF_EXTRACT: case VF_SHIFTI: case VF_PERMI:
+                want = 3; break;
+            case VF_NDS3: want = 3; break;
+            case VF_NDS3I: case VF_IS4: case VF_KCMP:
+                want = 4; break;
+            default: want = -1; break;
+            }
+            if (nb != want)
+                tcc_error("incorrect number of operands for '%s'",
+                          get_tok_str(opcode, NULL));
+            /* decorations are legal on the destination only, which
+               in AT&T order is always the last operand written */
+            for (i = 0; i + 1 < nb; i++)
+                if (mask[i] >= 0 || zero[i])
+                    tcc_error("EVEX decoration on a non-destination operand");
+            if (nb > 0 && zero[nb - 1] && mask[nb - 1] < 0)
+                tcc_error("{z} requires a writemask");
+            pp_use = vi->pp;
+            switch (vi->form) {
+            case VF_KMOV: {
+                /* exactly one side is the k register; the other is
+                   a GPR or a memory reference.  Direction and the
+                   opcode byte follow GAS's measured encodings. */
+                Operand *kop, *other;
+                int dir; /* 0: other -> k, 1: k -> other */
+                if (ops[1].type & OP_KREG) {
+                    kop = &ops[1]; other = &ops[0]; dir = 0;
+                } else if (ops[0].type & OP_KREG) {
+                    kop = &ops[0]; other = &ops[1]; dir = 1;
+                } else {
+                    tcc_error("'%s' needs a %%k register operand",
+                              get_tok_str(opcode, NULL));
+                    break;
+                }
+                if (nb > 0 && (mask[nb - 1] >= 0 || zero[nb - 1]))
+                    tcc_error("'%s' takes no EVEX decoration",
+                              get_tok_str(opcode, NULL));
+                if (other->type & OP_EA) {
+                    regop = kop; rmop = other;
+                    opbyte = (dir ? vi->opcode2 : vi->opcode);
+                } else if (other->type & OP_REG) {
+                    pp_use = vi->ext & 3;
+                    kmov_gpr_w = (vi->ext >> 7) & 1;
+                    opbyte = (dir ? vi->opcode2 : vi->opcode) + 2;
+                    if (dir) {
+                        /* GPR store: GPR in ModRM.reg, k in rm */
+                        regop = other; rmop = kop;
+                    } else {
+                        regop = kop; rmop = other;
+                    }
+                } else {
+                    tcc_error("bad operand for '%s'",
+                              get_tok_str(opcode, NULL));
+                }
+                break;
+            }
+            case VF_NDS3:
+                if (vi->flags & VX_SWAPVV) {
+                    vvvvop = &ops[0]; rmop = &ops[1];
+                } else {
+                    rmop = &ops[0]; vvvvop = &ops[1];
+                }
+                regop = &ops[2];
+                break;
+            case VF_NDS3I:
+                immop = &ops[0]; rmop = &ops[1]; vvvvop = &ops[2];
+                regop = &ops[3];
+                break;
+            case VF_IS4:
+                /* GAS's blend syntax: the control register is the
+                   FIRST source operand and travels in the IS4 byte */
+                is4op = &ops[0]; rmop = &ops[1]; vvvvop = &ops[2];
+                regop = &ops[3];
+                break;
+            case VF_KCMP:
+                immop = &ops[0]; rmop = &ops[1]; vvvvop = &ops[2];
+                regop = &ops[3];
+                if (!(regop->type & OP_KREG))
+                    tcc_error("mask compare destination must be a %%k register");
+                break;
+            case VF_MOV2:
+                if (ops[1].type & OP_EA) {
+                    if (!vi->opcode2)
+                        tcc_error("'%s' has no store form",
+                                  get_tok_str(opcode, NULL));
+                    use_op2 = 1;
+                    regop = &ops[0]; rmop = &ops[1];
+                } else if ((ops[0].type & OP_VEC) && (ops[1].type & OP_VEC)
+                           && !(ops[0].type & OP_ZMM) && vi->opcode2
+                           && !(vi->flags & VX_EVEONLY)
+                           && ops[0].reg >= 8 && ops[0].reg < 16
+                           && ops[1].reg < 8
+                           && mask[nb - 1] < 0) {
+                    /* register-to-register with a high source: the
+                       C5 form has no rm extension bit, so GAS flips
+                       to the store opcode and carries the source in
+                       the register field instead */
+                    use_op2 = 1;
+                    regop = &ops[0]; rmop = &ops[1];
+                } else {
+                    rmop = &ops[0]; regop = &ops[1];
+                }
+                break;
+            case VF_MOVDQ:
+                if ((ops[0].type & OP_VEC) && !(ops[1].type & OP_VEC)) {
+                    /* a store: the second opcode;
+                       register-to-register moves take the load form */
+                    use_op2 = 1;
+                    if (vi->ext) pp_use = vi->ext;
+                    regop = &ops[0]; rmop = &ops[1];
+                } else {
+                    rmop = &ops[0]; regop = &ops[1];
+                }
+                break;
+            case VF_MOVQ:
+                /* GAS's four vmovq forms, measured byte for byte:
+                   GPR->vec 66 6E W1, mem/vec->vec F3 7E W0,
+                   vec->GPR 66 7E W1, vec->mem 66 D6 W0 (the W is a
+                   VEX-only fact; EVEX keeps the entry's W) */
+                if (ops[1].type & OP_VEC) {
+                    regop = &ops[1]; rmop = &ops[0];
+                    if (ops[0].type & OP_REG) {
+                        pp_use = PP_66; w_override = 1;
+                    } else {
+                        use_op2 = 1; pp_use = PP_F3; w_override = 0;
+                    }
+                } else if (ops[0].type & OP_VEC) {
+                    regop = &ops[0]; rmop = &ops[1];
+                    if (ops[1].type & OP_REG) {
+                        use_op2 = 1; pp_use = PP_66; w_override = 1;
+                    } else {
+                        use_op3 = 1; pp_use = PP_66; w_override = 0;
+                    }
+                } else
+                    tcc_error("bad operands for 'vmovq'");
+                break;
+            case VF_BCAST:
+                rmop = &ops[0]; regop = &ops[1];
+                if (rmop->type & OP_REG) {
+                    /* a general-register source is a different
+                       opcode (vpbroadcastq %r10: 0x7c, not 0x59),
+                       and that form exists only in EVEX encoding */
+                    if (!vi->opcode2)
+                        tcc_error("'%s' has no general-register source form",
+                                  get_tok_str(opcode, NULL));
+                    use_op2 = 1;
+                    force_evex = 1;
+                }
+                break;
+            case VF_MOVMSK:
+                rmop = &ops[0]; regop = &ops[1];
+                if (!(regop->type & OP_REG) || (regop->type & OP_EA))
+                    tcc_error("movmsk destination must be a general register");
+                break;
+            case VF_EXTRACT:
+                immop = &ops[0]; regop = &ops[1]; rmop = &ops[2];
+                break;
+            case VF_SHIFTI:
+                immop = &ops[0]; rmop = &ops[1]; vvvvop = &ops[2];
+                regop = NULL;
+                break;
+            case VF_PERMI:
+                immop = &ops[0]; rmop = &ops[1]; regop = &ops[2];
+                break;
+            case VF_ZERO:
+                break;
+            }
+            /* role validation (KMOV validated its own roles) */
+            if (vi->form != VF_KMOV) {
+            if (vi->flags & VX_GPR) {
+                if (regop && !(regop->type & OP_REG))
+                    tcc_error("'%s' needs general-purpose registers",
+                              get_tok_str(opcode, NULL));
+                if (vvvvop && !(vvvvop->type & OP_REG))
+                    tcc_error("'%s' needs general-purpose registers",
+                              get_tok_str(opcode, NULL));
+            } else {
+                if (regop && vi->form != VF_MOVMSK && vi->form != VF_KCMP
+                    && !(regop->type & OP_VEC))
+                    tcc_error("'%s' needs a vector register destination",
+                              get_tok_str(opcode, NULL));
+                if (vvvvop && !(vvvvop->type & OP_VEC))
+                    tcc_error("'%s' needs a vector register source",
+                              get_tok_str(opcode, NULL));
+            }
+            if (rmop && !(rmop->type & OP_EA) && !(rmop->type & OP_VEC)
+                && !((rmop->type & OP_REG)
+                     && ((vi->flags & (VX_RMGPR | VX_GPR | VX_SRCGPR))
+                         || vi->form == VF_MOVDQ
+                         || vi->form == VF_MOVQ)))
+                tcc_error("bad rm operand for '%s'",
+                          get_tok_str(opcode, NULL));
+            }
+            if (immop && !(immop->type
+                           & (OP_IM8 | OP_IM8S | OP_IM16 | OP_IM32 | OP_IM64)))
+                tcc_error("'%s' needs an immediate first operand",
+                          get_tok_str(opcode, NULL));
+            if (is4op && !(is4op->type & OP_VEC))
+                tcc_error("blend control must be a vector register");
+            /* vector width: the widest vector operand sets L/L'L */
+            for (i = 0; i < nb; i++) {
+                int wop = -1;
+                if (ops[i].type & OP_ZMM) wop = 2;
+                else if (ops[i].type & OP_YMM) wop = 1;
+                else if (ops[i].type & OP_SSE) wop = 0;
+                if (wop > ll) ll = wop;
+            }
+            /* extracts take L'L from the widest operand like
+               everything else (GAS: vextracti64x2 from ymm carries
+               L'L=01, from zmm L'L=10 — the SOURCE width) */
+            /* equal widths on the plain three-operand ALU forms
+               (the imm8 forms include inserts, whose widths differ
+               by design, so they are not checked here) */
+            if (vi->form == VF_NDS3 && !(vi->flags & VX_GPR)) {
+                int wseen = -1;
+                Operand *roles[3];
+                roles[0] = rmop; roles[1] = vvvvop; roles[2] = regop;
+                for (i = 0; i < 3; i++) {
+                    int wop;
+                    if (!roles[i] || (roles[i]->type & OP_EA))
+                        continue;
+                    wop = (roles[i]->type & OP_ZMM) ? 2
+                        : (roles[i]->type & OP_YMM) ? 1 : 0;
+                    if (wseen < 0) wseen = wop;
+                    else if (wop != wseen)
+                        tcc_error("vector width mismatch in '%s'",
+                                  get_tok_str(opcode, NULL));
+                }
+            }
+            if (regop) regnum = regop->reg;
+            if (vvvvop) vvvvnum = vvvvop->reg;
+            rm_is_reg = rmop && !(rmop->type & OP_EA);
+            /* extension facts for the rm side */
+            if (rmop) {
+                if (rm_is_reg) {
+                    ext_b = (rmop->reg >> 3) & 1;
+                    ext_x = (rmop->reg >> 4) & 1;
+                } else if (rmop->reg >= 0) {
+                    ext_b = (rmop->reg >> 3) & 1;
+                    if (rmop->reg2 >= 0)
+                        ext_x = (rmop->reg2 >> 3) & 1;
+                }
+            }
+            w = (vi->flags & VX_WGPR)
+                ? !!(regop && (regop->type & OP_REG64)) : vi->w;
+            if (kmov_gpr_w >= 0) w = kmov_gpr_w;
+            /* prefix family selection */
+            evex = 0;
+            if (vi->flags & VX_EVEONLY) evex = 1;
+            if (ll == 2) evex = 1;
+            if (nb > 0 && (mask[nb - 1] >= 0 || zero[nb - 1])) evex = 1;
+            if (regop && !(vi->flags & VX_GPR) && vi->form != VF_MOVMSK
+                && regnum >= 16) evex = 1;
+            if (vvvvop && vvvvnum >= 16) evex = 1;
+            if (rm_is_reg && rmop->reg >= 16) evex = 1;
+            if (vi->form == VF_KMOV) evex = 0; /* no EVEX kmov */
+            if (vi->flags & VX_EVEXPREF) evex = 1;
+            if (force_evex) evex = 1;
+            if (w_override >= 0 && !evex) w = w_override;
+            /* EVEX vmovq resolves differently from VEX (measured):
+               loads take 66 6E, stores 66 7E, register moves keep
+               the F3 7E form — all at the entry's W */
+            if (vi->form == VF_MOVQ && evex) {
+                if (ops[1].type & OP_VEC) {
+                    if (ops[0].type & OP_VEC) {
+                        use_op2 = 1; use_op3 = 0; pp_use = PP_F3;
+                    } else {
+                        use_op2 = 0; use_op3 = 0; pp_use = PP_66;
+                    }
+                } else {
+                    use_op2 = 1; use_op3 = 0; pp_use = PP_66;
+                }
+            }
+            /* GAS {vex} / {evex} line prefixes (tccasm.c records
+               the request on the state) */
+            if (s1->asm_vex_force == 1) {
+                if ((vi->flags & VX_EVEONLY) || ll == 2 || force_evex
+                    || regnum >= 16 || vvvvnum >= 16
+                    || (rm_is_reg && rmop->reg >= 16)
+                    || (nb > 0 && (mask[nb - 1] >= 0 || zero[nb - 1])))
+                    tcc_error("{vex} cannot encode '%s' as written",
+                              get_tok_str(opcode, NULL));
+                evex = 0;
+            } else if (s1->asm_vex_force == 2) {
+                evex = 1;
+            }
+            if (!evex) {
+                int wvex = (vi->flags & VX_W0VEX) ? 0 : w;
+                c5 = vi->map == 1 && !wvex
+                    && regnum < 16
+                    && (!rmop || rm_is_reg
+                        ? (!rmop || rmop->reg < 8)
+                        : (rmop->reg < 8 && rmop->reg2 < 8));
+                /* note: regnum < 16 always here (evex handled >= 16);
+                   the C5 R bit covers reg 8..15, vvvv is 4 bits */
+            }
+            state = VSM_PREFIX;
+            break;
+        }
+        case VSM_PREFIX: {
+            int L = (vi->form == VF_ZERO) ? vi->ext : (ll == 1);
+            /* address-size prefix, if an operand asked for one */
+            for (i = 0; i < nb; i++)
+                if (ops[i].type & OP_EA32) { g(0x67); break; }
+            if (evex) {
+                int aaa = nb > 0 && mask[nb - 1] >= 0 ? mask[nb - 1] : 0;
+                int zb = nb > 0 ? zero[nb - 1] : 0;
+                g(0x62);
+                g(((~regnum >> 3) & 1) << 7 | (ext_x ? 0 : 0x40)
+                  | (ext_b ? 0 : 0x20) | ((~regnum >> 4) & 1) << 4
+                  | vi->map);
+                g((w << 7) | ((~vvvvnum & 0xf) << 3) | 0x04 | pp_use);
+                g((zb << 7) | (ll << 5) | ((~vvvvnum >> 4) & 1) << 3
+                  | aaa);
+            } else if (c5) {
+                g(0xc5);
+                g(((~regnum >> 3) & 1) << 7 | ((~vvvvnum & 0xf) << 3)
+                  | (L << 2) | pp_use);
+            } else {
+                int wvex = (vi->flags & VX_W0VEX) ? 0 : w;
+                g(0xc4);
+                g(((~regnum >> 3) & 1) << 7 | (ext_x ? 0 : 0x40)
+                  | (ext_b ? 0 : 0x20) | vi->map);
+                g((wvex << 7) | ((~vvvvnum & 0xf) << 3) | (L << 2)
+                  | pp_use);
+            }
+            state = VSM_OPCODE;
+            break;
+        }
+        case VSM_OPCODE:
+            g(opbyte >= 0 ? opbyte
+              : use_op3 ? vi->ext
+              : (use_op2 ? vi->opcode2 : vi->opcode));
+            state = VSM_MODRM;
+            break;
+        case VSM_MODRM: {
+            Operand mop;
+            if (vi->form == VF_ZERO) {
+                state = VSM_DONE;
+                break;
+            }
+            regfield = vi->form == VF_SHIFTI ? vi->ext : (regnum & 7);
+            mop = *rmop;
+            if (evex) {
+                switch (vi->mw) {
+                case MW_4: eshift = 2; break;
+                case MW_8: eshift = 3; break;
+                case MW_16: eshift = 4; break;
+                case MW_32: eshift = 5; break;
+                default: eshift = 4 + ll; break; /* MW_FULL */
+                }
+            }
+            asm_modrm_vex(regfield, &mop, eshift);
+            state = VSM_IMM;
+            break;
+        }
+        case VSM_IMM:
+            if (vi->form == VF_IS4) {
+                g((is4op->reg & 0xf) << 4);
+            } else if (immop) {
+                if (immop->e.sym)
+                    tcc_error("immediate symbol in VEX instruction");
+                g(immop->e.v);
+            }
+            state = VSM_DONE;
+            break;
+        default:
+            state = VSM_DONE;
+            break;
+        }
+    }
+    return 1;
+}
+
+#endif /* TCC_TARGET_X86_64 */
+
 ST_FUNC void asm_opcode(TCCState *s1, int opcode)
 {
     const ASMInstr *pa;
+#ifdef TCC_TARGET_X86_64
+    if (asm_opcode_vex(s1, opcode))
+        return;
+#endif
     int i, modrm_index, modreg_index, reg, v, op1, seg_prefix, pc, p;
     int nb_ops, s;
     Operand ops[MAX_OPERANDS], *pop;
@@ -812,6 +1623,12 @@ ST_FUNC void asm_opcode(TCCState *s1, int opcode)
     }
 
     s = 0; /* avoid warning */
+
+    /* F31: sal is the GAS spelling of the shl group (/4).  The
+       shift span (rol..sar) has no sal tokens, so map the sal
+       family onto shl before the table search. */
+    if (opcode >= TOK_ASM_salb && opcode <= TOK_ASM_sal)
+        opcode = TOK_ASM_shlb + (opcode - TOK_ASM_salb);
 
 again:
     /* optimize matching by using a lookup table (no hashing is needed
@@ -1160,6 +1977,22 @@ again:
 	        v = 0xe9;
 	    else if (v == 0x70) /* jcc */
 	        v += 0x0f10;
+	    else if (v == 0xe3 || v == 0x67e3) {
+	        /* F31: jrcxz/jecxz have no long form.  GAS resolves a
+	           forward target while assembling; TCC is one pass,
+	           so the byte is emitted under an R_X86_64_PC8
+	           relocation and resolved at link time, the same
+	           deferral TCC already uses for a forward jmp. */
+#ifdef TCC_TARGET_X86_64
+	        greloca(cur_text_section, ops[0].e.sym,
+	                ind + (v >= 0xff ? 2 : 1), R_X86_64_PC8, -1);
+	        ops[0].e.sym = NULL;
+	        ops[0].e.v = 0;
+	        op_type[0] = OP_IM8S;
+#else
+	        tcc_error("invalid displacement");
+#endif
+	    }
 	    else
 	        tcc_error("invalid displacement");
         }

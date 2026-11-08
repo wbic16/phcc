@@ -1718,6 +1718,21 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global)
         tcc_debug_line(s1);
         parse_flags |= PARSE_FLAG_LINEFEED; /* XXX: suppress that hack */
     redo:
+        if (tok == '{') {
+            /* F31: GAS {vex} / {evex} encoding-forcing prefix
+               (the AVX512-IFMA perlasm output uses {vex}) */
+            next();
+            if (tok >= TOK_IDENT
+                && !strcmp(get_tok_str(tok, NULL), "vex"))
+                s1->asm_vex_force = 1;
+            else if (tok >= TOK_IDENT
+                     && !strcmp(get_tok_str(tok, NULL), "evex"))
+                s1->asm_vex_force = 2;
+            else
+                expect("'vex' or 'evex'");
+            next();
+            skip('}');
+        }
         if (tok == TOK_PPNUM && tokc.str.data[0] == '.') {
             /* ".2byte"/".4byte"/".8byte" lex as pp-numbers (a '.'
                followed by a digit starts a number, not an
@@ -1765,6 +1780,7 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global)
                 goto redo;
             } else {
                 asm_opcode(s1, opcode);
+                s1->asm_vex_force = 0;
             }
         }
         /* end of line */

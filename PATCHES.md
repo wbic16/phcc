@@ -34,16 +34,16 @@ from this file alone.
 | `slurp`-era versioning: `VERSION` | 1 line changed | Upstream `VERSION` (0.9.28rc) set to `1.0.0` — the fork's version identity from commit "Forking to v1.0". See rebase resolution R3. |
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
-| `tcc.h` | +79 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20.F21: `TCCState` gains `execstack` (the `-z execstack`/`noexecstack` state) and the input-object records `inp_execstack`/`inp_no_gnustack`. See F21. F25: `TCCState` gains `loading_object_file`. See F25. F27: `TCCState` gains `rela_iplt` and the `iplt`/`nb_iplt` entry array (plus `struct iplt_ent`). See F27. F28: `TCCState` gains the `ver_reqs`, `def_vers` and `symver_recs` arrays and the `dynsym_version_hidden` flags. See F28. F29: `VT_F128` (basic type 15) for `_Float128`/`__float128`. See F29. F30: `sym_attr` gains `tls_pair_offset` (a GD/LD reference's GOT-pair base in DLLs) and `TCCState` gains `tls_get_addr_direct` (the __tls_get_addr reference classification). See F30. |
+| `tcc.h` | +80 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20.F21: `TCCState` gains `execstack` (the `-z execstack`/`noexecstack` state) and the input-object records `inp_execstack`/`inp_no_gnustack`. See F21. F25: `TCCState` gains `loading_object_file`. See F25. F27: `TCCState` gains `rela_iplt` and the `iplt`/`nb_iplt` entry array (plus `struct iplt_ent`). See F27. F28: `TCCState` gains the `ver_reqs`, `def_vers` and `symver_recs` arrays and the `dynsym_version_hidden` flags. See F28. F29: `VT_F128` (basic type 15) for `_Float128`/`__float128`. See F29. F30: `sym_attr` gains `tls_pair_offset` (a GD/LD reference's GOT-pair base in DLLs) and `TCCState` gains `tls_get_addr_direct` (the __tls_get_addr reference classification). See F30. F31: `TCCState` gains `asm_vex_force` (the `{vex}`/`{evex}` line-prefix request recorded by the assembler). See F31. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
 | `tccgen.c` | +444 / −23 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. F23: dead loops inside constant-dead branches stay suppressed -- the loop handlers no longer resurrect them at the loop head (`scan_save_span()`). See F23. F24: the label scan discounts ternary colons (pending-'?' count in `scan_save_span()`). See F24.F29: `_Float128` parses as basic type `VT_F128`; `type_size` gives it 16/16; value materialization, initializers and arguments fail by name until the TF128 codegen lands. See F29. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
-| `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. F28: the `.symver` directive is parsed in full and recorded for the linker's version passes (it was a token-skipping stub). See F28. F29: `_Float128` and `__float128` keywords. See F29. |
-| `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
+| `tccasm.c` | +304 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. F28: the `.symver` directive is parsed in full and recorded for the linker's version passes (it was a token-skipping stub). See F28. F29: `_Float128` and `__float128` keywords. See F29. F31: the `{vex}`/`{evex}` line prefixes are parsed in `tcc_assemble_internal` and cleared after each instruction. See F31. |
+| `i386-asm.c` | +954 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. F31: the VEX/EVEX/BMI2 assembler (+833) — operand branches and OP_YMM/OP_ZMM/OP_KREG classes for the high vector and mask registers, the `asm_opcode_vex` prefix state machine and its table, the sal→shl alias remap, and forward DISP8 branches emitted as `R_X86_64_PC8`. See F31. |
 | `tcctok.h` | +31 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). F17: nine more `DEF_ASMDIR` tokens (`value`, `hword`, `2byte`, `4byte`, `8byte`, `zero`, `float`, `single`, `double`) after `reloc`; `section` remains the last directive token. |
 | `libtcc.c` | +63 / −2 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. F21: `tcc_set_linker` understands `-z execstack`/`-z noexecstack` in all three spellings (separate argument, joined, `=`). See F21. |
 | `tccelf.c` | +1232 / −17 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. F20: the compat-version binding policy — per-entry compat state recorded in `tcc_load_dll` from the defining library's `.gnu.versym` hidden bit, and the matching gate in `bind_exe_dynsyms`. See F20. F21: the object writer emits `.note.GNU-stack`, the object loader records each input's note state, and the link writer emits PT_GNU_STACK under GNU ld's rules. See F21. F22: `R_X86_64_GOTTPOFF` relocations build their GOT entries (an `R_X86_64_TPOFF64` relocation via `put_got_entry`, or a marker for a defined local TLS symbol, rewritten by `fill_local_got_entries` to the symbol-less form), and the dynsym pass of `relocate_syms` writes TLS-block-relative values for TLS symbols. See F22. F25: `set_elf_sym` gains the object-loading-gated duplicate branch (strong definitions involving a real bss section error as multiple definitions), and `tcc_load_object_file`'s resolve loop sets the gate. See F25. F26: `tcc_add_linker_symbols` synthesizes `__ehdr_start` when it is referenced and undefined, and `tcc_add_runtime` adds the GCC runtime archives (libgcc, libgcc_eh) to static links after libtcc1. See F26. F27: the static-IFUNC machinery — `static_ifunc_ref`, `prepare_iplt_relocs`, `fill_iplt_relocs`, the `.rela.plt` section for static executables, the `__rela_iplt_start`/`__rela_iplt_end` bounds, PLT routing for static IFUNC references, and the max-strength merge for undefined-symbol bindings in `set_elf_sym`. See F27. F28: versioned definitions recorded per instance in `tcc_load_dll`; versioned undefined symbols split at object load; `apply_ver_reqs` verifies and pins requested versions; `apply_symver_defs` emits .symver alias entries; the F28 state arrays are freed in the state destructor. See F28. F30: `build_got_entries` allocates GD/LD GOT pairs for DLLs (DTPMOD64/DTPOFF64, local symbols via markers) and the single TPOFF64 slot GD→IE reads in executables; `fill_local_got_entries` rewrites the pair markers to symbol-less form; `scan_tls_get_addr_refs` classifies __tls_get_addr references and `relocate_syms` excuses the fully relaxed symbol in static executables. See F30. |
-| `x86_64-link.c` | +79 / −11 | F22 (first fork change to this file): `relocate()`'s `R_X86_64_GOTTPOFF` case writes the PC-relative address of the symbol's GOT slot (the GOTPCREL formula) instead of a site-independent function of the symbol's own address. See F22. F27: the GLOB_DAT case writes the PLT address for a static executable's defined IFUNC, and the GOTPCREL/GOTPCRELX/REX_GOTPCRELX and GOTTPOFF cases honour the relocation addend instead of a hardcoded -4. See F27. F30: `relocate()`'s TLSGD case branches on output kind and definedness — DLLs keep the sequence and take the GOT pair's address, executables relax GD→LE (with the tp-relative offset formula corrected) or GD→IE for undefined symbols — the TLSLD case likewise keeps the sequence in DLLs, and DTPOFF32/64 compute block-relative offsets in DLLs. See F30. |
+| `x86_64-link.c` | +91 / −11 | F22 (first fork change to this file): `relocate()`'s `R_X86_64_GOTTPOFF` case writes the PC-relative address of the symbol's GOT slot (the GOTPCREL formula) instead of a site-independent function of the symbol's own address. See F22. F27: the GLOB_DAT case writes the PLT address for a static executable's defined IFUNC, and the GOTPCREL/GOTPCRELX/REX_GOTPCRELX and GOTTPOFF cases honour the relocation addend instead of a hardcoded -4. See F27. F30: `relocate()`'s TLSGD case branches on output kind and definedness — DLLs keep the sequence and take the GOT pair's address, executables relax GD→LE (with the tp-relative offset formula corrected) or GD→IE for undefined symbols — the TLSLD case likewise keeps the sequence in DLLs, and DTPOFF32/64 compute block-relative offsets in DLLs. See F30. F31: `relocate()` gains the range-checked `R_X86_64_PC8` case and `gotplt_entry_type()` classes PC8 with PC32 (AUTO_GOTPLT_ENTRY). See F31. |
 | `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
 | `lib/libtcc1.c` | 2 lines changed | Cast the signed high word to `unsigned` before the left shift in `__ashrdi3` and `__lshrdi3` (C11 UB when the high word is negative). Correctness fix, not a phext feature; upstream-shaped and intended for upstream report once validated. See F1. |
@@ -2726,6 +2726,151 @@ structure; the fork's intent is carried, never dropped silently).
     allocation and the relaxation split are link-editor
     ordering facts). Cleared by the Wave D3 phext refresh
     (below).
+
+- **F31 — The assembler frontier: VEX/EVEX prefixes and BMI2
+  (2026-11-08).** F12's census stood at 12/42 OpenSSL perlasm
+  files assembling; the 30 blocked files split as 5 BMI2 `mulx`,
+  4 VEX-128-only and 21 VEX-256/EVEX. This wave closes that
+  frontier, implemented to the measured surface, not the ISA
+  manual. The canonical corpus (the 42 perlasm outputs of
+  OpenSSL 4.1.0, generated with CC=gcc so perlasm emits its full
+  AVX2/AVX512 bodies — under CC=phcc the AVX512/VAES bodies
+  degrade to stubs at generation time) censuses at 100 distinct
+  VEX/BMI2 mnemonics over ~130k instruction lines; decorations
+  are writemask/zeroing only (`{%k1}`–`{%k7}`, `{z}`) — no
+  `{1toN}` broadcast decorations and no `{rn-sae}` rounding
+  appear, and both are rejected loudly, as is everything else
+  outside the table.
+
+  - *Design:* a dedicated VEX path beside the legacy machinery;
+    no legacy table entry or emitted byte changes. Dispatch is
+    at the top of `asm_opcode` (x86-64 only). The encoder,
+    `asm_opcode_vex`, is an explicit state machine —
+    VSM_OPERANDS → VSM_CLASSIFY → VSM_PREFIX → VSM_OPCODE →
+    VSM_MODRM → VSM_IMM → VSM_DONE — driven by a per-mnemonic
+    table (map, opcode, second opcode, pp, W, operand form,
+    group extension / packed per-form data, flags, and the EVEX
+    disp8×N element class). Prefix selection follows GAS's
+    measured rules: EVEX iff the entry is EVEX-only, the vector
+    length is 512, any role register is ≥ 16, a writemask or
+    zeroing decoration is present, the entry prefers EVEX, or a
+    general-register broadcast source forces it; else C5 iff the
+    map is 0F, VEX-W is 0 and every C5 field fits; else C4.
+    EVEX memory displacements are scaled by the entry's element
+    class for numeric displacements only (never symbolic or
+    RIP-relative).
+  - *i386-tok.h (+208):* register tokens for %xmm16–%xmm31,
+    %ymm0–%ymm31, %zmm0–%zmm31 and %k0–%k7 inside the x86-64
+    block, and the VEX/BMI2 mnemonic tokens (all appended after
+    the existing spellings; token additions require a clean
+    rebuild — the Makefile has no header dependency tracking,
+    and a stale tccpp.o keyword table diverges from the token
+    enum by exactly the insertion count).
+  - *i386-asm.c (+833):* the state machine and table (~340
+    entries); OP_YMM/OP_ZMM/OP_KREG operand classes with
+    range branches in `parse_operand` (legacy instructions
+    reject the high registers in operand matching — fail
+    loud); the sal→shl alias remap at the top of `asm_opcode`
+    (upstream has no sal tokens; sal is the shl group /4, whose
+    OPC_SHIFT span cannot express the alias); and forward
+    jrcxz/jecxz: the DISP8 no-short-jump path now emits an
+    `R_X86_64_PC8` relocation (addend −1) instead of erroring
+    (GAS resolves the same reference internally and emits no
+    relocation — same final code, TCC defers the fixup to link
+    time, as it already does for forward jmp).
+  - *x86_64-asm.h (+5):* the `jrcxz` row (0xe3, DISP8) beside
+    jecxz; `movbeq` rows copied from movbe (the store row under
+    ALT, or the token pass emits a duplicate enumerator); and
+    the legacy AES-NI rows `aesenc`/`aesenclast`
+    (0x66dc/0x66dd, OPC_0F38) — an upstream gap (the pristine
+    base fails `aesenc %xmm4,%xmm6` identically); SSE-only 0F38
+    rows carry the 66 in the stored opcode, since the legacy
+    prefix logic only synthesizes it for MMX-or-SSE operands.
+  - *tcc.h (+1), tccasm.c (+16):* `TCCState.asm_vex_force` and
+    the `{vex}`/`{evex}` line prefixes (616 corpus lines, all
+    in rsaz-*avxifma): `{vex}` errors when the instruction as
+    written cannot take a VEX encoding; the vpmadd52 pair is
+    EVEX-preferring in its plain form and takes the VEX form
+    under `{vex}`.
+  - *x86_64-link.c (+12):* the `R_X86_64_PC8` relocation case
+    (difference range-checked to int8, `tcc_error_noabort` on
+    overflow) and its `gotplt_entry_type` class.
+  - *Measured encoding rules the table now carries* (each one
+    cost a probe against GAS; several were silent wrong answers
+    until measured): an unused vvvv field encodes as 0; the
+    BMI2 shifts swap the first two roles against mulx (count in
+    vvvv); rorx is pp F2; vmovq has four forms split by operand
+    class and prefix family (66 6E W1 / F3 7E W0 / 66 7E W1 /
+    66 D6 W0 in VEX; 66 6E / 66 7E / F3 7E at W1 in EVEX);
+    vmovd/q and vpbroadcastq split W by family (VEX 0, EVEX
+    entry W — the VX_W0VEX flag); vpbroadcastq's
+    general-register source is a different opcode (0x7C) and is
+    EVEX-only; kmov's pp/W are per direction and width (kmovd:
+    memory 66/W1, GPR F2/W0); the IS4 blends take AT&T
+    [control, src1, src2, dest] = [IS4, rm, vvvv, reg];
+    vpternlogd/q share opcode 0x25 (W selects); the rotate
+    group is /1 rol, /0 ror; vpsraq sits in the 0F72 group at
+    /4 W1; extracts take L'L from the source width; the 64x4
+    insert/extract opcodes are the base + 2 (0x3A/0x3B);
+    vpblendmd/q are opcode 0x64 (mb/mw 0x66), W by width;
+    vbroadcastf64x2 is 0x1A; vaesdec/vaesdeclast are 0xDE/0xDF;
+    vmovshdup is 0x16; and for register-to-register moves GAS
+    keeps the short C5 form when the source is %xmm8–%xmm15 and
+    the destination is below %xmm8 by flipping to the store
+    opcode — the encoder now does the same (VEX forms only).
+  - *Receipts:* the corpus sweep aligns the two objects'
+    instruction streams on normalized keys (branch targets and
+    RIP displacements abstracted, objdump comment/rex/segment
+    decoration stripped) and proves the key multisets identical
+    per file, so residual unaligned events are accounted, not
+    hidden. Before: 12/42 assemble. After: **42/42 assemble**;
+    paired encodings diverge **nowhere** outside the standing
+    TCC policy classes already documented for F12 — A/D (no
+    jump relaxation; same-section branch targets carried in a
+    RELA addend), B (`.align` padded with 0x90 where GAS uses
+    multi-byte NOPs), C (shift-by-one in C1 /ib form where GAS
+    uses D1), E (GAS's shortest-immediate form), F (movabs
+    imm32 sign-extended form) — plus, in three files, objdump's
+    decodes of embedded `.byte` data, whose bytes are identical
+    by construction. Targeted probes (kmov all forms, BMI2,
+    vmovq/d families, blends, rotates, inserts/extracts,
+    broadcasts, masked forms) are byte-identical to GAS.
+    `make test`: ALL TESTS PASSED. Conformance 328/333, the
+    baseline five, 0 oracle splits. Standing static gate cells:
+    static hello runs (23 IRELATIVE entries in `.rela.plt`),
+    static Lua byte-identical, static phccbox applets run
+    (awk prints 42 — the multicall binary dispatches on
+    argv[0], so the cell's binary must carry the name
+    `phccbox`; the D2 cell script's counter also reads 0
+    IRELATIVE because readelf truncates the type name to
+    IRELATIV — the entries are present). D3 TLS spot cells
+    (GD exe defined, GD DSO undefined) print the exact expected
+    values. OpenSSL: Build A (the F17 recipe; perlasm sources
+    degraded at generation time) completes, 2,183/2,183
+    objects, KAT exact; Build B (sources generated under gcc,
+    then the full build — C and asm — compiled by phcc)
+    completes, 2,183/2,183 objects, KAT exact (SHA-256 and
+    AES-256 FIPS vectors).
+  - *Residues, named:* the forward `loop` family (0xe0–0xe2)
+    shares jrcxz's no-long-form shape but was outside the
+    measured surface; forward references still error loudly.
+    BMI2 beyond the corpus (bextr/bzhi/pdep/pext and the bls
+    group), `vmovsldup`, and every VEX/EVEX form the census did
+    not exercise remain unimplemented and fail loudly as
+    unknown/unsupported rather than mis-assembling. EVEX
+    `{1toN}` and `{rn-sae}` decorations likewise error. The
+    D4-linked static hello carries no `__rela_iplt_*` entries
+    in its symbol table; the relocations themselves are
+    emitted and the binary runs — F31 does not touch the
+    synthesizing code (tccelf.c); recorded as an observation.
+  - *Note for the phext:* this entry changes the Source
+    scrolls of `i386-asm.c`, `i386-tok.h`, `x86_64-asm.h`,
+    `tcc.h`, `tccasm.c` and `x86_64-link.c`, which go STALE at
+    the next refresh, as do the Design views of the assembler
+    (the prefix decoder's state machine is described in the
+    Design collection by the Wave D4 phext refresh, below) and
+    the gate verdict.
+
 
 ## Maintenance rule
 

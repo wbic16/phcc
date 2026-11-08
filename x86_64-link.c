@@ -81,6 +81,7 @@ ST_FUNC int gotplt_entry_type (int reloc_type)
         case R_X86_64_64:
         case R_X86_64_PC32:
         case R_X86_64_PC64:
+        case R_X86_64_PC8: /* F31 */
             return AUTO_GOTPLT_ENTRY;
 
         case R_X86_64_GOTTPOFF:
@@ -264,6 +265,17 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
             }
             add32le(ptr, diff);
         }
+            break;
+
+        case R_X86_64_PC8:
+            /* F31: rel8 branch displacement (jrcxz/jecxz) */
+            {
+                long long diff;
+                diff = (long long)val - addr;
+                if (diff < -128 || diff > 127)
+                    tcc_error_noabort("relocation '%d' out of range", type);
+                ptr[0] = (unsigned char)diff;
+            }
             break;
 
         case R_X86_64_COPY:
