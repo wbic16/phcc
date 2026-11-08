@@ -31,7 +31,7 @@ from this file alone.
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
 | `tcc.h` | +59 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
-| `tccgen.c` | +331 / −16 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. |
+| `tccgen.c` | +333 / −18 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. |
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
@@ -1454,6 +1454,80 @@ structure; the fork's intent is carried, never dropped silently).
     which go STALE at the next refresh; no §A.3 machine description
     changes — none of the four machines describes the assembler's
     directive table.
+
+- **F18 — `_Static_assert` conditions evaluated at 64-bit width:
+  wide constant assertions no longer die as "constant exceeds
+  32 bit" (2026-11-07).**
+  - *Files:* `tccgen.c` (+2/−2).
+  - *Reason:* the publication gate's matrix re-run found GNU
+    coreutils unbuildable and the gnulib-tests subdirs of sed and
+    grep unreachable: current gnulib's `lib/nanosleep.c` carries
+    `static_assert (TYPE_MAXIMUM (time_t) / 24 / 24 / 60 / 60);`
+    (~4.4×10¹² with a 64-bit `time_t`) — in coreutils' library
+    itself, and in sed/grep's test libraries. phcc rejected the
+    file with `error: constant exceeds 32 bit`. Root cause:
+    `do_Static_assert` evaluated the condition through
+    `expr_const()`, the 32-bit helper, which hard-errors on any
+    folded value that fits neither `int` nor `unsigned int` —
+    although C11 §6.7.10 asks only whether the condition compares
+    unequal to 0. Measured threshold on the pre-fix compiler:
+    `4294967295LL` passes, `4294967296LL` errors. Inherited from
+    upstream TinyCC — present at every fork anchor from 395f5d63
+    through 9d070f26, not a wave regression (gate report PQ-17).
+  - *Change:* `do_Static_assert` now evaluates through
+    `expr_const64()` and holds the result in an `int64_t`; the
+    truth test (`c == 0`) and the diagnostics are unchanged, so
+    a false wide assertion produces the ordinary
+    `_Static_assert fail` (or the user's message), not the width
+    error. `expr_const()` itself is untouched.
+  - *Sibling audit (every other `expr_const()` caller in
+    `tccgen.c`, asked the same question — is only truth
+    consumed?):* no other caller has the defect's shape; each
+    consumes the value in a domain the compiler represents as
+    `int`, where the helper's contract matches the consumer —
+    the `regparm` attribute argument (clamped 0–3), bit-field
+    width (checked against the type's width immediately after),
+    the `aligned(N)` attribute argument (a power of two encoded
+    as log2 in a byte field), static array length (TCC type
+    sizes are `int`), the `__builtin_frame_address` /
+    `__builtin_return_address` level (a small integer by
+    definition), and designated-initialiser indices including
+    GNU range designators (stored in `Sym.c`, bounded by the
+    array's own `int` length). The consumers that legitimately
+    need width already have it: enumerator values, case labels
+    and GNU case ranges, and the `__builtin_choose_expr`
+    condition — the one other truth-only consumer — all
+    evaluate through `expr_const64()`. Recorded so the audit
+    is on the record; none of these sites changed.
+  - *Evidence:* a 14-probe suite (the 2³² boundary from both
+    sides, `INT64_MAX`, `UINT64_MAX`, negative wide values, a
+    wide expression equal to 0, a wide `&& 0` with a user
+    message, the gnulib expression shape, an assertion inside
+    a struct declaration, a non-constant condition): after the
+    fix the outcome class matches gcc 13.3.0 on all 14 (the
+    non-constant probe is a hard error under both compilers;
+    the wording is each compiler's own). Before the fix, 6 of
+    the 14 died with "constant exceeds 32 bit" where gcc
+    accepts. The gate reproducer (`static-assert-64bit.c`)
+    now compiles clean. Upstream `make test` ALL TESTS PASSED.
+    Conformance spot re-run unchanged: 328/333 three-way, the
+    diverge set exactly the five documented class-(b) probes
+    (`a_pp_018`, `b_gnu_009`, `b_gnu_015`, `b_gnu_016`,
+    `b_gnu_020`), zero oracle splits. Project receipts (fresh
+    trees, benchmark recipes, fixed compiler): **GNU coreutils
+    9.12 builds completely** — configure and `make` both rc=0,
+    where the gate stopped inside `lib/` — and the built `wc`
+    over the benchmark corpus prints `1200000  13200000
+    166768523`, byte-identical to the benchmark's recorded
+    output for all three compilers. **GNU sed 4.10 `make
+    check` exits 0**: main suite 64 pass / 0 fail, gnulib-tests
+    222 pass / 0 fail — the gnulib-tests block is exactly what
+    PQ-17 made unreachable. **GNU grep 3.12 `make check` exits
+    0**: main suite 107 pass / 0 fail, gnulib-tests 257 pass /
+    0 fail. Note for the phext: this entry changes `tccgen.c`'s
+    Source scroll, its Volume 3 segmentation and Design view,
+    machine #2's binding, and the gate verdict, which go STALE
+    at the next refresh.
 
 ## Maintenance rule
 

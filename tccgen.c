@@ -9181,12 +9181,12 @@ static void free_inline_functions(TCCState *s)
 
 static void do_Static_assert(void)
 {
-    int c;
+    int64_t c;
     const char *msg;
 
     next();
     skip('(');
-    c = expr_const();
+    c = expr_const64();
     msg = "_Static_assert fail";
     if (tok == ',') {
         next();
