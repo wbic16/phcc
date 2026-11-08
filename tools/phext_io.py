@@ -113,6 +113,90 @@ def parse_dedup_ref(data):
     return parse_coord(m.group(1).decode("ascii")), m.group(2).decode("ascii")
 
 
+# ------------------------------------------------------- statement refs
+# EXTENSION (statement tier, 2026-11-07): the statement-level
+# expression. A Volume 3 segment payload may be rewritten as a
+# statement reference sequence — the member's body expressed as an
+# ordered list of references to statement scrolls, each of which
+# holds one distinct statement core exactly once (Library 20000,
+# content-derived coordinates; see METHODS.md, "analyze —
+# statement tier"). The payload grammar is exact, like the dedup
+# stub's: a payload is a statement sequence iff it matches in full.
+#
+#     #phcc-stmt-seq 1\n
+#     #phcc-stmt-ref <coordinate> <sha256-of-core> <indent-hex>\n
+#     #phcc-stmt-ref EMPTY <indent-hex>\n
+#     ...
+#
+# Each reference names the statement scroll holding the segment's
+# core bytes (the segment minus its leading whitespace), the
+# SHA-256 of those core bytes, and the segment's leading whitespace
+# itself, hex-encoded (whitespace is the one part of a segment that
+# is positional, not content). EMPTY stands for the empty core (a
+# whitespace-only segment — e.g. a gap tail); it names no scroll.
+# Expansion is indent + core, concatenated in order, and must
+# reproduce the original segment payload byte-for-byte — unpack
+# verifies that against the file index's recorded payload SHA-256,
+# exactly as it does for a literal payload.
+STMT_SEQ_MAGIC = b"#phcc-stmt-seq 1\n"
+STMT_COORD_PAT = rb"\d+\.\d+\.\d+/\d+\.\d+\.\d+/\d+\.\d+\.\d+"
+STMT_REF_RE = re.compile(
+    rb"#phcc-stmt-ref (" + STMT_COORD_PAT + rb") ([0-9a-f]{64}) "
+    rb"([0-9a-f]*)")
+STMT_REF_EMPTY_RE = re.compile(rb"#phcc-stmt-ref EMPTY ([0-9a-f]*)")
+
+
+def stmt_ref(coord, core_sha256, indent):
+    """One reference line (bytes, newline-terminated)."""
+    return (b"#phcc-stmt-ref " + fmt(coord).encode("ascii") + b" "
+            + core_sha256.encode("ascii") + b" "
+            + indent.hex().encode("ascii") + b"\n")
+
+
+def stmt_ref_empty(indent):
+    """The reference line for a whitespace-only segment."""
+    return b"#phcc-stmt-ref EMPTY " + indent.hex().encode("ascii") \
+        + b"\n"
+
+
+def parse_stmt_seq(data):
+    """Parse a statement reference sequence payload. Returns a list
+    of (coord_tuple | None, sha256_hex | None, indent_bytes) — the
+    EMPTY form yields (None, None, indent) — or None when `data` is
+    not exactly a statement sequence. A payload that opens with the
+    magic but then breaks the grammar is corruption, not a plain
+    payload: callers that expand must treat a magic-prefixed
+    non-parse as an error (see phcc_migrate.resolve_stmt_seq)."""
+    if data is None or not data.startswith(STMT_SEQ_MAGIC):
+        return None
+    rest = data[len(STMT_SEQ_MAGIC):]
+    if rest == b"":
+        return []
+    if not rest.endswith(b"\n"):
+        return None
+    refs = []
+    for line in rest[:-1].split(b"\n"):
+        m = STMT_REF_RE.fullmatch(line)
+        if m:
+            try:
+                indent = bytes.fromhex(m.group(3).decode("ascii"))
+            except ValueError:
+                return None
+            refs.append((parse_coord(m.group(1).decode("ascii")),
+                         m.group(2).decode("ascii"), indent))
+            continue
+        m = STMT_REF_EMPTY_RE.fullmatch(line)
+        if m:
+            try:
+                indent = bytes.fromhex(m.group(1).decode("ascii"))
+            except ValueError:
+                return None
+            refs.append((None, None, indent))
+            continue
+        return None
+    return refs
+
+
 def parse_manifest(scrolls):
     """Return {path: coord_tuple} from the Slice 0 placement manifest
     scroll (Meta, Volume 2, Book 10, Ch 1, Sec 1)."""

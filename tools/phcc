@@ -6,6 +6,9 @@
                 [--no-vol3] [--ts-python PY]
     phcc analyze --phext X.phext [--out REPORT]
     phcc analyze --phext X.phext --apply --out Y.phext [--report R]
+    phcc analyze --phext X.phext --statements [--out REPORT]
+    phcc analyze --phext X.phext --build-stmt --out Y.phext [--report R]
+    phcc analyze --phext Y.phext --verify-stmt [--out REPORT]
     phcc build-region list --phext X.phext
     phcc build-region wipe --phext X.phext --out Y.phext [--force]
     phcc seal   --phext X.phext [--out X.phext.xz] [--force]
@@ -20,7 +23,11 @@ analyze: duplication census (EXACT payload-hash clusters + NEAR
 normalized clusters, report-only) and, with --apply, automatic
 de-duplication — duplicate segment/file bodies replaced by dedup
 stubs that unpack expands; receipt bindings a rewrite invalidates
-are listed DEMOTED-TO-STALE, never silently rewritten.
+are listed DEMOTED-TO-STALE, never silently rewritten. The
+statement tier (--statements / --build-stmt / --verify-stmt)
+re-expresses the corpus at statement grain: each distinct
+statement held once in a statement library, member scrolls as
+reference sequences that unpack expands.
 build-region: list or wipe the Library-10000 build-artifact region
 (binary build outputs, base64 in-phext; wiped and reset frequently).
 seal/unseal: the working phext is plain text; the xz seal is the

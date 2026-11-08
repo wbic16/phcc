@@ -28,6 +28,13 @@ What is reused vs adapted (nothing reinvented silently):
     target verified against the stub's SHA-256, then the usual
     manifest/index verification runs on the expanded bytes — see
     METHODS.md, "analyze".
+  - unpack --from vol3 also expands statement reference sequences
+    written by `phcc analyze --build-stmt` (phext_io statement
+    refs): each referenced statement scroll is verified against
+    the SHA-256 its reference records, the segment payload is
+    reassembled as whitespace + statement cores in order, and the
+    usual index verification runs on the result — see METHODS.md,
+    "analyze — statement tier".
   - pack stage A (tree -> Volume 1 + Volume 2 + placement manifest):
     ADAPTED from Slice 0 tools/import_phcc.py (placement table
     `place()` copied verbatim, plus extensions: tools/** -> Book 10
@@ -58,7 +65,7 @@ import argparse, hashlib, os, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from phext_io import (walk_bytes, implode, fmt, sha256, parse_coord,
-                      parse_dedup_ref)
+                      parse_dedup_ref, parse_stmt_seq, STMT_SEQ_MAGIC)
 
 LEVEL_BYTES = [0x01, 0x1F, 0x1E, 0x1D, 0x1C, 0x1A, 0x19, 0x18, 0x17]
 DELIM_SET = set(LEVEL_BYTES)
@@ -135,6 +142,44 @@ def resolve_stub(scrolls, data, segment, stats):
     if stats is not None:
         stats["dedup_refs"] = stats.get("dedup_refs", 0) + 1
     return payload
+
+
+def resolve_stmt_seq(scrolls, data, stats=None):
+    """Expand a statement reference sequence (phext_io statement
+    refs, written by `phcc analyze --build-stmt`) to the segment
+    payload it expresses. Returns None when `data` is not a
+    statement sequence. Each reference's target scroll must exist
+    and hash to the SHA-256 the reference records; the EMPTY form
+    contributes only its whitespace. A payload that opens with the
+    statement magic but does not parse in full is corruption and
+    raises ValueError — it is never treated as a literal payload.
+    The caller's index verification then runs on the expanded
+    bytes, so a statement-level phext unpacks under exactly the
+    same verification rules as a plain one."""
+    if data is None or not data.startswith(STMT_SEQ_MAGIC):
+        return None
+    refs = parse_stmt_seq(data)
+    if refs is None:
+        raise ValueError("payload opens with the statement-sequence "
+                         "magic but does not parse in full")
+    parts = []
+    for coord, want, indent in refs:
+        if coord is None:
+            parts.append(indent)
+            continue
+        target = scrolls.get(coord)
+        if target is None:
+            raise ValueError(f"statement target {fmt(coord)} not "
+                             "present in phext")
+        if sha256(target) != want:
+            raise ValueError(f"statement target {fmt(coord)} sha256 "
+                             f"{sha256(target)[:16]}… != reference's "
+                             f"{want[:16]}…")
+        parts.append(indent)
+        parts.append(target)
+    if stats is not None:
+        stats["stmt_refs"] = stats.get("stmt_refs", 0) + len(refs)
+    return b"".join(parts)
 
 
 def unpack_vol2(scrolls, entries, stats=None):
@@ -216,8 +261,11 @@ def unpack_vol3(scrolls, entries, stats=None):
             try:
                 resolved = resolve_stub(scrolls, payload, segment=True,
                                         stats=stats)
+                if resolved is None:
+                    resolved = resolve_stmt_seq(scrolls, payload,
+                                                stats=stats)
             except ValueError as ex:
-                why = f"segment scroll {scr} dedup stub: {ex}"
+                why = f"segment scroll {scr} reference: {ex}"
                 break
             if resolved is not None:
                 payload = resolved
@@ -266,6 +314,9 @@ def cmd_export(a):
     if stats.get("dedup_refs"):
         print(f"dedup stubs expanded: {stats['dedup_refs']} "
               f"(each verified against its stub SHA-256)")
+    if stats.get("stmt_refs"):
+        print(f"statement references expanded: {stats['stmt_refs']} "
+              f"(each target verified against its reference SHA-256)")
     print(f"manifest written: {os.path.join(a.out, MANIFEST_NAME)}")
     if failed:
         print("UNPACK FAILURES:", file=sys.stderr)

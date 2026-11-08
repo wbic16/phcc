@@ -145,6 +145,129 @@ views are listed, never edited, and read STALE until their own pass
 re-issues them. Scrolls that merely *mention* a changed hash
 without asserting a binding are listed separately, as mentions.
 
+## analyze — statement tier: statement-level de-duplication as a native expression
+
+    phcc analyze --phext X.phext --statements [--out REPORT]
+    phcc analyze --phext X.phext --build-stmt --out Y.phext [--report R]
+    phcc analyze --phext Y.phext --verify-stmt [--out REPORT]
+
+The member-stub de-duplication above is bounded by byte economics
+(a stub costs ~103 B against ~9 B mean payloads). The statement
+tier is the phext-native expression of the same fact, with the
+file framing removed: segment payloads are split at STATEMENT
+grain, each distinct statement is held exactly once in a
+statement library, and each member scroll expresses its payload
+as an ordered sequence of coordinate references. Files survive
+only as the unpack export view. The metrics are structural —
+instances vs distinct (the ratio), reference integrity, lossless
+round-trip — never byte break-even.
+
+**Splitter.** `split_segments` cuts a payload into
+(indent, core, terminator) triples: after `;` at paren depth 0
+("semi"), after `{` ("open"), after `}` ("close", merging a
+following `;` across whitespace only — "close-semi"), each
+preprocessor line as one segment ("pp", backslash continuations
+respected; a chunk ended by an intervening directive is a
+"split"), the remainder a "tail". String/char literals and
+comments are consumed atom-aware (structural characters inside
+them are content); semicolons inside parentheses never cut (the
+for-header rule); paren depth is clamped at 0 so fragment
+payloads still segment. **Partition invariant: indent + core
+concatenation reproduces the payload byte-for-byte, always** —
+the expression is lossless for any payload, C or not. Known
+limits: initializer lists are single segments (commas never
+cut); a label binds to the statement it prefixes (colons never
+cut); a do-while tail `while (x);` is its own "semi" segment;
+trigraphs are not honoured. Statement identity is the exact core
+bytes — the payload minus its leading whitespace, which is
+positional and travels in the reference.
+
+**Reference sequence format** (phext_io, exact-match grammar).
+A rewritten member payload is the member header line, then
+`#phcc-stmt-seq 1\n`, then one line per segment:
+`#phcc-stmt-ref <coordinate> <sha256-of-core> <indent-hex>\n`,
+or `#phcc-stmt-ref EMPTY <indent-hex>\n` for a whitespace-only
+segment. A payload that opens with the magic but does not parse
+in full is corruption, never a plain payload; unpack expands
+references through `phcc_migrate.resolve_stmt_seq`, verifying
+each target against the reference's recorded SHA-256.
+
+**Coordinates — found, not assigned.** A statement's address is
+a function of its own bytes: Library 20000, the eight remaining
+components are SHA-256(core) digest bytes 0–7 mod 5 + 1, and
+collisions probe forward deterministically in digest order as a
+base-5 counter. The component base is a measured walk-cost
+decision: the first build used mod 99 and materialized
+15,341,147 empty scrolls (15.3 MB of delimiters, ~90 s
+verification walk) around 66,272 statements; mod 5 (390,625
+cells) materializes 108,452 and verifies in ~8 s, keeping every
+address corpus-independent. A register scroll at Meta
+1.1.1/1.2.10/1.23.1 (placement-manifest book, Section 23)
+records the layout, source SHA-256, counts and derivation.
+
+**Census of the canonical corpus** (50,285 payloads, partition
+invariant holds on every one): 134,780 statement instances,
+66,272 distinct (exact) — **ratio 2.03×**; 62,541 distinct under
+NEAR normalization (2.16× headroom). Per group: win32 headers
+59,963/25,356 (2.36×), compiler core 33,275/19,710 (1.69×),
+tests 16,763/9,444, backends 1.62–1.74× each. The most-repeated
+statements are structural (`}` ×8,662, `#endif` ×2,568,
+`break;` ×1,093). **The block census contradicts the natural
+guess**: the top repeated blocks (≥3 statements) are brace
+closers, preprocessor guards and win32 struct-field runs — not
+hoistable code; only 17 blocks in compiler .c files carry ≥2
+executable statements at ≥6 occurrences, the best saving 36 of
+134,780 references (0.03%). The repeated mass lives in single
+statements, so factoring is prototyped at that grain (below).
+
+**Proofs on the built expression** (`phcc-stmt.phext`,
+75,227,453 B, beside the canonical phext): (a) all 134,780
+references resolve and hash-verify, and all 50,285 expanded
+payloads match their file-index SHA-256; (b) `unpack --from
+vol3` reproduces the original 558-file tree byte-for-byte
+(manifest hash columns identical); (c) the statement library
+holds 66,272 scrolls with 66,272 distinct contents, exactly the
+set the references name — each distinct statement held exactly
+once. Exercised end-to-end (plus splitter/grammar unit cases) by
+`tools/test_stmt.py`, 32 checks.
+
+**The floor this flexes on.** Older toolchains de-duplicate at
+function/section grain at finest, and leave no artifact:
+measured on a program whose six functions share one identical
+6-statement block but differ in their return value, GNU gold
+`--icf=all` folds only the byte-identical control pair (37 B of
+text) and all six block copies survive; GNU bfd ld does not
+accept `--icf` at all; MSVC `/OPT:ICF` is the same function
+grain by documentation; compiler CSE works within one function
+at IR level and leaves nothing inspectable. The statement
+expression of the same program holds the block's statements
+once each (77 instances / 41 distinct), capturing within- and
+cross-function repetition below that floor, as a durable,
+hash-verified artifact.
+
+| toolchain | finest dedup grain | inspectable artifact |
+|---|---|---|
+| GNU ld (bfd) | none (no ICF) | — |
+| GNU gold / lld `--icf=all` | identical function/section | link map only |
+| MSVC `/OPT:ICF` | identical function (COMDAT) | link map only |
+| gcc/clang CSE | expression, within one function, IR only | none |
+| phcc statement expression | statement, within + across functions | the phext itself, hash-verified |
+
+**Factoring prototype (census-scoped).** The dominant
+*executable* cluster is the tccpp.c scroll-break tail —
+`file->line_num = 1; tok_flags |= TOK_FLAG_BOL; p++;
+tok = TOK_SCROLL_BREAK;` — at all nine phext-break cases of
+`next_nomacro`, each ending `goto keep_tok_flags;`. Hoisted
+into a static helper (the goto stays at each site; control flow
+cannot be called), measured .text effect on tccpp.o: phcc
+48,514 → 48,065 B (−449, −0.93%), gcc -O0 39,192 → 38,913
+(−279), gcc -O2 unchanged (the optimizer already absorbs it).
+The factored tree passes `make test` in full. A measurement,
+not a shipped codegen change: at statement grain the
+*expression* is the factoring — the object-level effect is real
+only where codegen is unoptimised, which is precisely phcc's
+own regime.
+
 ## Round-trip invariants (proven on the canonical corpus)
 
 - **tree → phext → tree: identity.** All 558 files byte-identical
@@ -156,6 +279,13 @@ without asserting a binding are listed separately, as mentions.
   (559/559), and the **entire Volume 3** (50,816/50,816 — every index
   scroll and every member payload). The segmentation is a fixed
   point of pack: unpack∘pack loses nothing the tree ever held.
+- **phext → statement phext → tree: identity.**
+  `analyze --build-stmt` rewrites every member payload as a
+  statement reference sequence; unpack of the statement phext
+  reproduces the original 558-file tree byte-for-byte, and
+  `analyze --verify-stmt` proves every reference hash-verified
+  and each distinct statement held exactly once (see the
+  statement-tier section).
 - **phext → dedup phext → tree: identity.** `analyze --apply` is
   lossless by construction and by proof: unpack of the deduplicated
   phext (both routes) reproduces the original tree byte-for-byte,

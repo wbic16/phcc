@@ -6,6 +6,16 @@ mode for automatic de-duplication"):
 
     phcc analyze --phext X.phext [--out REPORT]
     phcc analyze --phext X.phext --apply --out Y.phext [--report R]
+    phcc analyze --phext X.phext --statements [--out REPORT]
+    phcc analyze --phext X.phext --build-stmt --out Y.phext [--report R]
+    phcc analyze --phext Y.phext --verify-stmt [--out REPORT]
+
+The statement tier (--statements / --build-stmt / --verify-stmt)
+re-expresses the corpus at statement grain: segment payloads are
+split into statement-grain segments, each distinct statement core
+is held once in a statement library at a content-derived
+coordinate, and member scrolls become ordered reference
+sequences. See the statement-tier section below and METHODS.md.
 
 Census (default) is read-only and has two tiers:
 
@@ -544,6 +554,624 @@ def demote_scan(scrolls, changed, touched, rewritten, seg_stubs):
     return demoted, mentions
 
 
+# ------------------------------------------------------ statement tier
+# Statement-level de-duplication as a phext-native expression
+# (Will's directive, 2026-11-07: "phcc needs to flex on older
+# compilation toolchains by expressing statement-level
+# de-duplication", refined by his ruling "we have as many scrolls
+# as we need — files and filenames don't concern us").
+#
+# The member-stub apply above answers duplication at member grain
+# inside a file-shaped phext; its economics were a byte loss and
+# that framing is retired for this tier. Here the corpus is
+# re-expressed at statement grain: every Volume 3 segment payload
+# is split into statement-grain segments (the splitter below), each
+# distinct statement core is held exactly once in a dedicated
+# statement library (Library 20000) at a content-derived
+# coordinate, and each member scroll is rewritten as an ordered
+# sequence of statement references (phext_io statement refs) —
+# composition by reference. Files survive only as the unpack
+# export view. The success metrics are structural, not bytes:
+# instances vs distinct (the de-duplication ratio), reference
+# integrity (every reference resolves, hash-verified), and a
+# lossless round-trip through `phcc unpack`.
+from phext_io import (parse_stmt_seq, stmt_ref, stmt_ref_empty,
+                      STMT_SEQ_MAGIC)
+
+STMT_LIBRARY = 20000
+STMT_REGISTER_COORD = (1, 1, 1, 1, 2, 10, 1, 23, 1)
+_STMT_WS = frozenset(b" \t\r\n\x0b\x0c")
+_BLOCK_LENS = (3, 4, 5, 6, 8, 10, 12, 16, 20)
+
+
+def split_segments(data):
+    """Split a C payload into statement-grain segments.
+
+    Returns a list of (indent, core, terminator): indent is the
+    segment's leading whitespace (positional, not content), core
+    is the remaining bytes, and terminator names what ended the
+    segment — "semi" (`;` at paren depth 0), "open" (`{`), "close"
+    (`}`), "close-semi" (`}` + optional whitespace + `;`, the
+    struct/array-declaration ending taken as one unit), "pp" (a
+    preprocessor line), "split" (a chunk ended by an intervening
+    preprocessor line, not by its own delimiter), "tail" (the
+    remainder after the last delimiter). Joining indent + core
+    over the list reproduces `data` byte-for-byte, always — the
+    partition is total, so the statement expression built on it is
+    lossless for any payload, C or not.
+
+    The scanner is atom-aware: string/char literals and comments
+    are consumed whole (structural characters inside them are
+    content), semicolons inside parentheses never cut (the
+    for-header rule), and a preprocessor line is detected only at
+    a line start and consumed to its logical end (backslash
+    continuations respected). Paren depth is clamped at 0 so
+    fragment payloads (gap segments) still segment. Known limits,
+    by design: initializer lists are single segments (they are
+    single declarations; commas never cut), a label binds to the
+    statement it prefixes (colons never cut), a do-while tail
+    `while (x);` segments as its own "semi" segment, and
+    trigraphs are not honoured."""
+    if not data:
+        return []
+    n = len(data)
+    cuts = []                       # (end_index, terminator)
+    cur = [0]                       # start of the open segment
+
+    def cut(end, term):
+        cuts.append((end, term))
+        cur[0] = end
+
+    i, paren = 0, 0
+    at_line_start, line_begin = True, 0
+    while i < n:
+        b = data[i]
+        if b == 0x0A:                                   # newline
+            i += 1
+            at_line_start, line_begin = True, i
+            continue
+        if b in (0x20, 0x09, 0x0D, 0x0B, 0x0C):         # other ws
+            i += 1
+            continue
+        if b == 0x2F and i + 1 < n and data[i + 1] == 0x2F:
+            j = data.find(b"\n", i)                     # // comment
+            i = n if j < 0 else j
+            at_line_start = False
+            continue
+        if b == 0x2F and i + 1 < n and data[i + 1] == 0x2A:
+            j = data.find(b"*/", i + 2)                 # /* comment
+            end = n if j < 0 else j + 2
+            seg = data[i:end]
+            k = seg.rfind(b"\n")
+            if k >= 0:
+                at_line_start = all(c in _STMT_WS
+                                    for c in seg[k + 1:])
+                line_begin = i + k + 1
+            else:
+                at_line_start = False
+            i = end
+            continue
+        if b in (0x22, 0x27):                           # " / ' literal
+            q = b
+            i += 1
+            while i < n:
+                if data[i] == 0x5C:
+                    i += 2
+                    continue
+                if data[i] == q:
+                    i += 1
+                    break
+                i += 1
+            at_line_start = False
+            continue
+        if b == 0x23 and at_line_start:                 # # directive
+            # An interrupted chunk is cut at its line's start, and
+            # the newline that ends the interrupted line belongs
+            # to the directive segment's leading whitespace (the
+            # same place the newline after a `;` lands), so cores
+            # never carry a stray trailing newline from the split.
+            pre = line_begin - 1 if line_begin > 0 \
+                and data[line_begin - 1] == 0x0A else line_begin
+            if cur[0] < pre and any(
+                    c not in _STMT_WS for c in data[cur[0]:pre]):
+                cut(pre, "split")
+            j = i
+            while True:
+                k = data.find(b"\n", j)
+                if k < 0:
+                    j = n
+                    break
+                m, bs = k - 1, 0
+                while m >= i and data[m] == 0x5C:
+                    bs += 1
+                    m -= 1
+                if bs % 2 == 1:                         # continued
+                    j = k + 1
+                    continue
+                j = k
+                break
+            i = j
+            cut(i, "pp")
+            at_line_start = False
+            continue
+        if b == 0x28:
+            paren += 1
+        elif b == 0x29:
+            paren = max(0, paren - 1)
+        elif b == 0x7B:                                 # {
+            i += 1
+            cut(i, "open")
+            at_line_start = False
+            continue
+        elif b == 0x7D:                                 # }
+            i += 1
+            j = i
+            while j < n and data[j] in _STMT_WS:
+                j += 1
+            if j < n and data[j] == 0x3B:
+                cut(j + 1, "close-semi")
+                i = j + 1
+            else:
+                cut(i, "close")
+            at_line_start = False
+            continue
+        elif b == 0x3B and paren == 0:                  # ;
+            i += 1
+            cut(i, "semi")
+            at_line_start = False
+            continue
+        at_line_start = False
+        i += 1
+    if not cuts or cuts[-1][0] < n:
+        cuts.append((n, "tail"))
+    out, start = [], 0
+    for end, term in cuts:
+        raw = data[start:end]
+        k = 0
+        while k < len(raw) and raw[k] in _STMT_WS:
+            k += 1
+        out.append((raw[:k], raw[k:], term))
+        start = end
+    return out
+
+
+_BACKEND_PREFIXES = ("x86_64", "i386", "arm64", "arm", "riscv64",
+                     "c67", "il")
+
+
+def stmt_group(path):
+    """Coarse grouping for per-backend ratios."""
+    base = path.rsplit("/", 1)[-1]
+    for a in _BACKEND_PREFIXES:
+        if base.startswith(a + "-"):
+            return f"backend:{a}"
+    if path.startswith("win32/include/"):
+        return "headers:win32"
+    if path.startswith("include/"):
+        return "headers"
+    if path.startswith("win32/"):
+        return "win32"
+    if path.startswith("lib/"):
+        return "runtime-lib"
+    if path.startswith("tests/"):
+        return "tests"
+    if "/" not in path and (base.endswith(".c")
+                            or base.endswith(".h")):
+        return "core"
+    return "other"
+
+
+def statement_census(segs):
+    """Segment every segment payload and tally the statement
+    census. Also verifies, on the whole corpus, the splitter's
+    partition invariant (indent + core rejoins to the payload).
+    Returns a dict: totals, per-class / per-file / per-group
+    tallies, top statements, repeated blocks, size distribution,
+    the distinct-core table (sha -> core bytes), and per-segment
+    reference lists for the builder."""
+    cores = {}                       # sha -> core bytes
+    per_segment = []                 # [(indent, sha|None)] per seg
+    total = empty_core = 0
+    classes = collections.Counter()
+    sizes = collections.Counter()
+    per_file = collections.defaultdict(
+        lambda: {"inst": 0, "shas": set()})
+    per_group = collections.defaultdict(
+        lambda: {"inst": 0, "shas": set()})
+    top = collections.Counter()      # sha -> instances
+    example = {}                     # sha -> (path, member name)
+    blocks = {}                      # (L, id-tuple) -> [count, loc]
+    block_cores = {}                 # (L, id-tuple) -> [core bytes]
+    ids = {}                         # sha -> small int id
+    partition_failures = 0
+
+    def bucket(ln):
+        for cap in (8, 16, 32, 64, 128, 256, 512, 1024):
+            if ln <= cap:
+                return f"≤{cap}"
+        return ">1024"
+
+    for rec in segs:
+        payload = rec["payload"]
+        if payload is None:
+            per_segment.append(None)
+            continue
+        parts = split_segments(payload)
+        if b"".join(ind + core for ind, core, _ in parts) != payload:
+            partition_failures += 1
+        pf = per_file[rec["path"]]
+        pg = per_group[stmt_group(rec["path"])]
+        refs, seq = [], []
+        for ind, core, term in parts:
+            total += 1
+            classes[term] += 1
+            sizes[bucket(len(core))] += 1
+            pf["inst"] += 1
+            pg["inst"] += 1
+            if not core:
+                empty_core += 1
+                refs.append((ind, None))
+                seq.append(-1)
+                continue
+            h = sha256(core)
+            if h not in cores:
+                cores[h] = core
+                ids[h] = len(ids)
+            elif cores[h] != core:
+                raise SystemExit("SHA-256 collision between "
+                                 "distinct statement cores")
+            top[h] += 1
+            pf["shas"].add(h)
+            pg["shas"].add(h)
+            if h not in example:
+                example[h] = (rec["path"], rec["name"])
+            refs.append((ind, h))
+            seq.append(ids[h])
+        per_segment.append(refs)
+        for L in _BLOCK_LENS:
+            if len(seq) < L:
+                continue
+            for s0 in range(len(seq) - L + 1):
+                if -1 in seq[s0:s0 + L]:
+                    continue        # blocks span real statements
+                key = (L, tuple(seq[s0:s0 + L]))
+                if key in blocks:
+                    blocks[key][0] += 1
+                else:
+                    blocks[key] = [1, (rec["path"], rec["name"], s0)]
+                    # capture the block's cores at first sight
+                    block_cores[key] = [
+                        parts[s0 + t][1] for t in range(L)]
+    # NEAR tier: distinct normalized forms among the distinct
+    # exact cores (normalizing per distinct core, not per
+    # instance — same set, far less work).
+    near_distinct = len({sha256(normalize_code(c))
+                         for c in cores.values()})
+    return {"total": total, "empty_core": empty_core,
+            "distinct": len(cores), "near_distinct": near_distinct,
+            "classes": classes, "sizes": sizes,
+            "per_file": {p: {"inst": v["inst"],
+                             "distinct": len(v["shas"])}
+                         for p, v in per_file.items()},
+            "per_group": {p: {"inst": v["inst"],
+                              "distinct": len(v["shas"])}
+                          for p, v in per_group.items()},
+            "top": top, "example": example, "blocks": blocks,
+            "block_cores": block_cores, "cores": cores,
+            "per_segment": per_segment,
+            "partition_failures": partition_failures}
+
+
+def _block_rank(item):
+    (L, _t), (count, _loc) = item
+    return -(count * (L - 1))
+
+
+def render_stmt_report(phext_path, raw, segs, sc, build_info=None):
+    L = []
+    add = L.append
+    tot, dis = sc["total"], sc["distinct"]
+    add("# phcc analyze — statement tier census")
+    add("")
+    add(f"- phext: {phext_path}")
+    add(f"- phext bytes: {len(raw)}  sha256: {sha256(raw)}")
+    add(f"- segment payloads segmented: "
+        f"{sum(1 for r in sc['per_segment'] if r is not None)} "
+        f"of {len(segs)} indexed segments")
+    add(f"- splitter partition invariant (indent + core rejoins "
+        f"to the payload, byte-for-byte, every payload): "
+        f"{'HOLDS' if sc['partition_failures'] == 0 else 'FAILED'}"
+        f" ({sc['partition_failures']} failures)")
+    add("")
+    add("## Headline — instances vs distinct")
+    add("")
+    add(f"- statement instances: {tot}")
+    add(f"- distinct statements (exact core bytes): {dis}")
+    add(f"- **de-duplication ratio (exact): "
+        f"{tot / max(dis, 1):.2f}×** — each distinct statement is "
+        f"written once and referenced "
+        f"{tot / max(dis, 1):.2f} times on average")
+    add(f"- distinct statements (NEAR normalization — comments "
+        f"stripped, whitespace collapsed): {sc['near_distinct']} "
+        f"(ratio {tot / max(sc['near_distinct'], 1):.2f}×; the "
+        f"expression deduplicates at the exact tier — the NEAR "
+        f"figure is the headroom a formatting-insensitive "
+        f"expression would add)")
+    add(f"- whitespace-only segments (empty core, EMPTY "
+        f"reference): {sc['empty_core']}")
+    add("")
+    add("## Instances by segment class")
+    add("")
+    for term in ("semi", "open", "close", "close-semi", "pp",
+                 "split", "tail"):
+        if sc["classes"].get(term):
+            add(f"- {term}: {sc['classes'][term]}")
+    add("")
+    add("## Statement core sizes")
+    add("")
+    for cap in ("≤8", "≤16", "≤32", "≤64", "≤128", "≤256", "≤512",
+                "≤1024", ">1024"):
+        if sc["sizes"].get(cap):
+            add(f"- {cap} B: {sc['sizes'][cap]}")
+    add("")
+    add("## Per-group ratio (instances / distinct-in-group)")
+    add("")
+    for g, v in sorted(sc["per_group"].items(),
+                       key=lambda kv: -kv[1]["inst"]):
+        add(f"- {g}: {v['inst']} / {v['distinct']} = "
+            f"{v['inst'] / max(v['distinct'], 1):.2f}×")
+    add("")
+    add("## Per-file ratio (top 25 by instances)")
+    add("")
+    for p, v in sorted(sc["per_file"].items(),
+                       key=lambda kv: -kv[1]["inst"])[:25]:
+        add(f"- {p}: {v['inst']} / {v['distinct']} = "
+            f"{v['inst'] / max(v['distinct'], 1):.2f}×")
+    add("")
+    add("## Most-repeated statements")
+    add("")
+    for h, cnt in sc["top"].most_common(30):
+        core = sc["cores"][h]
+        preview = core[:100].decode("utf-8", "replace") \
+            .replace("\n", "\\n")
+        path, name = sc["example"][h]
+        add(f"- ×{cnt} — `{preview}` ({len(core)} B; first at "
+            f"{path} :: {name})")
+    add("")
+    add("## Most-repeated statement blocks (≥3 consecutive, exact)")
+    add("")
+    add("Ranked by references a factoring would save: "
+        "occurrences × (length − 1).")
+    add("")
+    ranked = sorted(sc["blocks"].items(), key=_block_rank)
+    shown = 0
+    for (Ln, _t), (count, loc) in ranked:
+        if count < 2:
+            break
+        text = b" ".join(sc["block_cores"][(Ln, _t)])
+        preview = text[:220].decode("utf-8", "replace") \
+            .replace("\n", "\\n")
+        add(f"- len {Ln} × {count} occurrences "
+            f"(saves {count * (Ln - 1)} refs) — {preview} "
+            f"(first at {loc[0]} :: {loc[1]} +{loc[2]})")
+        shown += 1
+        if shown >= 25:
+            break
+    if not shown:
+        add("(no block of ≥3 statements repeats)")
+    if build_info:
+        L += render_stmt_build(build_info)
+    return "\n".join(L) + "\n"
+
+
+def render_stmt_build(bi):
+    L = []
+    add = L.append
+    add("")
+    add("## BUILD — the statement-level expression")
+    add("")
+    add(f"- output phext: {bi['out']} ({bi['out_bytes']} B; "
+        f"{bi['delta']:+d} B vs input — bytes are not the metric "
+        f"here; see the ratio above)")
+    add(f"- statement library: Library {STMT_LIBRARY}, "
+        f"{bi['statements']} statement scrolls (one per distinct "
+        f"statement)")
+    add(f"- member scrolls rewritten as reference sequences: "
+        f"{bi['rewritten']} ({bi['refs']} references, "
+        f"{bi['empty_refs']} of them EMPTY/whitespace-only)")
+    add(f"- coordinate derivation: SHA-256 of the statement core; "
+        f"the eight sub-library components are digest bytes 0–7 "
+        f"mod 5 + 1 (content-derived — the address is a function "
+        f"of the statement, recomputed, never assigned); "
+        f"collisions probed deterministically in digest order "
+        f"({bi['probes']} probes needed)")
+    add(f"- register scroll: {fmt(STMT_REGISTER_COORD)} "
+        f"(Meta, placement-manifest book, Section 23)")
+    add(f"- verification: `phcc analyze --verify-stmt --phext "
+        f"{bi['out']}` and `phcc unpack --from vol3` (see "
+        f"METHODS.md, statement tier)")
+    add("")
+    return L
+
+
+def assign_stmt_coords(cores):
+    """Content-derived coordinates for the statement library.
+    Distinct cores are processed in digest (SHA-256 hex) order;
+    the derived coordinate is Library 20000 with the eight
+    remaining components taken from digest bytes 0–7 (mod 5, +1).
+    A collision (a different core deriving an occupied
+    coordinate) probes forward as a base-5 counter over the
+    eight components — deterministic, so the mapping is a pure
+    function of the corpus's digest set: found, not assigned.
+
+    The component base is a walk-cost decision, measured, not
+    assumed: a sparse content-derived layout materializes one
+    empty scroll per unit climbed along the sorted coordinate
+    walk (the Library-10000 build region's documented artifact,
+    at scale). The first build used mod 99 (99^8 cells) and
+    materialized 15,341,147 empty scrolls — 15.3 MB of delimiter
+    bytes around 66,272 statements, and a ~90 s verification
+    walk. Mod 5 (5^8 = 390,625 cells for a 66k corpus) keeps
+    every address a pure function of the statement's own
+    SHA-256 at roughly 1/12 the materialization. Dense rank
+    addressing would erase it entirely but makes addresses
+    corpus-relative; this programme's ledger culture prizes
+    addresses that survive corpus changes."""
+    occupied, assign, probes = {}, {}, 0
+    for h in sorted(cores):
+        d = bytes.fromhex(h)
+        base = [d[k] % 5 + 1 for k in range(8)]
+        while True:
+            coord = (STMT_LIBRARY,) + tuple(base)
+            if coord not in occupied:
+                break
+            probes += 1
+            p = 7
+            while True:
+                base[p] += 1
+                if base[p] <= 5:
+                    break
+                base[p] = 1
+                p -= 1
+                if p < 0:
+                    raise SystemExit("statement coordinate space "
+                                     "exhausted (cannot happen: "
+                                     "5^8 = 390,625 >> corpus)")
+        occupied[coord] = h
+        assign[h] = coord
+    return assign, probes
+
+
+def build_stmt(scrolls, segs, sc, src_sha):
+    """Rewrite every segment payload as a statement reference
+    sequence and add the statement library + register scroll.
+    Returns (new_scrolls, info)."""
+    assign, probes = assign_stmt_coords(sc["cores"])
+    new = dict(scrolls)
+    refs = empty_refs = rewritten = 0
+    for rec, seglist in zip(segs, sc["per_segment"]):
+        if seglist is None:
+            continue
+        lines = [STMT_SEQ_MAGIC]
+        for ind, h in seglist:
+            if h is None:
+                lines.append(stmt_ref_empty(ind))
+                empty_refs += 1
+            else:
+                lines.append(stmt_ref(assign[h], h, ind))
+            refs += 1
+        new[rec["coord"]] = rec["header"] + b"\n" + b"".join(lines)
+        rewritten += 1
+    for h, coord in assign.items():
+        new[coord] = sc["cores"][h]
+    tot, dis = sc["total"], sc["distinct"]
+    new[STMT_REGISTER_COORD] = (
+        "# phcc statement expression — register\n"
+        "# The statement-level layout of the canonical phcc "
+        "corpus: every Volume 3 segment payload is expressed as\n"
+        "# an ordered sequence of statement references "
+        "(phext_io statement refs), and each distinct statement\n"
+        "# core is held exactly once in the statement library.\n"
+        f"# source phext sha256: {src_sha}\n"
+        f"# statement library: {STMT_LIBRARY}\n"
+        f"# statement scrolls: {dis}\n"
+        f"# statement instances referenced: {tot}\n"
+        f"# de-duplication ratio: {tot / max(dis, 1):.4f}\n"
+        "# coordinate derivation: library 20000; the eight "
+        "remaining components are SHA-256(core)\n"
+        "#   digest bytes 0-7 mod 5 + 1, collisions probed "
+        "forward in digest order as a base-5 counter.\n"
+        "# expansion: phcc unpack --from vol3 (each reference "
+        "target verified against its recorded SHA-256,\n"
+        "#   then the file index's payload SHA-256 verifies the "
+        "reassembled segment — the plain rules).\n"
+        "# verification: phcc analyze --verify-stmt on this "
+        "phext.\n").encode("utf-8")
+    info = {"refs": refs, "empty_refs": empty_refs,
+            "rewritten": rewritten, "statements": dis,
+            "probes": probes, "assign": assign}
+    return new, info
+
+
+def verify_stmt(scrolls, entries):
+    """Verify a statement-level phext against its own records:
+    (a) every statement reference resolves and its target hashes
+    to the SHA-256 the reference records (via phcc_migrate's
+    expander, the same code unpack runs), and the reassembled
+    payload hashes to the file index's recorded payload SHA-256;
+    (c) the statement library holds each distinct statement
+    exactly once — the set of library content hashes equals the
+    set of hashes the references name, with no duplicates and no
+    orphans. Returns (ok, lines of report)."""
+    import phcc_migrate
+    segs, _problems = collect_segments(scrolls, entries)
+    refs = expanded = bad = 0
+    failures = []
+    ref_shas = set()
+    for rec in segs:
+        payload = rec["payload"]
+        if payload is None:
+            bad += 1
+            failures.append(f"{rec['path']} :: {rec['name']}: "
+                            "segment missing")
+            continue
+        parsed = parse_stmt_seq(payload)
+        if parsed is None:
+            bad += 1
+            failures.append(f"{rec['path']} :: {rec['name']}: "
+                            "payload is not a statement sequence")
+            continue
+        for coord, want, _ind in parsed:
+            if want is not None:
+                ref_shas.add(want)
+        stats = {}
+        try:
+            out = phcc_migrate.resolve_stmt_seq(scrolls, payload,
+                                                stats)
+        except ValueError as ex:
+            bad += 1
+            failures.append(f"{rec['path']} :: {rec['name']}: {ex}")
+            continue
+        refs += stats.get("stmt_refs", 0)
+        if sha256(out) != rec["index_sha"]:
+            bad += 1
+            failures.append(f"{rec['path']} :: {rec['name']}: "
+                            "expanded payload sha != index sha")
+            continue
+        expanded += 1
+    # The statement library's content scrolls are its non-empty
+    # scrolls: statement cores are never empty (whitespace-only
+    # segments are EMPTY references and hold no scroll), while the
+    # phext walk materializes an empty scroll at every intermediate
+    # coordinate of a sparse region — the same representation
+    # artifact the Library-10000 build region documents. Empty
+    # scrolls in the region are counted and reported, never
+    # mistaken for statements.
+    region = {c: b for c, b in scrolls.items()
+              if c[0] == STMT_LIBRARY}
+    lib = {c: b for c, b in region.items() if b}
+    lib_hashes = [sha256(b) for b in lib.values()]
+    lib_set = set(lib_hashes)
+    c_ok = len(lib_hashes) == len(lib_set) \
+        and lib_set == ref_shas
+    lines = [
+        f"- segments verified: {expanded}/{len(segs)} expand to "
+        f"payloads matching their file-index SHA-256",
+        f"- statement references resolved + hash-verified: {refs}",
+        f"- reference failures: {bad}",
+        f"- statement library: {len(lib)} statement scrolls "
+        f"(+ {len(region) - len(lib)} materialized empty scrolls "
+        f"in the region), {len(lib_set)} distinct contents, "
+        f"{len(ref_shas)} distinct statements referenced — "
+        f"each distinct statement held exactly once: "
+        f"{'YES' if c_ok else 'NO'}",
+    ]
+    for f in failures[:20]:
+        lines.append(f"- FAIL: {f}")
+    ok = bad == 0 and expanded == len(segs) and c_ok
+    return ok, lines
+
+
 # ------------------------------------------------------------ cli
 def run(a):
     raw = open(a.phext, "rb").read()
@@ -555,7 +1183,69 @@ def run(a):
         entries = []
         print("note: no placement manifest — member/file tiers "
               "unavailable, whole-scroll census only", file=sys.stderr)
+    if a.verify_stmt:
+        if not entries:
+            print("REFUSING: --verify-stmt needs the placement "
+                  "manifest", file=sys.stderr)
+            return 2
+        ok, lines = verify_stmt(scrolls, entries)
+        report = ("# phcc analyze — statement expression "
+                  "verification\n\n"
+                  f"- phext: {a.phext}\n"
+                  f"- phext bytes: {len(raw)}  sha256: "
+                  f"{sha256(raw)}\n\n" + "\n".join(lines) + "\n")
+        if a.out:
+            with open(a.out, "w") as f:
+                f.write(report)
+            print(f"verification written: {a.out}")
+        else:
+            print(report)
+        print("verify-stmt:", "OK" if ok else "FAILED")
+        return 0 if ok else 1
     segs, problems = collect_segments(scrolls, entries)
+    if a.statements or a.build_stmt:
+        if not entries:
+            print("REFUSING: statement tier needs the placement "
+                  "manifest", file=sys.stderr)
+            return 2
+        if a.build_stmt and problems:
+            print(f"REFUSING to build: {len(problems)} segment "
+                  f"hash-verification problem(s) — the statement "
+                  f"expression is never built on untrusted hashes",
+                  file=sys.stderr)
+            return 1
+        sc = statement_census(segs)
+        build_info = None
+        if a.build_stmt:
+            if not a.out:
+                print("REFUSING: --build-stmt requires --out "
+                      "Y.phext", file=sys.stderr)
+                return 2
+            if os.path.exists(a.out) and not a.force:
+                print(f"REFUSING: {a.out} exists (pass --force)",
+                      file=sys.stderr)
+                return 2
+            new, build_info = build_stmt(scrolls, segs, sc,
+                                         sha256(raw))
+            blob = implode(new)
+            with open(a.out, "wb") as f:
+                f.write(blob)
+            build_info.update({"out": a.out,
+                               "out_bytes": len(blob),
+                               "delta": len(blob) - len(raw)})
+            print(f"analyze --build-stmt: {build_info['refs']} "
+                  f"references to {build_info['statements']} "
+                  f"statement scrolls -> {a.out} ({len(blob)} B)")
+        report = render_stmt_report(a.phext, raw, segs, sc,
+                                    build_info)
+        report_path = a.report or (None if a.build_stmt else a.out)
+        if report_path:
+            with open(report_path, "w") as f:
+                f.write(report)
+            print(f"report written: {report_path}")
+        else:
+            print(report)
+        return 0
     cz = census(scrolls, entries, segs)
 
     apply_info = None
@@ -611,6 +1301,20 @@ def cli(argv):
                          "(apply mode; census uses --out)")
     ap.add_argument("--force", action="store_true",
                     help="overwrite --out if it exists")
+    ap.add_argument("--statements", action="store_true",
+                    help="statement tier census: segment every "
+                         "member payload at statement grain and "
+                         "report instances vs distinct statements")
+    ap.add_argument("--build-stmt", action="store_true",
+                    help="write the statement-level expression of "
+                         "the phext to --out (statement library + "
+                         "member scrolls as reference sequences)")
+    ap.add_argument("--verify-stmt", action="store_true",
+                    help="verify a statement-level phext: every "
+                         "reference resolves + hash-matches, every "
+                         "expanded payload matches its index "
+                         "SHA-256, and the statement library holds "
+                         "each distinct statement exactly once")
     return run(ap.parse_args(argv))
 
 
