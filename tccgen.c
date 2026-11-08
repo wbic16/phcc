@@ -7423,18 +7423,32 @@ static void gexpr_decl(void)
    cannot delimit), the loop is parsed exactly as before;
    tests/tests2/87_dead_code.c exercises both sides of this.
    The scan is deliberately crude: any identifier directly followed
-   by ':' counts (ternaries, case constants and bitfield members
-   also match); a false hit only forfeits the suppression.  */
+   by ':' counts (case constants and bitfield members also match);
+   a false hit only forfeits the suppression.  F24 (PQ-24): a ':'
+   that closes a '?' is the conditional operator's colon, not a
+   label -- the pending-'?' count in the scan discounts it.  Without
+   that, every loop whose body holds an identifier-armed ternary
+   (the "dst = cond ? ff_a : ff_b" idiom in FFmpeg's libswscale
+   scale-function tables) forfeited the suppression, and the loop
+   head's gind() then left the rest of the dead region
+   unsuppressed as well.  */
 static void scan_save_span(TokenString *str, int open, int close,
                            int *saw_label)
 {
-    int level = 0, prev = 0;
+    int level = 0, prev = 0, nq = 0;
     for (;;) {
         int t = tok;
         if (t == TOK_EOF)
             tcc_error("unexpected end of file");
-        if (prev >= TOK_UIDENT && t == ':')
-            *saw_label = 1;
+        if (t == '?')
+            nq++;
+        else if (t == ':') {
+            if (nq)
+                nq--; /* the colon of a ?: -- not a label */
+            else if (prev >= TOK_UIDENT)
+                *saw_label = 1;
+        } else if (t == ';')
+            nq = 0; /* a ?: is always complete before the next ';' */
         tok_str_add_tok(str);
         prev = t;
         next();

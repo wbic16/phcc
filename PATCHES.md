@@ -31,7 +31,7 @@ from this file alone.
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
 | `tcc.h` | +69 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. F19: `TCCState` gains `allow_multiple_definition`. See F19. F20: the per-dynsymtab-entry compat-state array (`nb_dynsym_compat_only` / `dynsym_compat_only`) beside the symbol-version fields. See F20.F21: `TCCState` gains `execstack` (the `-z execstack`/`noexecstack` state) and the input-object records `inp_execstack`/`inp_no_gnustack`. See F21. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
-| `tccgen.c` | +425 / −18 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. F23: dead loops inside constant-dead branches stay suppressed -- the loop handlers no longer resurrect them at the loop head (`scan_save_span()`). See F23. |
+| `tccgen.c` | +444 / −23 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. F18: `_Static_assert` conditions evaluated at full 64-bit width (`do_Static_assert` via `expr_const64`). See F18. F23: dead loops inside constant-dead branches stay suppressed -- the loop handlers no longer resurrect them at the loop head (`scan_save_span()`). See F23. F24: the label scan discounts ternary colons (pending-'?' count in `scan_save_span()`). See F24. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
 | `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. |
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
@@ -2026,6 +2026,97 @@ structure; the fork's intent is carried, never dropped silently).
     the four §A.3 machines covers statement-level code suppression
     (they are the preprocessor conditional stack, the value stack,
     linker resolution, and register allocation).
+
+  - *Errata (2026-11-07, added by F24):* the Headline paragraph
+    above does not stand. The throwaway stack's FFmpeg tree had
+    been configured under a different compiler (its `config.h`
+    carried `CONFIG_PIC`, `HAVE_INT128` and `HAVE_EBP_AVAILABLE`
+    all 1 — values tcc never produces) and its `swscale.o` was an
+    inherited artifact carrying the oracle's undefined profile,
+    with no definitions of the hscale symbols anywhere in its
+    archive; the "builds completely" receipt rested on those
+    artifacts, not on a clean build. F23's verified scope is the
+    loop-head shape matrix and the FFmpeg extract. A clean-tree
+    rebuild under the published wave-5 tip (32674fc3) still failed
+    the final link with 132 unresolved `ff_hscale*`/`ff_yuv2plane*`
+    references from `libswscale/x86/swscale.o` (PQ-24); F24 below
+    completes the FFmpeg claim on clean-tree evidence.
+- **F24 — tccgen.c: the F23 label scan no longer mistakes a
+  ternary colon for a label (PQ-24) (2026-11-07).**
+  - *File:* `tccgen.c` only (+19/−5): `scan_save_span()` tracks a
+    pending-`?` count, and the comment above it is updated to
+    match. No handler changes.
+  - *Reason:* F23's scan counts any identifier directly followed
+    by `:` as a label definition. A ternary arm is an identifier,
+    so every loop whose saved span — body, `while` condition, or
+    an inner `if` condition — held an identifier-armed `?:`
+    forfeited the suppression and was parsed as live; worse, the
+    loop head's `gind()` had already cleared `CODE_OFF_BIT`, so
+    the remainder of the enclosing dead region (including plain
+    statements after the loop) was emitted too. FFmpeg's
+    libswscale is built from exactly that idiom:
+    `ASSIGN_SCALE_FUNC2` assigns `hscalefn = cond ? ff_a : ff_b`
+    inside a `do {} while (0)` under constant-0 `EXTERNAL_*`
+    guards, and the `ASSIGN_VSCALEX_FUNC` switch after it leaked
+    by poison, not by any defect of its own. Measured on the
+    decisive TU under tip 32674fc3: 156 `ff_` undefineds, 132 of
+    them the hscale/yuv2plane family; every measured shape not
+    involving a ternary inside a loop span was already clean.
+    Bisection (39 shapes, base / tip / fixed / gcc -O0 undefined
+    `ext_*` counts): do-while with ternary assignments 4/4/0/0;
+    while with ternary body 2/2/0/0; for with ternary body
+    2/2/0/0; ternary in a while condition 1/1/0/0; ternary in an
+    inner if condition 1/1/0/0; statements following a poisoned
+    loop, in-body and post-loop, leaked on base and tip and are
+    0 once fixed; integer-armed ternaries were never affected
+    (the token before their `:` is a number, not an identifier).
+  - *Change:* in `scan_save_span()`, a `?` increments the pending
+    count; a `:` first discharges a pending `?` (it is the
+    conditional operator's colon) and only otherwise falls to
+    F23's identifier rule; a `;` resets the count (a `?:` is
+    always complete before the next `;` of its statement
+    sequence, so a label opening a later statement is still
+    seen). `case ENUM:` constants and bitfield members still
+    match, exactly as F23 — the change removes only the ternary
+    false positive. One theoretical hole, not chased: a label
+    inside a GNU statement expression used as the arm of an
+    outer `?:` could be missed, but such a label cannot be an
+    outside entry point into the loop body (jumping into a
+    statement expression from outside it is not permitted), so
+    the suppression stays sound.
+  - *Evidence:* the 39-shape matrix above — every previously
+    leaking shape now emits 0, every previously clean shape is
+    unchanged, and the label-bearing control (ternary followed
+    by a real label targeted from live code) still forfeits
+    suppression exactly as base (3 refs), so F23's
+    87_dead_code semantics are preserved; F23's phantom extract
+    still compiles with 0 `ff_*` undefineds. Live controls: all
+    39 shapes rebuilt with a runtime guard have `.text`
+    byte-identical between tip and fixed compilers, and
+    FFmpeg's `libavutil/eval.o` is whole-object byte-identical.
+    The decisive TU recompiled under the fixed compiler:
+    undefineds drop 160 → 6, exactly gcc -O0's source-level set
+    (gcc adds only its own `_GLOBAL_OFFSET_TABLE_` and
+    `__stack_chk_fail`); the two surviving `ff_` references
+    (`ff_hyscale_fast_mmxext`, `ff_hcscale_fast_mmxext`) are
+    live code — `HAVE_MMXEXT_INLINE` is 1 under tcc — defined
+    elsewhere in the archive. Upstream `make test` ALL TESTS
+    PASSED, 87_dead_code included. Conformance spot re-run
+    unchanged at 328/333, same five documented class-(b)
+    divergences, zero oracle splits. **Headline (clean tree,
+    gate recipe verbatim, configured under the fixed compiler —
+    `config.h` profile: `CONFIG_PIC 0`, `HAVE_INT128 0`,
+    `HAVE_EBP_AVAILABLE 0`, `HAVE_SYSCTL 0`): FFmpeg 9.0.2
+    builds completely, 1,999 objects, `ffmpeg` (27,106,736 B)
+    and `ffprobe` link, and the gate transcode is byte-identical
+    to the gcc-built oracle (SHA-256
+    fe93761b29c11da087d776ec86e4632acfa39643863c7d4c1abfd6939712f056).
+    This is the receipt F23's headline claimed; it is earned
+    here, on a tree whose configuration was verified before the
+    build started.**
+  - *Note for the phext:* same STALE bindings as F23 (the
+    `tccgen.c` Source scroll, its Volume 3 segmentation and
+    Design view, and the gate verdict scroll).
 
 ## Maintenance rule
 
