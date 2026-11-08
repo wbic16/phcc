@@ -5,12 +5,17 @@ This file is the complete per-file record of how phcc diverges from
 upstream, per fork-patch discipline: the delta must always be enumerable
 from this file alone.
 
-## Current base (after Slice 0 rebase, 2026-11-07)
+## Current base (Slice 0 rebase 2026-11-07; upstream sync #1, 2026-11-08)
 
 - Upstream: TinyCC (github.com/TinyCC/tinycc), commit
   `c638ddfb593214813aa33536fb993b9a45d23793` (2026-11-06, "tccgen: reject
   pointer/function-pointer to floating-point conversions"; tree VERSION
   0.9.28rc upstream, carried as 1.0.0 by the fork — see VERSION below).
+- Upstream sync #1 (2026-11-08) advanced the base to
+  `70adbb129760b77e3bdfec447c1f986def763f2c` (2026-11-07, "arm64: fix sp
+  offsets of 4096 and more in arm64_spoff") by cherry-pick — upstream's
+  only commit past the Slice 0 base; zero conflicts. See U1 in the
+  upstream sync log below. The base pin is now `70adbb12`.
 - Pre-rebase history (2022-04-01 upstream snapshot + the four original
   2024 fork commits) is preserved on branch `emise/pre-slice0-2026-11-07`.
 - The four fork commits were replayed in order onto the new base:
@@ -89,6 +94,34 @@ structure; the fork's intent is carried, never dropped silently).
 - **R7 — tccpp.c (same commit)** auto-merged with no manual resolution;
   verified post-rebase: the break-token handling and counters are intact
   (110-line delta replays as +109/−1 against the new base).
+
+## Upstream sync log
+
+- **U1 — arm64-gen.c, arm64-tok.h, tests/tests2/153_large_struct_args.c,
+  tests/tests2/153_large_struct_args.expect (upstream sync #1,
+  2026-11-08).** Upstream moved exactly one commit past the Slice 0
+  base: `70adbb12` (Alexander Medvednikov). `arm64_spoff` used the
+  shifted-register ADD form for stack offsets ≥ 4096, where register
+  31 reads as xzr rather than sp, so a struct-argument copy lying
+  ≥ 4096 bytes into the outgoing argument area was written to an
+  absolute address. The fix restores the extended-register form (new
+  `ARM64_ADD_EXT` / `ARM64_EXTEND_UXTX` constants in arm64-tok.h) and
+  adds the regression test. Fork state at every touched path was
+  byte-identical to the old base (no F-entry touches arm64-gen.c or
+  arm64-tok.h; F6's arm64 mention is tccdbg.c only), so the commit
+  cherry-picked with zero conflicts: 4 files, +29/−1. Base pin
+  moves `c638ddf` → `70adbb12`. Receipts on the landed tree: make
+  test ALL TESTS PASSED (153 runs natively in tests2); conformance
+  328/333 with the standing five [a_pp_018, b_gnu_009, b_gnu_015,
+  b_gnu_016, b_gnu_020]; the three standing static gate cells green
+  (static hello with 23 IRELATIVE entries and bounds matching the
+  .rela.plt range exactly; static Lua byte-identical; static phccbox
+  byte-identical, awk 42); arm64 encoding proof — the test's shape
+  compiled by the tree's arm64-tcc emits the fixed word 0x8b3e63e0
+  ×2 and the buggy word 0x8b1e03e0 ×0, matching upstream
+  HEAD's own counts. Cadence (Will, 2026-11-08): drift is checked at
+  wave boundaries only, no cron; syncs land by cherry-pick while the
+  touched paths stay fork-clean.
 
 ## Post-rebase fork changes
 
