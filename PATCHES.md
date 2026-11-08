@@ -37,7 +37,7 @@ from this file alone.
 | `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
 | `tcctok.h` | +31 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). F17: nine more `DEF_ASMDIR` tokens (`value`, `hword`, `2byte`, `4byte`, `8byte`, `zero`, `float`, `single`, `double`) after `reloc`; `section` remains the last directive token. |
 | `libtcc.c` | +63 / −2 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. F19: `tcc_set_linker` accepts `--allow-multiple-definition` / `-zmuldefs`, and `-z muldefs` in its separate-argument form, into the new state flag. See F19. F21: `tcc_set_linker` understands `-z execstack`/`-z noexecstack` in all three spellings (separate argument, joined, `=`). See F21. |
-| `tccelf.c` | +1080 / −17 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. F20: the compat-version binding policy — per-entry compat state recorded in `tcc_load_dll` from the defining library's `.gnu.versym` hidden bit, and the matching gate in `bind_exe_dynsyms`. See F20. F21: the object writer emits `.note.GNU-stack`, the object loader records each input's note state, and the link writer emits PT_GNU_STACK under GNU ld's rules. See F21. F22: `R_X86_64_GOTTPOFF` relocations build their GOT entries (an `R_X86_64_TPOFF64` relocation via `put_got_entry`, or a marker for a defined local TLS symbol, rewritten by `fill_local_got_entries` to the symbol-less form), and the dynsym pass of `relocate_syms` writes TLS-block-relative values for TLS symbols. See F22. F25: `set_elf_sym` gains the object-loading-gated duplicate branch (strong definitions involving a real bss section error as multiple definitions), and `tcc_load_object_file`'s resolve loop sets the gate. See F25. |
+| `tccelf.c` | +1080 / −17 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. F19: `set_elf_sym` gains the flag-gated first-strong-definition-wins branch (commons excluded on both sides). See F19. F20: the compat-version binding policy — per-entry compat state recorded in `tcc_load_dll` from the defining library's `.gnu.versym` hidden bit, and the matching gate in `bind_exe_dynsyms`. See F20. F21: the object writer emits `.note.GNU-stack`, the object loader records each input's note state, and the link writer emits PT_GNU_STACK under GNU ld's rules. See F21. F22: `R_X86_64_GOTTPOFF` relocations build their GOT entries (an `R_X86_64_TPOFF64` relocation via `put_got_entry`, or a marker for a defined local TLS symbol, rewritten by `fill_local_got_entries` to the symbol-less form), and the dynsym pass of `relocate_syms` writes TLS-block-relative values for TLS symbols. See F22. F25: `set_elf_sym` gains the object-loading-gated duplicate branch (strong definitions involving a real bss section error as multiple definitions), and `tcc_load_object_file`'s resolve loop sets the gate. See F25. F26: `tcc_add_linker_symbols` synthesizes `__ehdr_start` when it is referenced and undefined, and `tcc_add_runtime` adds the GCC runtime archives (libgcc, libgcc_eh) to static links after libtcc1. See F26. |
 | `x86_64-link.c` | +7 / −1 | F22 (first fork change to this file): `relocate()`'s `R_X86_64_GOTTPOFF` case writes the PC-relative address of the symbol's GOT slot (the GOTPCREL formula) instead of a site-independent function of the symbol's own address. See F22. |
 | `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
 | `Makefile` | +10 | Phext library linkage (F3): in multi-object builds `phext/phext.c` compiles to `$(X)phext.o` and joins `LIBTCC_OBJ`; `ONE_SOURCE` builds get the same code via `libtcc.c`'s include instead. |
@@ -2178,6 +2178,106 @@ structure; the fork's intent is carried, never dropped silently).
     1.1.1/3.2.5/1.2.2) needs the gated duplicate branch recorded
     after the F19 flag-gated branch. Cleared by the Wave D1
     phext refresh (below).
+
+- **F26 — tccelf.c: static linking closes its symbol set (PQ-23):
+  `__ehdr_start` synthesized, GCC runtime archives join static
+  links (2026-11-07).**
+  - *File:* `tccelf.c` only (+84/−0): the `__ehdr_start`
+    synthesis in `tcc_add_linker_symbols`, and the static-only
+    archive block in `tcc_add_runtime` after the libtcc1 group.
+  - *Reason:* `tcc -static` against this glibc (2.39) failed with
+    exactly five unresolved symbols, census-measured on a
+    hello-world link (`nm -A` over the archives):
+
+    | Symbol | Referenced by (archive member) | Defined in | Class |
+    |---|---|---|---|
+    | `__ehdr_start` | libc.a `dl-reloc-static-pie.o`, `dl-support.o` | nothing — GNU ld synthesizes it | (a) synthesize |
+    | `__letf2` | libc.a `printf_fp.o`, `printf_fphex.o`, `printf_size.o` | libgcc.a `letf2.o` | (b) archive closure |
+    | `__unordtf2` | libc.a `printf_fp.o`, `printf_fphex.o`, `printf_size.o`, `s_ldexpf128.o` | libgcc.a `unordtf2.o` | (b) archive closure |
+    | `__gcc_personality_v0` | libc.a `io*.o` | libgcc_eh.a `unwind-c.o` | (b) archive closure |
+    | `_Unwind_Resume` | libc.a `io*.o` | libgcc_eh.a `unwind-dw2.o` | (b) archive closure |
+
+    The class-(b) set was unreachable for two compounding
+    reasons: the `TCC_LIBGCC` block in `tcc_add_runtime` adds its
+    archive dynamic-only (and `TCC_LIBGCC` is not defined in this
+    build at all), and the GCC installation directory is not on
+    the library search path (`-lgcc_eh` reports not found).
+    Order experiments on the base: appending the archives
+    explicitly after the sources still fails — single-pass
+    extraction means libc's references do not exist yet at that
+    point; libc first, then the archives, leaves only
+    `__ehdr_start` unresolved.
+  - *Change:* (a) in `tcc_add_linker_symbols`, beside
+    `_etext`/`_edata`/`_end`: when `__ehdr_start` is present and
+    undefined, define it as an absolute symbol at the image
+    base — `ELF_START_ADDR` for executables, 0 for dynamic
+    outputs, the same base `layout_sections` starts from. A
+    program's own definition wins, and an unreferenced
+    `__ehdr_start` is not created, both as with GNU ld.
+    (b) in `tcc_add_runtime`, for static links only (ELF;
+    Mach-O excluded): derive the GCC library directory (the
+    dirname of `TCC_LIBGCC` when configured, else
+    `/usr/lib/gcc/<CONFIG_TRIPLET>/<GCC_MAJOR>`), add it to the
+    library search path, and add `libgcc.a` / `libgcc_eh.a` —
+    each only if the file is actually there, so systems without
+    GCC archives keep the old behaviour — positioned after
+    libtcc1 so the compiler's own runtime claims the helper
+    symbols both runtimes provide (a first placement before
+    libtcc1 collided on `__fixunssfdi` / `__fixunsdfdi` /
+    `__fixunsxfdi` "defined twice" once a real program pulled
+    both archives, and the collision's aborted registrations
+    surfaced as spurious unresolved `__va_arg` / `alloca`),
+    followed by one more libc pass for the unwind runtime's own
+    libc references — the GNU driver likewise repeats its
+    archive group.
+  - *Evidence:* `tcc -static hello.c` links with zero
+    unresolved symbols (base: the five errors above). A real
+    program: the phccbox v1.1 object set (104 applets) links
+    statically, completely clean, 11,592,364 B — the base could
+    not link it at all. `__ehdr_start` verified three ways: a
+    dynamic probe reads its own ELF header through it (magic,
+    `e_type`, page alignment all correct); a freestanding
+    `-static -nostdlib` probe with its own `_start` checks the
+    magic and alignment and exits 0, printing EHDR-OK exactly
+    as the GNU-built probe does; a `-g` static link shows
+    `0000000000400000 A __ehdr_start`. Upstream `make test` ALL
+    TESTS PASSED; conformance spot unchanged at 328/333, same
+    five; the F25 corpora re-run unchanged. Dynamic links are
+    untouched by construction (both changes are gated to
+    referenced-symbol synthesis and the static path) and by
+    measurement.
+  - *Residue — class (c), written as Wave D2's measured input:*
+    a static glibc binary LINKS but does not RUN: it segfaults
+    in startup after TLS setup (strace: `brk`, `arch_prctl
+    (ARCH_SET_FS)`, `set_tid_address`, `set_robust_list`,
+    `rseq`, then SIGSEGV at a wild address) — a bare
+    `int main(void){ return 42; }` included. The cause is
+    isolated, not guessed: glibc's startup resolves its IFUNC
+    functions through `R_X86_64_IRELATIVE` relocations that
+    GNU ld leaves in a `.rela.plt` section (22 in GNU's static
+    hello) bounded by `__rela_iplt_start` / `__rela_iplt_end`
+    for `_dl_relocate_static_pie` to apply; phcc emits no
+    relocations into a static output and binds IFUNC
+    references at link time to the resolver's own address, so
+    the first IFUNC-dispatched call executes the resolver as
+    if it were the function. In phcc's static output the two
+    bounds symbols sit weak-undefined at 0 (read off a `-g`
+    link), so the runtime pass applies nothing. The
+    freestanding probe above proves phcc's static output
+    machinery (layout, entry, sections) is sound; the missing
+    piece is exactly runtime-relocation emission: keep
+    IRELATIVE relocs for IFUNC PLT slots in static executables,
+    emit them in a `.rela.iplt` / `.rela.plt` section inside
+    the first LOAD, and synthesize the two bounds symbols as
+    locals. Also D2's: a native TF128 runtime for libtcc1 —
+    the `__letf2` family above is borrowed from libgcc, the
+    ecosystem-standard route (gcc links the same archives),
+    not a native provision.
+  - *Note for the phext:* the `tccelf.c` Source scroll and
+    Design view are STALE; machine #3's description needs the
+    runtime archive order and the `__ehdr_start` synthesis
+    recorded beside F25's branch. Cleared by the Wave D1 phext
+    refresh (below).
 
 ## Maintenance rule
 

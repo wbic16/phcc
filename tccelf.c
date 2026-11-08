@@ -2715,6 +2715,71 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
             tcc_add_support(s1, TCC_LIBTCC1);
             tcc_add_library(s1, "c");
         }
+#if !defined(TCC_TARGET_MACHO)
+        if (s1->static_link) {
+            /* Static links got no libgcc at all from the TCC_LIBGCC
+               block above (it is dynamic-only), but glibc's own
+               archive members reference its runtime: the TF128
+               compares (__letf2, __unordtf2, ...) from printf_fp.o
+               and friends, and the unwind runtime
+               (__gcc_personality_v0, _Unwind_Resume, ...) from the
+               io*.o cleanup handlers -- both live in libgcc.a /
+               libgcc_eh.a (F26).  Add them here: after the libc
+               passes above, so those references are undefined when
+               the archives are searched, and after libtcc1, so the
+               compiler's own runtime claims the helper symbols both
+               runtimes provide (__fixunsdfdi and family) and libgcc
+               fills only what libtcc1 lacks.  One more libc pass
+               after them covers the unwind runtime's own libc
+               references (the GNU driver likewise repeats its
+               archive group).  The archives sit in the GCC
+               installation directory, which is not on the library
+               search path: derive it (from TCC_LIBGCC when
+               configured, else the standard
+               /usr/lib/gcc/<triplet>/<major> layout) and add each
+               archive only if it is actually there, so systems
+               without GCC archives keep the old behaviour. */
+            char gcc_dir[1024];
+            int have_gcc_dir = 0;
+#ifdef TCC_LIBGCC
+            if (TCC_LIBGCC[0] == '/') {
+                const char *slash;
+                snprintf(gcc_dir, sizeof(gcc_dir), "%s", TCC_LIBGCC);
+                slash = strrchr(gcc_dir, '/');
+                if (slash) {
+                    *(char *)slash = '\0';
+                    have_gcc_dir = 1;
+                }
+            }
+#endif
+#if defined(CONFIG_TRIPLET) && defined(GCC_MAJOR)
+            if (!have_gcc_dir) {
+                snprintf(gcc_dir, sizeof(gcc_dir), "/usr/lib/gcc/%s/%d",
+                         CONFIG_TRIPLET, GCC_MAJOR);
+                have_gcc_dir = 1;
+            }
+#endif
+            if (have_gcc_dir) {
+                static const char *const gcc_ar[] = { "gcc", "gcc_eh" };
+                int ai, added = 0;
+                tcc_add_library_path(s1, gcc_dir);
+                for (ai = 0; ai < 2; ai++) {
+                    char ar_path[1056];
+                    FILE *arf;
+                    snprintf(ar_path, sizeof(ar_path), "%s/lib%s.a",
+                             gcc_dir, gcc_ar[ai]);
+                    arf = fopen(ar_path, "r");
+                    if (arf) {
+                        fclose(arf);
+                        tcc_add_library(s1, gcc_ar[ai]);
+                        added = 1;
+                    }
+                }
+                if (added)
+                    tcc_add_library(s1, "c");
+            }
+        }
+#endif
 #ifndef TCC_TARGET_MACHO
         if (s1->output_type != TCC_OUTPUT_MEMORY)
             tccelf_add_crtend(s1);
@@ -2768,6 +2833,25 @@ static void tcc_add_linker_symbols(TCCState *s1)
     set_linker_sym(s1, "_etext", text_section, 0);
     set_linker_sym(s1, "_edata", data_section, 0);
     set_linker_sym(s1, "_end", bss_section, 0);
+    /* __ehdr_start: GNU ld defines it, only when referenced, as the
+       address of the output's own ELF header -- the image base, which
+       is ELF_START_ADDR for executables and 0 for dynamic outputs
+       (the same base layout_sections starts from).  glibc's static
+       startup objects (dl-support.o, dl-reloc-static-pie.o) hold the
+       reference that static links need satisfied (F26).  A definition
+       from the program itself wins: only an undefined entry is
+       patched, exactly as with the symbols above. */
+    {
+        int ehdr_index = find_elf_sym(symtab_section, "__ehdr_start");
+        if (ehdr_index) {
+            ElfW(Sym) *ehdr_sym =
+                &((ElfW(Sym) *)symtab_section->data)[ehdr_index];
+            if (ehdr_sym->st_shndx == SHN_UNDEF)
+                set_global_sym(s1, "__ehdr_start", NULL,
+                               (s1->output_type & TCC_OUTPUT_DYN)
+                               ? 0 : ELF_START_ADDR);
+        }
+    }
 #if TARGETOS_OpenBSD
     set_global_sym(s1, "__executable_start", NULL, ELF_START_ADDR);
 #endif
