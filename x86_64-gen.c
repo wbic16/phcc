@@ -160,6 +160,8 @@ ST_DATA const int reg_classes[NB_REGS] = {
 };
 
 static unsigned long func_sub_sp_offset;
+/* F41: current function returns _Complex long double in %st/%st(1) */
+static int cxld_ret;
 static int func_ret_sub;
 
 #if defined(CONFIG_TCC_BCHECK)
@@ -205,6 +207,21 @@ ST_FUNC void gen_le32(int c)
     g(c >> 8);
     g(c >> 16);
     g(c >> 24);
+}
+
+/* F41: a _Complex long double is returned in the x87 registers
+   (%st(0) = real part, %st(1) = imaginary part, per the psABI),
+   unlike a plain 32-byte struct, which returns via sret.  Store the
+   returned pair into the 32-byte local slot at loc_off: the first
+   fstpt pops %st(0) (real) to +0, the second pops the imaginary
+   part to +16 (the long double stride), mirroring gcc/clang.
+   Defined here, outside the PE/ELF gfunc_sret variants, because
+   tccgen.c references it for every x86_64 target flavour. */
+ST_FUNC void gfunc_cxld_store(int loc_off)
+{
+    /* fstpt loc_off(%rbp): DB /7 with modrm mod=10 reg=7 rm=101 */
+    o(0xbddb); gen_le32(loc_off);
+    o(0xbddb); gen_le32(loc_off + 16);
 }
 
 ST_FUNC void gen_le64(int64_t c)
@@ -1467,10 +1484,16 @@ void gfunc_prolog(Sym *func_sym)
     func_sub_sp_offset = ind;
     func_ret_sub = 0;
     ret_mode = classify_x86_64_arg(&func_vt, NULL, &size, &align, &reg_count);
+    /* F41: a _Complex long double classifies as memory but returns
+       in %st(0)/%st(1); there is no hidden sret pointer parameter.
+       func_vt is the return type itself here. */
+    cxld_ret = (func_vt.t & (VT_STRUCT_MASK | VT_BTYPE))
+            == (VT_COMPLEX_TAG | VT_STRUCT)
+        && func_vt.ref && func_vt.ref->type.t == VT_LDOUBLE;
 
     if (func_var) {
         int seen_reg_num, seen_sse_num, seen_stack_size;
-        seen_reg_num = ret_mode == x86_64_mode_memory;
+        seen_reg_num = (ret_mode == x86_64_mode_memory && !cxld_ret);
         seen_sse_num = 0;
         /* frame pointer and return address */
         seen_stack_size = PTR_SIZE * 2;
@@ -1536,7 +1559,7 @@ void gfunc_prolog(Sym *func_sym)
 
     /* if the function returns a structure, then add an
        implicit pointer parameter */
-    if (ret_mode == x86_64_mode_memory) {
+    if (ret_mode == x86_64_mode_memory && !cxld_ret) {
         push_arg_reg(reg_param_index);
         func_vc = loc;
         reg_param_index++;

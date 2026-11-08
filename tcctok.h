@@ -324,6 +324,14 @@
 #ifdef TCC_TARGET_RISCV64
      DEF(TOK___riscv64_clear_cache, "__riscv64_clear_cache")
 #endif
+/* _Complex arithmetic helper tokens (F41): the libgcc __mul*c3 /
+   __div*c3 entry points both oracles lower complex * and / to */
+     DEF(TOK___mulsc3, "__mulsc3")
+     DEF(TOK___divsc3, "__divsc3")
+     DEF(TOK___muldc3, "__muldc3")
+     DEF(TOK___divdc3, "__divdc3")
+     DEF(TOK___mulxc3, "__mulxc3")
+     DEF(TOK___divxc3, "__divxc3")
 /* TF128 helper tokens (F34 uses them on x86-64 too; the tokens
    are target-independent names for libgcc entry points) */
      DEF(TOK___addtf3, "__addtf3")

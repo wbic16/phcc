@@ -3957,11 +3957,120 @@ static void cx_negate(int imag_only)
     }
 }
 
-/* * and / on complex operands (F41) */
+#if !defined TCC_TARGET_X86_64
+/* F41: _Complex is rejected by name on other targets (F40), so
+   this is unreachable; it exists so the cross backends link */
+ST_FUNC void gfunc_cxld_store(int loc_off)
+{
+    (void)loc_off;
+    tcc_error("_Complex long double is not supported on this target (F41)");
+}
+#endif
+
+/* * and / on complex operands (F41): lowered to the libgcc helpers
+   __mulsc3/__divsc3 (float), __muldc3/__divdc3 (double),
+   __mulxc3/__divxc3 (long double) — exactly what gcc and clang emit
+   at default flags — so the Annex G edge semantics (overflow
+   recovery, signed zeros, (1+i)/(0+0i) -> (+inf,+inf)) come from
+   the helpers, not from a naive expansion.  pa/pb are the operands,
+   already converted to the common complex type *cxt. */
 static void cx_muldiv(int op, SValue *pa, SValue *pb, CType *cxt)
 {
-    (void)op; (void)pa; (void)pb; (void)cxt;
-    tcc_error("_Complex multiplication/division is not yet supported (F41)");
+    static const int mul_tok[3] = { TOK___mulsc3, TOK___muldc3, TOK___mulxc3 };
+    static const int div_tok[3] = { TOK___divsc3, TOK___divdc3, TOK___divxc3 };
+    int ebt = cx_elem_bt(cxt);
+    int ei = ebt == VT_FLOAT ? 0 : ebt == VT_DOUBLE ? 1 : 2;
+    int rc = RC_TYPE(ebt);
+    SValue ma, mb, retv;
+    CType rt2;
+    int aloc, bloc, rloc = 0, ralign = 0, rsize = 0, rn = 0;
+
+    vpushv(pb);
+    mb = cx_mat(vtop);
+    vtop--;
+    vpushv(pa);
+    ma = cx_mat(vtop);
+    vtop--;
+    /* save both operands into temp slots for part-wise access */
+    bloc = cx_temp(cxt);
+    vset(cxt, VT_LOCAL | VT_LVAL, bloc);
+    vpushv(&mb);
+    vstore();
+    vpop();
+    aloc = cx_temp(cxt);
+    vset(cxt, VT_LOCAL | VT_LVAL, aloc);
+    vpushv(&ma);
+    vstore();
+    vpop();
+    /* prepare the return capture (the query emits no code);
+       rt2 receives the arch return type (VT_QFLOAT for {d,d}) */
+    if (ebt != VT_LDOUBLE) {
+        rn = gfunc_sret(cxt, 0, &rt2, &ralign, &rsize);
+        retv.type = rt2;
+        retv.c.i = 0;
+        retv.r2 = VT_CONST;
+        PUT_R_RET(&retv, rt2.t);
+    } else
+        rloc = cx_temp(cxt);
+    /* push the four parts: a.re a.im b.re b.im.  Float/double parts
+       are loaded eagerly, as gen_tf_call does; long double parts
+       stay lvalues so the call sequence loads and stores each one
+       in turn (the x87 stack cannot hold four arguments at once). */
+    vset(cxt, VT_LOCAL | VT_LVAL, aloc);
+    cx_part(0);
+    if (ebt != VT_LDOUBLE)
+        gv(rc);
+    vset(cxt, VT_LOCAL | VT_LVAL, aloc);
+    cx_part(1);
+    if (ebt != VT_LDOUBLE)
+        gv(rc);
+    vset(cxt, VT_LOCAL | VT_LVAL, bloc);
+    cx_part(0);
+    if (ebt != VT_LDOUBLE)
+        gv(rc);
+    vset(cxt, VT_LOCAL | VT_LVAL, bloc);
+    cx_part(1);
+    if (ebt != VT_LDOUBLE)
+        gv(rc);
+    vpush_helper_func(op == '*' ? mul_tok[ei] : div_tok[ei]);
+    vrott(5);
+    gfunc_call(4);
+    if (ebt == VT_LDOUBLE) {
+        gfunc_cxld_store(rloc);
+        vset(cxt, VT_LOCAL | VT_LVAL, rloc);
+        return;
+    }
+    /* register-return capture, mirroring unary()'s call handling */
+    {
+        int n = rn, r, addr, offset, size, align;
+        while (n > 1) {
+            int rcc = reg_classes[retv.r] & ~(RC_INT | RC_FLOAT);
+            rcc <<= --n;
+            for (r = 0; r < NB_REGS; ++r)
+                if (reg_classes[r] & rcc)
+                    break;
+            vsetc(&rt2, r, &retv.c);
+        }
+        vsetc(&rt2, retv.r, &retv.c);
+        vtop->r2 = retv.r2;
+        size = type_size(cxt, &align);
+        size = (size + rsize - 1) & -rsize;
+        if (ralign > align)
+            align = ralign;
+        addr = (loc - size) & -align;
+        loc = addr;
+        offset = 0;
+        for (;;) {
+            vset(&rt2, VT_LOCAL | VT_LVAL, addr + offset);
+            vswap();
+            vstore();
+            vtop--;
+            if (--rn == 0)
+                break;
+            offset += rsize;
+        }
+        vset(cxt, VT_LOCAL | VT_LVAL, addr);
+    }
 }
 
 /* binary operations with at least one complex operand; gen_op()
@@ -4004,8 +4113,38 @@ static void gen_opcx(int op)
         /* static context: both operands must be constants */
         if (!cx_data_ok(&a) || !cx_data_ok(&b))
             tcc_error("initializer element is not constant");
-        if (op == '*' || op == '/')
-            tcc_error("_Complex multiplication/division in a static initializer is not yet supported (F41)");
+        if (op == '*' || op == '/') {
+            /* F41: fold in host long double.  For float/double
+               elements this is provably the Annex G answer: every
+               intermediate of the naive formula (products of parts,
+               c*c+d*d, the final quotient) stays within the long
+               double exponent range for any finite float/double
+               inputs, so no overflow recovery or underflow case can
+               arise.  Long double elements have no wider host type
+               to fold in, and non-finite inputs follow paths only
+               the libgcc helpers define: both fail by name. */
+            long double ar = cx_data_part(&a, 0), ai = cx_data_part(&a, 1);
+            long double br = cx_data_part(&b, 0), bi = cx_data_part(&b, 1);
+            long double rr, ri;
+            if (ebt == VT_LDOUBLE
+                || ar - ar != 0 || ai - ai != 0
+                || br - br != 0 || bi - bi != 0)
+                tcc_error("_Complex multiplication/division in a static initializer is folded only for finite float/double constants (F41)");
+            if (op == '*') {
+                rr = ar * br - ai * bi;
+                ri = ar * bi + ai * br;
+            } else {
+                long double d = br * br + bi * bi;
+                if (d == 0)
+                    tcc_error("_Complex constant division by zero is not folded in a static initializer (F41)");
+                rr = (ar * br + ai * bi) / d;
+                ri = (ai * br - ar * bi) / d;
+            }
+            if (rr != rr || ri != ri)
+                tcc_error("_Complex multiplication/division in a static initializer is folded only for finite float/double constants (F41)");
+            cx_vpush_const(&cxt, rr, ri);
+            return;
+        }
         if (op == TOK_EQ || op == TOK_NE) {
             int eq = cx_feq(ebt, cx_data_part(&a, 0), cx_data_part(&b, 0))
                 && cx_feq(ebt, cx_data_part(&a, 1), cx_data_part(&b, 1));
@@ -7191,6 +7330,7 @@ static void parse_atomic(int atok)
 ST_FUNC void unary(void)
 {
     int n, t, align, size, r;
+    int cxld_call = 0, cxld_loc = 0; /* F41: _Complex long double call */
     CType type;
     Sym *s;
     AttributeDef ad;
@@ -7945,16 +8085,23 @@ special_math_val:
             }
             /* get return type */
             s = vtop->type.ref;
-            if (IS_COMPLEX(s->type.t) && cx_elem_bt(&s->type) == VT_LDOUBLE)
-                /* F40: the psABI returns these in %st(0)/%st(1),
-                   not through the sret pointer used below (F41) */
-                tcc_error("calling a function returning _Complex long double is not yet supported (F41)");
             next();
             sa = s->next; /* first parameter */
             nb_args = regsize = 0;
             ret.r2 = VT_CONST;
-            /* compute first implicit argument if a structure is returned */
-            if ((s->type.t & VT_BTYPE) == VT_STRUCT) {
+            /* F41: a _Complex long double is returned in %st(0)
+               (real) / %st(1) (imag), not through an sret pointer:
+               reserve the capture slot like an sret allocation but
+               pass no hidden argument */
+            cxld_call = IS_COMPLEX(s->type.t)
+                && cx_elem_bt(&s->type) == VT_LDOUBLE;
+            if (cxld_call) {
+                size = type_size(&s->type, &align);
+                loc = (loc - size) & -align;
+                cxld_loc = loc;
+                ret_nregs = 1;
+                ret.type = s->type;
+            } else if ((s->type.t & VT_BTYPE) == VT_STRUCT) {
                 variadic = (s->f.func_type == FUNC_ELLIPSIS);
                 ret_nregs = gfunc_sret(&s->type, variadic, &ret.type,
                                        &ret_align, &regsize);
@@ -7991,7 +8138,7 @@ special_math_val:
                 ret.type = s->type;
             }
 
-            if (ret_nregs > 0) {
+            if (ret_nregs > 0 && !cxld_call) {
                 /* return in register */
                 ret.c.i = 0;
                 PUT_R_RET(&ret, ret.type.t);
@@ -8038,7 +8185,11 @@ special_math_val:
             vcheck_cmp(); /* the generators don't like VT_CMP on vtop */
             gfunc_call(nb_args);
 
-            if (ret_nregs < 0) {
+            if (cxld_call) {
+                /* F41: capture %st(0)/%st(1) into the reserved slot */
+                gfunc_cxld_store(cxld_loc);
+                vset(&s->type, VT_LOCAL | VT_LVAL, cxld_loc);
+            } else if (ret_nregs < 0) {
                 vsetc(&ret.type, ret.r, &ret.c);
 #ifdef TCC_TARGET_RISCV64
                 arch_transfer_ret_regs(1);
@@ -8533,11 +8684,19 @@ ST_FUNC int expr_const(void)
 #ifndef TCC_TARGET_ARM64
 static void gfunc_return(CType *func_type)
 {
-    if (IS_COMPLEX(func_type->t) && cx_elem_bt(func_type) == VT_LDOUBLE)
-        /* F40: the psABI returns these in %st(0)/%st(1), not
-           through the sret pointer used below (F41) */
-        tcc_error("returning _Complex long double is not yet supported (F41)");
-    if ((func_type->t & VT_BTYPE) == VT_STRUCT) {
+    if (IS_COMPLEX(func_type->t) && cx_elem_bt(func_type) == VT_LDOUBLE) {
+        /* F41: the psABI returns a _Complex long double in %st(0)
+           (real part) and %st(1) (imaginary part) — not through the
+           sret pointer a plain struct of this size would use.  Load
+           the imaginary part first so the real part ends on top.
+           The common tail's vtop-- consumes the real-part entry. */
+        vdup();
+        cx_part(1);
+        gv(RC_TYPE(VT_LDOUBLE));
+        vtop--;
+        cx_part(0);
+        gv(RC_TYPE(VT_LDOUBLE));
+    } else if ((func_type->t & VT_BTYPE) == VT_STRUCT) {
         CType type, ret_type;
         int ret_align, ret_nregs, regsize;
         ret_nregs = gfunc_sret(func_type, func_var, &ret_type,

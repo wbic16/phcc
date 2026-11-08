@@ -1747,6 +1747,9 @@ ST_FUNC void gsym(int t);
 ST_FUNC void load(int r, SValue *sv);
 ST_FUNC void store(int r, SValue *v);
 ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret, int *align, int *regsize);
+/* F41: store a returned _Complex long double (%st(0) = real part,
+   %st(1) = imaginary part) into the 32-byte local slot at loc_off */
+ST_FUNC void gfunc_cxld_store(int loc_off);
 ST_FUNC void gfunc_call(int nb_args);
 ST_FUNC void gfunc_prolog(Sym *func_sym);
 ST_FUNC void gfunc_epilog(void);
