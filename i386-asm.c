@@ -511,6 +511,67 @@ ST_FUNC void gen_expr32(ExprValue *pe)
 	gen_addr32(pe->sym ? VT_SYM : 0, pe->sym, pe->v);
 }
 
+/* Sub-word variants of gen_expr32 for the data directives that take
+   symbol operands at width 2 and 1 (.word/.short/.value/.hword/.2byte
+   and .byte): the same three cases — deferred label difference,
+   PC-relative, plain — with the addend conventions of
+   gen_addr32/gen_addrpc32 (on RELA targets the value travels in the
+   addend and the field carries the pc-relative residue or zero; on
+   REL targets it stays in the field). */
+ST_FUNC void gen_expr16(ExprValue *pe)
+{
+    if (!pe->pcrel && pe->sym && asm_label_diff_emit(pe->sym, pe->v, 2)) {
+        /* deferred label difference: zero field, patched later */
+        gen_le16(0);
+        return;
+    }
+    if (pe->pcrel) {
+        int c = pe->v + (ind + 2);
+#ifdef TCC_TARGET_X86_64
+        greloca(cur_text_section, pe->sym, ind, R_X86_64_PC16, c - 2);
+#else
+        greloc(cur_text_section, pe->sym, ind, R_386_PC16);
+#endif
+        gen_le16(c - 2);
+    } else if (pe->sym) {
+#ifdef TCC_TARGET_X86_64
+        greloca(cur_text_section, pe->sym, ind, R_X86_64_16, pe->v);
+        gen_le16(0);
+#else
+        greloc(cur_text_section, pe->sym, ind, R_386_16);
+        gen_le16(pe->v);
+#endif
+    } else
+        gen_le16(pe->v);
+}
+
+ST_FUNC void gen_expr8(ExprValue *pe)
+{
+    if (!pe->pcrel && pe->sym && asm_label_diff_emit(pe->sym, pe->v, 1)) {
+        /* deferred label difference: zero field, patched later */
+        g(0);
+        return;
+    }
+    if (pe->pcrel) {
+        int c = pe->v + (ind + 1);
+#ifdef TCC_TARGET_X86_64
+        greloca(cur_text_section, pe->sym, ind, R_X86_64_PC8, c - 1);
+#else
+        greloc(cur_text_section, pe->sym, ind, R_386_PC8);
+#endif
+        g(c - 1);
+    } else if (pe->sym) {
+#ifdef TCC_TARGET_X86_64
+        greloca(cur_text_section, pe->sym, ind, R_X86_64_8, pe->v);
+        g(0);
+#else
+        greloc(cur_text_section, pe->sym, ind, R_386_8);
+        g(pe->v);
+#endif
+    } else
+        g(pe->v);
+}
+
 /* XXX: unify with C code output ? */
 static void gen_disp32(ExprValue *pe)
 {

@@ -750,7 +750,7 @@ static void asm_cfi_name(TCCState *s1)
 
 static void asm_parse_directive(TCCState *s1, int global)
 {
-    int n, offset, v, size, tok1, c;
+    int n, offset, v, size, tok1, c, maxskip;
     Section *sec;
     uint8_t *ptr;
 
@@ -762,6 +762,7 @@ static void asm_parse_directive(TCCState *s1, int global)
     case TOK_ASMDIR_p2align:
     case TOK_ASMDIR_skip:
     case TOK_ASMDIR_space:
+    case TOK_ASMDIR_zero:
         tok1 = tok;
         next();
         n = asm_int_expr(s1);
@@ -787,10 +788,23 @@ static void asm_parse_directive(TCCState *s1, int global)
             size = n, c = 0;
         }
         v = 0;
+        maxskip = -1;
         if (tok == ',') {
             next();
-            v = asm_int_expr(s1), c = 0;
+            if (tok != ',')
+                v = asm_int_expr(s1), c = 0;
+            if (tok == ',' && (tok1 == TOK_ASMDIR_align
+                               || tok1 == TOK_ASMDIR_balign)) {
+                /* Third alignment argument (GAS): if the padding
+                   needed exceeds this many bytes, emit nothing.
+                   The empty-fill form ('.balign 8,,2') lands here
+                   with the fill left at its default. */
+                next();
+                maxskip = asm_int_expr(s1);
+            }
         }
+        if (maxskip >= 0 && size > maxskip)
+            size = 0;
     zero_pad:
 	if ((uint64_t)ind + size >= 1<<30)
 	    tcc_error("too much data");
@@ -806,6 +820,7 @@ static void asm_parse_directive(TCCState *s1, int global)
         ind += size;
         break;
     case TOK_ASMDIR_quad:
+    case TOK_ASMDIR_8byte:
 #if PTR_SIZE == 8
 	size = 8;
 	goto asm_data;
@@ -842,10 +857,14 @@ static void asm_parse_directive(TCCState *s1, int global)
         goto asm_data;
     case TOK_ASMDIR_word:
     case TOK_ASMDIR_short:
+    case TOK_ASMDIR_value:
+    case TOK_ASMDIR_hword:
+    case TOK_ASMDIR_2byte:
         size = 2;
         goto asm_data;
     case TOK_ASMDIR_long:
     case TOK_ASMDIR_int:
+    case TOK_ASMDIR_4byte:
         size = 4;
     asm_data:
         next();
@@ -860,12 +879,22 @@ static void asm_parse_directive(TCCState *s1, int global)
 		    gen_expr64(&e);
 #endif
                 } else {
+#if defined(TCC_TARGET_I386) || defined(TCC_TARGET_X86_64)
+                    /* sub-word fields take symbol operands too
+                       (R_*_16/R_*_8 and the PC-relative forms),
+                       like the 32/64-bit fields above */
+                    if (size == 2)
+                        gen_expr16(&e);
+                    else
+                        gen_expr8(&e);
+#else
                     if (e.sym)
                         expect("constant");
                     if (size == 1)
                         g(e.v);
                     else
                         gen_le16(e.v);
+#endif
                 }
             } else {
                 ind += size;
@@ -873,6 +902,93 @@ static void asm_parse_directive(TCCState *s1, int global)
             if (tok != ',')
                 break;
             next();
+        }
+        break;
+    case TOK_ASMDIR_float:
+    case TOK_ASMDIR_single:
+    case TOK_ASMDIR_double:
+        {
+            /* GAS floating-point data: constants only (no symbols,
+               no expressions).  GAS's flonum parser skips a base
+               prefix ('0x', '0b', '0o', '0d') at the very start of
+               the operand and then reads an ordinary DECIMAL float,
+               so '0x10' is 10.0, '0x1.5' is 1.5 and '0x1.8p1' dies
+               on the 'p'; a leading sign defeats the prefix check
+               in GAS ('-0x10' is junk), and feeding the raw token
+               to strtod would misread the prefix forms as hex
+               floats.  The identifiers inf/infinity/nan are also
+               accepted; GAS's nan carries every payload bit set. */
+            int isdbl = (tok == TOK_ASMDIR_double);
+            next();
+            for(;;) {
+                int neg = 0, sign = 0, i;
+                uint64_t bits = 0;
+                if (tok == '-' || tok == '+') {
+                    neg = (tok == '-');
+                    sign = 1;
+                    next();
+                }
+                if (tok == TOK_PPNUM) {
+                    const char *p = tokc.str.data;
+                    char *end;
+                    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'
+                                       || p[1] == 'b' || p[1] == 'B'
+                                       || p[1] == 'o' || p[1] == 'O'
+                                       || p[1] == 'd' || p[1] == 'D')) {
+                        if (sign)
+                            tcc_error("junk at end of line in "
+                                      "floating constant");
+                        p += 2; /* GAS base prefix: see above */
+                    }
+                    if (!*p) {
+                        bits = 0; /* a bare '0x' is 0.0 to GAS */
+                        goto float_done;
+                    }
+                    if (isdbl) {
+                        union { double d; uint64_t u; } cv;
+                        cv.d = strtod(p, &end);
+                        bits = cv.u;
+                    } else {
+                        union { float f; uint32_t u; } cv;
+                        cv.f = strtof(p, &end);
+                        bits = cv.u;
+                    }
+                    if (end == p || *end != '\0'
+                        || end[-1] == 'f' || end[-1] == 'F'
+                        || end[-1] == 'l' || end[-1] == 'L')
+                        tcc_error("invalid floating constant '%s'", p);
+                } else if (tok >= TOK_IDENT) {
+                    const char *p = get_tok_str(tok, NULL);
+                    char low[16];
+                    for (i = 0; i < 15 && p[i]; i++)
+                        low[i] = tolower((unsigned char)p[i]);
+                    low[i] = '\0';
+                    if (!strcmp(low, "inf") || !strcmp(low, "infinity"))
+                        bits = isdbl ? 0x7ff0000000000000ULL
+                                     : 0x7f800000ULL;
+                    else if (!strcmp(low, "nan"))
+                        bits = isdbl ? 0x7fffffffffffffffULL
+                                     : 0x7fffffffULL;
+                    else
+                        tcc_error("invalid floating constant '%s'", p);
+                } else {
+                    expect("floating constant");
+                }
+            float_done:
+                if (neg)
+                    bits |= isdbl ? 0x8000000000000000ULL : 0x80000000ULL;
+                if (sec->sh_type != SHT_NOBITS) {
+                    gen_le32((uint32_t)bits);
+                    if (isdbl)
+                        gen_le32((uint32_t)(bits >> 32));
+                } else {
+                    ind += isdbl ? 8 : 4;
+                }
+                next();
+                if (tok != ',')
+                    break;
+                next();
+            }
         }
         break;
     case TOK_ASMDIR_fill:
@@ -897,8 +1013,16 @@ static void asm_parse_directive(TCCState *s1, int global)
                 if (size > 8)
                     size = 8;
                 if (tok == ',') {
+                    ExprValue e;
                     next();
-                    val = asm_int_expr(s1);
+                    asm_expr(s1, &e);
+                    if (e.sym)
+                        expect("constant");
+                    /* GAS truncates the fill value to 32 bits;
+                       the pattern below is those 4 bytes followed
+                       by zeroes, exactly as GAS emits for size > 4
+                       (asm_int_expr would reject the constant). */
+                    val = (int)e.v;
                 }
             }
             /* XXX: endianness */
@@ -1558,6 +1682,18 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global)
         tcc_debug_line(s1);
         parse_flags |= PARSE_FLAG_LINEFEED; /* XXX: suppress that hack */
     redo:
+        if (tok == TOK_PPNUM && tokc.str.data[0] == '.') {
+            /* ".2byte"/".4byte"/".8byte" lex as pp-numbers (a '.'
+               followed by a digit starts a number, not an
+               identifier); map them to their directive tokens. */
+            const char *p = tokc.str.data;
+            if (!strcmp(p, ".2byte"))
+                tok = TOK_ASMDIR_2byte;
+            else if (!strcmp(p, ".4byte"))
+                tok = TOK_ASMDIR_4byte;
+            else if (!strcmp(p, ".8byte"))
+                tok = TOK_ASMDIR_8byte;
+        }
 #if !defined(TCC_TARGET_ARM64)
         if (tok == '#') {
             /* horrible gas comment */

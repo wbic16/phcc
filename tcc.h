@@ -1808,6 +1808,8 @@ ST_FUNC void gen_expr64(ExprValue *pe);
 #endif
 /* ------------ i386-asm.c ------------ */
 ST_FUNC void gen_expr32(ExprValue *pe);
+ST_FUNC void gen_expr16(ExprValue *pe);
+ST_FUNC void gen_expr8(ExprValue *pe);
 ST_FUNC void asm_opcode(TCCState *s1, int opcode);
 ST_FUNC int asm_parse_regvar(int t);
 ST_FUNC void asm_compute_constraints(ASMOperand *operands, int nb_operands, int nb_outputs, const uint8_t *clobber_regs, int *pout_reg);

@@ -29,12 +29,13 @@ from this file alone.
 | `slurp`-era versioning: `VERSION` | 1 line changed | Upstream `VERSION` (0.9.28rc) set to `1.0.0` — the fork's version identity from commit "Forking to v1.0". See rebase resolution R3. |
 | `Changelog` | +7 | Fork's "Version 1.0.0" entry (phext input support) prepended ahead of upstream's 0.9.28 section. See R1. |
 | `RELICENSING` | +1 | Adds "Will Bickford — YES — Phext Support" to the relicensing consent list. See R2. |
-| `tcc.h` | +57 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. |
+| `tcc.h` | +59 / −3 | Phext support core declarations (from c27c095; reworked by F3): `IO_BUF_SIZE` 8192 → 32768; `BufferedFile` gains a `phext_coordinate` — the phext library's coordinate type (F3 replaces the seed's nine int counters, which sat after `buffer[1]`, inside the region the input's own bytes are read into); `TCCState` gains nine totals (printed by `tcc_print_stats`; no code assigns them — as the seed left them); nine `TOK_*_BREAK` token defines for the phext delimiters (scroll 0x17 … library 0x01), their values taken from the library's `PHEXT_*_BREAK` constants since F3; `TCC_STATE_VAR` accessors for the nine totals; `#include "phext/phext.h"`. F7: four token kinds for the C11 prefixed literals (`TOK_U16CHAR`/`TOK_U32CHAR`/`TOK_U16STR`/`TOK_U32STR`) and a widened `TOK_HAS_VALUE`. F10: `TCCState` gains the version-script fields (`version_scripts`, the verdef section/index state, the per-dynsym version array, the parsed-script pointer) with their `TCC_STATE_VAR` accessors. F17: `gen_expr16`/`gen_expr8` declarations beside `gen_expr32`. See F17. |
 | `tccpp.c` | +91 / −4 | Phext support in the preprocessor: consumes the nine phext break tokens while reading input; since F3 the per-file position is advanced by the phext library's `phext_coordinate_*_break` functions instead of the seed's hand-rolled counter arithmetic. F5: the `__attribute__` keyword tokens are never macro-expanded (see F5). F7: the literal scanner/parser handles the C11 encoding prefixes (`u`, `U`, `u8`) beside `L` (see F7). |
 | `tccgen.c` | +331 / −16 | F5 (first fork change to this file): `packed` enum type selection, declarator/type-carried `aligned` resolution for struct fields, typedef-carried alignment in `_Alignof` type-ids. See F5. F7: `char16_t`/`char32_t` literal types and generalized string-initializer handling for the new literal kinds (see F7). F11: initializer cursor advance and offset accounting across anonymous struct/union members (`decl_cumofs`, `decl_next_field`). See F11. F13: `__builtin_constant_p` no longer calls a named object/function address (array decay, function designator) a constant. See F13. F15: excess initializers warn and discard (the `decl_excess` helper, `DIF_DISCARD`). See F15. |
 | `tccdbg.c` | +28 / −5 | F6 (first fork change to this file): an FDE's PC Begin offset travels in the `.eh_frame` relocation's addend on RELA targets (new `dwarf_reloca()`), not only in the field contents, so GNU ld accepts multi-function phcc objects. See F6. |
-| `tccasm.c` | +149 / −1 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. |
-| `tcctok.h` | +22 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). |
+| `tccasm.c` | +288 / −4 | F9: CFI directive family accepted by the assembler (operands parsed and shape-validated, unwind data dropped — see F9). F13: `asm_instr()` parses but does not constraint-check or emit asm statements sitting in code that will not be emitted (`nocode_wanted`). See F13. F17: the data-directive family completed — `.value`/`.hword`/`.2byte`/`.4byte`/`.8byte`/`.zero` as true aliases, new `.float`/`.single`/`.double` handlers, the align family's max-skip third argument and empty fill field, `.fill`'s >32-bit value truncation, operand-width symbol emission at 1/2 bytes, and recovery of the digit-led `.2byte`/`.4byte`/`.8byte` names the lexer hands over as one numeric token. See F17. |
+| `i386-asm.c` | +121 / −2 | Assembler expression-emission routines for the x86 targets. F17: `gen_expr16`/`gen_expr8` beside `gen_expr32` (+61) — width-2/width-1 data emission carrying the relocation classes GAS uses (`R_X86_64_16`/`R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`, `R_386_PC16`/`R_386_PC8`), label differences included. See F17. |
+| `tcctok.h` | +31 | F9: `DEF_ASMDIR` tokens for the 22 CFI directives (inserted before `section`, which remains the last directive token). F17: nine more `DEF_ASMDIR` tokens (`value`, `hword`, `2byte`, `4byte`, `8byte`, `zero`, `float`, `single`, `double`) after `reloc`; `section` remains the last directive token. |
 | `libtcc.c` | +40 | `tcc_print_stats` also prints the nine phext totals (scrolls … libraries) — re-expressed in upstream's current `#`-prefixed stats format during the rebase. See R6. Since F3, the `ONE_SOURCE` block also `#include`s `phext/phext.c` (last in the block, with `tcc.h`'s allocator poisons lifted around it) so amalgamated builds link the library. F10: `tcc_set_linker` records `version-script=` filenames on the state (parsing is deferred to link time); `tcc_delete` frees them. F14 makes `tcc_add_library` search directory-major (every library form within one directory before the next), matching GNU ld. |
 | `tccelf.c` | +891 / −15 | F10 (first fork change to this file): `--version-script` support — script parser and verdict machinery, a localization demote pass composed after `set_elf_sym`'s resolution order, version recording at the two dynsym export points, VERDEF emission (`.gnu.version_d`, DT_VERDEF/DT_VERDEFNUM), and `version_add`/`fill_dynamic` taught to share the versym index space with definitions. See F10. F16: archive extraction follows GNU ld's rule — a standing COMMON pulls a member that strongly defines the symbol, a weak UNDEF never pulls — and a definition in a real section (data or bss) displaces a standing common in `set_elf_sym`. See F16. |
 | `tests/tests2/60_errors_and_warnings.expect` | 1 line changed | F15: the `test_conflicting_array_definition` expectation was upstream's `error: too many initializers`; it now expects the oracle-conformant `warning: excess elements in array initializer` (both oracles emit exactly this text and accept). See F15. |
@@ -1328,6 +1329,131 @@ structure; the fork's intent is carried, never dropped silently).
     and `tccelf.c`'s Source scroll. Machines #1/#2/#4, the
     libtcc1 proof receipts, the assembly listings and the
     Library-10000 region are untouched.
+
+- **F17 — assembler data-directive family completed: `.value` and its
+  aliases, `.float`/`.double`, and the align/`.fill` forms GAS accepts
+  (2026-11-07).**
+  - *Files:* `tccasm.c` (+139/−3), `tcctok.h` (+9), `tcc.h` (+2),
+    `i386-asm.c` (+61).
+  - *Reason:* OpenSSL 4.1.0 with assembler and shared libraries (the
+    wave-3 configuration) built 2,181 of 2,183 objects on the F14 tip;
+    one of the two failures was `crypto/modes/ghash-x86_64.s`, whose
+    GHASH key table is emitted as eight-per-line `.value` lists.
+    phcc's assembler had no `.value` token at all ("unknown opcode").
+    The fix does the whole family, not the one word: every GAS
+    data-emission directive and alias was measured against this
+    system's GAS (binutils 2.42, x86-64 ELF) before anything was
+    aliased, and nothing was aliased on resemblance.
+  - *The audit (GAS semantics measured, not assumed):*
+    - `.byte` — 1 byte, `R_X86_64_8` for a symbol. Present already.
+    - `.short` / `.value` / `.hword` / `.2byte` — one family: 2 bytes,
+      `R_X86_64_16` for a symbol (addend carried), `R_X86_64_PC16`
+      for `sym − .`. phcc had only `.short`, constants only.
+    - `.word` — **4 bytes on x86-64 ELF** (`R_X86_64_32`), not 2:
+      GAS's `.word` is target-sized and this target's word is the
+      32-bit one. phcc's existing `.word` already emitted 4 bytes —
+      measured correct, left alone.
+    - `.int` / `.long` / `.4byte` — 4 bytes. `.4byte` was an unknown
+      token; the digit-led names (`.2byte`/`.4byte`/`.8byte`) never
+      even reach the directive dispatcher, because the lexer reads
+      `.`+digit as one numeric token.
+    - `.quad` / `.8byte` — 8 bytes, `R_X86_64_64`. `.8byte` missing.
+    - `.xword` and `.half` — **GAS on x86-64 ELF rejects both**
+      ("unknown pseudo-op"): they are aarch64/riscv names. Documented
+      non-implementations; phcc keeps erroring on them, as before.
+    - `.single` / `.float` — IEEE single; `.double` — IEEE double.
+      All three missing. GAS's operand is a bare constant (symbols
+      and expressions are rejected); its flonum parser skips a base
+      prefix (`0x`/`0b`/`0o`/`0d`) at the very start of the operand
+      and then reads an ordinary *decimal* float — `0x10` is 10.0,
+      `0x1.5` is 1.5, `0x1.8p1` dies on the `p`, a bare `0x` is
+      0.0 — and a leading sign defeats the prefix check (`-0x10`
+      is junk). The identifiers `inf`/`infinity`/`nan` are accepted
+      case-insensitively, and GAS's `nan` carries **every payload
+      bit set** (float `0x7fffffff`, double `0x7fffffffffffffff`).
+    - `.zero` — exactly `.skip`, including the optional fill
+      argument (`.zero 5,3` fills with 3). Missing.
+    - `.fill` — present, but its value operand went through the
+      constant folder, which rejects the >32-bit values GAS accepts:
+      GAS truncates the value to 32 bits and tiles *value bytes
+      then zeroes* (`.fill 2,8,0x0102030405060708` emits
+      `08 07 06 05 00 00 00 00` twice).
+    - `.align` / `.balign` / `.p2align` — present, but GAS's third
+      **max-skip** argument was rejected ("too many arguments"): if
+      the padding needed exceeds the maximum, nothing is emitted.
+      The empty-fill form (`.balign 8,,2`) is also accepted.
+    - `.ascii` / `.asciz` / `.string` / `.string8/16/32/64`, `.skip`,
+      `.space`, `.comm` (F12) — present and correct; untouched.
+    - Observed but deliberately out of family: `.uleb128`/`.sleb128`
+      and the `.dc.*` spellings exist in GAS and not in phcc.
+      Difference-valued ULEB operands cannot be encoded by the
+      assembler's end-of-unit patch machinery without new design;
+      recorded here as known gaps, not silently absent.
+  - *Change:* nine directive tokens (`value`, `hword`, `2byte`,
+    `4byte`, `8byte`, `zero`, `float`, `single`, `double`) join the
+    existing handlers as true aliases where the measured semantics
+    match: `.value`/`.hword`/`.2byte` at width 2, `.4byte` at
+    width 4, `.8byte` beside `.quad`, `.zero` beside `.skip`/`.space`.
+    Width-2 and width-1 operands on the x86 targets now accept
+    symbols, label differences and pcrel forms through two new
+    emission helpers, `gen_expr16`/`gen_expr8` (`i386-asm.c`, beside
+    `gen_expr32`), carrying GAS's relocation classes (`R_X86_64_16`/
+    `R_X86_64_8`, `R_X86_64_PC16`/`R_X86_64_PC8`; `R_386_16`/`R_386_8`,
+    `R_386_PC16`/`R_386_PC8`); other targets keep the constant-only
+    path, now with an error that says so. The digit-led directive
+    names are recovered in `tcc_assemble_internal`: a numeric token
+    whose text is exactly `.2byte`, `.4byte` or `.8byte` is the
+    directive (the same recovery serves inline asm). `.float`/
+    `.single`/`.double` get a dedicated handler reproducing the
+    measured operand grammar above, including the prefix-skip rule,
+    the sign rule, and GAS's all-payload-bits NaN; in a NOBITS
+    section it advances the position without emitting, like its
+    neighbours. The align family takes the max-skip third argument
+    and the empty fill field. `.fill`'s value is read as a general
+    expression and truncated to 32 bits, matching GAS.
+  - *Evidence:* a 61-case probe suite (constants, lists, symbols,
+    differences, pcrel forms, negatives, fill patterns, alignment
+    forms — every case byte- *and* relocation-compared against GAS):
+    58 identical; the 3 differing cases are one pre-existing class,
+    not an F17 regression — GAS resolves a defined same-section
+    label inline where phcc emits a relocation, and width-4 symbol
+    emission uses `R_X86_64_32S` where GAS uses `R_X86_64_32`; both
+    behaviours are the unmodified baseline's (the pre-existing
+    `.long` handler shows the identical diffs), and `.4byte`/
+    `.value` inherit them as faithful aliases. A 16-case float
+    battery (every measured prefix/sign/NaN form): 16/16 identical
+    to GAS, error cases included. i386 parity: an i386-target build
+    emits `R_386_16` for `.value`/`.2byte` exactly as `as --32`.
+    ghash-x86_64.s (the file that motivated the entry): assembles;
+    `.rodata` — the `.value` key table — is byte-identical to GAS's
+    (768 bytes); the `.text` instruction streams are identical
+    (1,130 instructions each, zero differences) once the four
+    pre-existing TCC policy classes are set aside (no jump
+    relaxation, 0x90 align padding vs multi-byte NOPs, shift-by-one
+    encoding form, local references carried as relocations instead
+    of resolved inline); `.eh_frame` is smaller because F9 drops
+    CFI, as documented there. **Headline: OpenSSL 4.1.0,
+    `linux-x86_64` with assembler and shared libraries (benchmark
+    recipe verbatim, `no-tests`), now builds completely — 2,183 of
+    2,183 objects, `make build_sw` exit 0 — where the F14 tip
+    stopped at 2,181.** `apps/openssl` runs (`OpenSSL 4.1.0 23 Oct
+    2026`); SHA-256 of "abc" equals the system tool's
+    (ba7816bf…f20015ad). The `no-tests` configuration ships no test
+    suite to run, so the functional check is known-answer smoke
+    against the built artifacts, all exact: AES-256-CBC (NIST
+    SP 800-38A F.2.5), HMAC-SHA-256 (RFC 4231 test case 1), an RSA
+    sign/verify roundtrip, and AES-256-GCM (the GHASH path itself,
+    all-zero vector: ct cea7403d…, tag d0d1c8a7…) computed by a
+    client of the built `libcrypto.so.4`. Upstream `make test` ALL
+    TESTS PASSED; conformance spot re-run unchanged at 328/333 with
+    the same five documented class-(b) divergences (`a_pp_018`,
+    `b_gnu_009`, `b_gnu_015`, `b_gnu_016`, `b_gnu_020`) and zero
+    oracle splits. Note for the phext: this entry changes the
+    Source scrolls of `tccasm.c`, `tcctok.h`, `i386-asm.c` and
+    `tcc.h` (and their Volume 3 segmentations and Design views),
+    which go STALE at the next refresh; no §A.3 machine description
+    changes — none of the four machines describes the assembler's
+    directive table.
 
 ## Maintenance rule
 
