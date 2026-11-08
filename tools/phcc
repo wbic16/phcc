@@ -4,6 +4,8 @@
     phcc unpack --phext X.phext --out DIR [--from vol2|vol3] [--force]
     phcc pack   --tree DIR --out Y.phext [--base Z.phext]
                 [--no-vol3] [--ts-python PY]
+    phcc analyze --phext X.phext [--out REPORT]
+    phcc analyze --phext X.phext --apply --out Y.phext [--report R]
     phcc build-region list --phext X.phext
     phcc build-region wipe --phext X.phext --out Y.phext [--force]
     phcc seal   --phext X.phext [--out X.phext.xz] [--force]
@@ -14,14 +16,20 @@ against the in-phext placement manifest before it is written).
 pack:   directory tree -> phext (Slice 0 placement for Volume 2,
 plus docs/** in the Docs phase (Collection 9); importers v3/v4
 member segmentation for Volume 3).
+analyze: duplication census (EXACT payload-hash clusters + NEAR
+normalized clusters, report-only) and, with --apply, automatic
+de-duplication — duplicate segment/file bodies replaced by dedup
+stubs that unpack expands; receipt bindings a rewrite invalidates
+are listed DEMOTED-TO-STALE, never silently rewritten.
 build-region: list or wipe the Library-10000 build-artifact region
 (binary build outputs, base64 in-phext; wiped and reset frequently).
 seal/unseal: the working phext is plain text; the xz seal is the
 persistence/publish form only (see tools/README.md).
 
-Thin dispatcher over phcc_migrate.py / phcc_builds.py in the same
-directory; see METHODS.md (repo: tools/METHODS.md) for the migration
-invariants, what is not preserved and why, and the failure behaviour.
+Thin dispatcher over phcc_migrate.py / phcc_analyze.py /
+phcc_builds.py in the same directory; see METHODS.md (repo:
+tools/METHODS.md) for the migration invariants, what is not
+preserved and why, and the failure behaviour.
 """
 import os, sys
 
@@ -42,11 +50,14 @@ def main(argv):
     if sub == "pack":
         import phcc_migrate
         return phcc_migrate.cli(["import"] + rest)
+    if sub == "analyze":
+        import phcc_analyze
+        return phcc_analyze.cli(rest)
     if sub in ("build-region", "seal", "unseal"):
         import phcc_builds
         return phcc_builds.cli([sub] + rest)
     print(f"phcc: unknown command '{sub}' (expected: unpack, pack, "
-          f"build-region, seal, unseal)", file=sys.stderr)
+          f"analyze, build-region, seal, unseal)", file=sys.stderr)
     print(USAGE, file=sys.stderr)
     return 2
 

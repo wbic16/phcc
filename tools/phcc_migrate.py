@@ -23,6 +23,11 @@ What is reused vs adapted (nothing reinvented silently):
   - unpack --from vol3: ADAPTED from importer v4 tools/reassemble.py
     (index-authoritative segment reassembly; file-level files fall
     back to the Volume 2 bridge scroll), same verification rules.
+  - unpack (both routes) expands dedup stubs written by
+    `phcc analyze --apply` (phext_io dedup refs): auto-detected,
+    target verified against the stub's SHA-256, then the usual
+    manifest/index verification runs on the expanded bytes — see
+    METHODS.md, "analyze".
   - pack stage A (tree -> Volume 1 + Volume 2 + placement manifest):
     ADAPTED from Slice 0 tools/import_phcc.py (placement table
     `place()` copied verbatim, plus extensions: tools/** -> Book 10
@@ -52,7 +57,8 @@ import argparse, hashlib, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from phext_io import walk_bytes, implode, fmt, sha256, parse_coord
+from phext_io import (walk_bytes, implode, fmt, sha256, parse_coord,
+                      parse_dedup_ref)
 
 LEVEL_BYTES = [0x01, 0x1F, 0x1E, 0x1D, 0x1C, 0x1A, 0x19, 0x18, 0x17]
 DELIM_SET = set(LEVEL_BYTES)
@@ -91,24 +97,77 @@ def write_file(out, path, data, mode):
 
 
 # ------------------------------------------------------------ unpack
-def unpack_vol2(scrolls, entries):
+def resolve_stub(scrolls, data, segment, stats):
+    """Expand a dedup stub (phext_io dedup refs, written by
+    `phcc analyze --apply`) to the bytes it stands for. Returns None
+    when `data` is not a stub. segment=True: stub and target are
+    Volume 3 segment payloads — the target scroll's post-header
+    bytes are the payload, and the stub's SHA-256 names those bytes
+    (the value the file index records). segment=False: stub and
+    payload are whole scrolls (Volume 2 file scrolls). Raises
+    ValueError on any inconsistency — a stub whose target is
+    missing, is itself a stub, or does not hash to the stub's
+    SHA-256 is corruption, and unpack fails that file loudly rather
+    than fall back to anything. Detection is auto (a payload is a
+    stub iff it matches the stub format in full) and expansion is
+    always verified before the caller's manifest/index checks run
+    on the expanded bytes, so a deduplicated phext unpacks under
+    exactly the same verification rules as a plain one."""
+    ref = parse_dedup_ref(data)
+    if ref is None:
+        return None
+    coord, want = ref
+    target = scrolls.get(coord)
+    if target is None:
+        raise ValueError(f"dedup target {fmt(coord)} not present in phext")
+    if segment:
+        if b"\n" not in target:
+            raise ValueError(f"dedup target {fmt(coord)} is headerless")
+        payload = target.split(b"\n", 1)[1]
+    else:
+        payload = target
+    if parse_dedup_ref(payload) is not None:
+        raise ValueError(f"dedup target {fmt(coord)} is itself a stub "
+                         "(chains are never written and never followed)")
+    if sha256(payload) != want:
+        raise ValueError(f"dedup target {fmt(coord)} payload sha256 "
+                         f"{sha256(payload)[:16]}… != stub's {want[:16]}…")
+    if stats is not None:
+        stats["dedup_refs"] = stats.get("dedup_refs", 0) + 1
+    return payload
+
+
+def unpack_vol2(scrolls, entries, stats=None):
     """Yield (path, data, mode, ok, why)."""
     for e in entries:
         data = scrolls.get(e["coord"])
         if data is None:
             yield e["path"], None, e["mode"], False, "scroll missing from phext"
-        elif sha256(data) != e["sha"] or len(data) != e["size"]:
+            continue
+        route = "vol2"
+        try:
+            resolved = resolve_stub(scrolls, data, segment=False,
+                                    stats=stats)
+        except ValueError as ex:
+            yield e["path"], None, e["mode"], False, f"dedup stub: {ex}"
+            continue
+        if resolved is not None:
+            data, route = resolved, "vol2+dedup-ref"
+        if sha256(data) != e["sha"] or len(data) != e["size"]:
             yield e["path"], None, e["mode"], False, \
                 f"SHA-256/size mismatch vs manifest ({sha256(data)[:16]}… != {e['sha'][:16]}…)"
         else:
-            yield e["path"], data, e["mode"], True, "vol2"
+            yield e["path"], data, e["mode"], True, route
 
 
-def unpack_vol3(scrolls, entries):
+def unpack_vol3(scrolls, entries, stats=None):
     """Reassemble from Volume 3 segment scrolls where a file index
     exists (same identification rule as reassemble.py: magic header +
     path + file hash must all match, so structural empty scrolls can
-    never masquerade as an index); bridge from Volume 2 otherwise."""
+    never masquerade as an index); bridge from Volume 2 otherwise.
+    The bridge route expands whole-scroll dedup stubs and the
+    segment route expands per-segment stubs, both via resolve_stub,
+    before any hash check runs."""
     for e in entries:
         v2 = e["coord"]
         idx = (1, 1, 1, 4, 3, v2[5], v2[6], v2[7], 1)
@@ -120,10 +179,21 @@ def unpack_vol3(scrolls, entries):
             data = scrolls.get(v2)
             if data is None:
                 yield e["path"], None, e["mode"], False, "bridge scroll missing"
-            elif sha256(data) != e["sha"] or len(data) != e["size"]:
+                continue
+            route = "vol3-bridge"
+            try:
+                resolved = resolve_stub(scrolls, data, segment=False,
+                                        stats=stats)
+            except ValueError as ex:
+                yield e["path"], None, e["mode"], False, \
+                    f"bridge dedup stub: {ex}"
+                continue
+            if resolved is not None:
+                data, route = resolved, "vol3-bridge+dedup-ref"
+            if sha256(data) != e["sha"] or len(data) != e["size"]:
                 yield e["path"], None, e["mode"], False, "bridge scroll hash mismatch"
             else:
-                yield e["path"], data, e["mode"], True, "vol3-bridge"
+                yield e["path"], data, e["mode"], True, route
             continue
         table, why = [], None
         for line in raw_idx.decode("utf-8").splitlines():
@@ -143,6 +213,14 @@ def unpack_vol3(scrolls, entries):
                 why = f"segment scroll {scr} missing or headerless"
                 break
             payload = seg.split(b"\n", 1)[1]
+            try:
+                resolved = resolve_stub(scrolls, payload, segment=True,
+                                        stats=stats)
+            except ValueError as ex:
+                why = f"segment scroll {scr} dedup stub: {ex}"
+                break
+            if resolved is not None:
+                payload = resolved
             if sha256(payload) != psha or len(payload) != en - s:
                 why = f"segment scroll {scr} payload hash/length mismatch"
                 break
@@ -166,8 +244,9 @@ def cmd_export(a):
     scrolls = load_scrolls(a.phext)
     entries = manifest_entries(scrolls)
     print(f"manifest: {len(entries)} files; source: --from {a.source}")
-    gen = unpack_vol2(scrolls, entries) if a.source == "vol2" \
-        else unpack_vol3(scrolls, entries)
+    stats = {}
+    gen = unpack_vol2(scrolls, entries, stats) if a.source == "vol2" \
+        else unpack_vol3(scrolls, entries, stats)
     ok, failed, routes = 0, [], {}
     man_lines = ["# phcc-manifest — written by phcc unpack "
                  f"(phcc_migrate export --from {a.source})",
@@ -184,6 +263,9 @@ def cmd_export(a):
     with open(os.path.join(a.out, MANIFEST_NAME), "w") as f:
         f.write("\n".join(man_lines) + "\n")
     print(f"verified + written: {ok}/{len(entries)}  routes: {routes}")
+    if stats.get("dedup_refs"):
+        print(f"dedup stubs expanded: {stats['dedup_refs']} "
+              f"(each verified against its stub SHA-256)")
     print(f"manifest written: {os.path.join(a.out, MANIFEST_NAME)}")
     if failed:
         print("UNPACK FAILURES:", file=sys.stderr)

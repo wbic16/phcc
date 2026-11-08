@@ -8,7 +8,7 @@ consistent with the Slice 0 phext. Stdlib only.
 Coordinate tuple order: (library, shelf, series, collection, volume,
 book, chapter, section, scroll).
 """
-import hashlib
+import hashlib, re
 
 LEVEL_BYTES = [0x01, 0x1F, 0x1E, 0x1D, 0x1C, 0x1A, 0x19, 0x18, 0x17]  # library..scroll
 DELIM_SET = set(LEVEL_BYTES)
@@ -72,6 +72,45 @@ def sha256(data):
 def load_phext(path):
     with open(path, "rb") as f:
         return dict(walk_bytes(f.read()))
+
+
+# ------------------------------------------------------------ dedup refs
+# EXTENSION (phcc_analyze, 2026-11-07): the de-duplication reference
+# stub written by `phcc analyze --apply` and expanded by `phcc
+# unpack`. A stub is a complete payload (a Volume 3 segment's bytes
+# after its #phcc-member header line) or a complete scroll (a
+# Volume 2 file scroll) consisting of exactly one line:
+#
+#     #phcc-dedup-ref <coordinate> <sha256>\n
+#
+# naming the canonical scroll that holds the bytes and the SHA-256
+# of the bytes the stub stands for (for a segment target, the SHA-256
+# of the target segment's payload, i.e. its post-header bytes — the
+# same value the file index records). The format is deliberately a
+# single anchored line: a payload is a stub iff it matches in full,
+# so detection is exact, never heuristic. See tools/METHODS.md,
+# "analyze — duplication census + automatic de-duplication".
+DEDUP_REF_RE = re.compile(
+    rb"\A#phcc-dedup-ref "
+    rb"(\d+\.\d+\.\d+/\d+\.\d+\.\d+/\d+\.\d+\.\d+) "
+    rb"([0-9a-f]{64})\n\Z")
+
+
+def dedup_ref(coord, payload_sha256):
+    """The stub bytes standing for the payload at `coord`."""
+    return (b"#phcc-dedup-ref " + fmt(coord).encode("ascii") + b" "
+            + payload_sha256.encode("ascii") + b"\n")
+
+
+def parse_dedup_ref(data):
+    """(coord_tuple, sha256_hex) if `data` is exactly a dedup stub,
+    else None."""
+    if data is None:
+        return None
+    m = DEDUP_REF_RE.match(data)
+    if not m:
+        return None
+    return parse_coord(m.group(1).decode("ascii")), m.group(2).decode("ascii")
 
 
 def parse_manifest(scrolls):

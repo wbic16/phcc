@@ -32,15 +32,21 @@ carried tree.
     phcc unpack --phext X.phext --out DIR [--from vol2|vol3] [--force]
     phcc pack   --tree DIR --out Y.phext [--base Z.phext]
                 [--no-vol3] [--ts-python PY]
+    phcc analyze --phext X.phext [--out REPORT]
+    phcc analyze --phext X.phext --apply --out Y.phext [--report R]
     phcc build-region list --phext X.phext
     phcc build-region wipe --phext X.phext --out Y.phext [--force]
     phcc seal   --phext X.phext [--out X.phext.xz] [--force]
     phcc unseal --sealed X.phext.xz [--out X.phext] [--force]
 
 - `phcc` is a thin dispatcher: `unpack`/`pack` route to
-  `phcc_migrate.py`; `build-region`/`seal`/`unseal` route to
-  `phcc_builds.py`. `phext_io.py` is the shared byte-exact phext
-  reader/writer.
+  `phcc_migrate.py`; `analyze` routes to `phcc_analyze.py` (the
+  duplication census, and with `--apply` automatic de-duplication
+  into dedup stubs that `unpack` expands — receipt bindings a
+  rewrite invalidates are reported DEMOTED-TO-STALE, never silently
+  rewritten; `tools/test_analyze.py` is its end-to-end self-check);
+  `build-region`/`seal`/`unseal` route to `phcc_builds.py`.
+  `phext_io.py` is the shared byte-exact phext reader/writer.
 - `phcc_gate.py` is the report-only trace gate (**v8.1.0**): the
   v8.0.0 sections (coverage, tiers, proof receipts — 271/297 VCs,
   re-issued against the F1 libtcc1.c source, no STALE; Design

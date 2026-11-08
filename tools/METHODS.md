@@ -65,6 +65,86 @@ containing phext delimiter bytes (0x01, 0x17–0x1F set — such a file
 cannot be a scroll byte-exactly), an unplaceable path, a missing
 Volume 1 source, or a stage-B error.
 
+## analyze — duplication census + automatic de-duplication
+
+```sh
+phcc analyze --phext phcc.phext [--out REPORT]
+phcc analyze --phext phcc.phext --apply --out dedup.phext [--report R]
+```
+
+`phcc` routes `analyze` to `phcc_analyze.py`. The census is
+read-only, in two tiers:
+
+- **EXACT** — cluster by payload SHA-256, at two granularities:
+  Volume 3 segment payloads (the importer's per-member hashes are
+  reused from the file indexes — the same identification rule as
+  unpack's vol3 route — and verified against recomputation; a
+  mismatch is reported in the census and makes `--apply` refuse),
+  and whole scrolls for every scroll that is not a Volume 3
+  segment/index. Bytes duplicated in a cluster of n copies of size
+  s is (n−1)·s. Whole-scroll clusters are split into *manifest-file
+  clusters* (apply can rewrite them) and *census-only* clusters
+  (Volume 1 history, Tests placements, registers — no expansion
+  path exists, so they are reported, never rewritten).
+- **NEAR** (report-only) — for Source members (segment kinds
+  function / type / object), a normalized hash: C comments stripped
+  by a string/char-aware scanner, whitespace collapsed. A NEAR
+  cluster claims *identical after normalization* and nothing more;
+  this tier is never applied.
+
+`--apply` writes a NEW phext (the input is never modified) in which,
+per exact cluster, the lowest-coordinate member stays canonical and
+every other member's body is replaced by a **dedup stub** — exactly
+one line, `#phcc-dedup-ref <coordinate> <sha256>`, naming the
+canonical scroll and the SHA-256 of the bytes it stands for (for a
+segment target, the payload's hash — the value the file index
+records). Only two classes are rewritten, because those are the two
+`phcc unpack` can expand: Volume 3 segment payloads (the
+`#phcc-member` header line and the segment's address are kept
+byte-exact) and Volume 2 whole-file scrolls named by the placement
+manifest. `unpack` expands stubs automatically on both routes
+(vol2, vol3 segments, and the vol3 bridge): the target must exist,
+must not itself be a stub (chains are never written and never
+followed), and must hash to the stub's SHA-256 — then the ordinary
+manifest/index verification runs on the expanded bytes, so a
+deduplicated phext unpacks under exactly the same rules as a plain
+one. Apply is idempotent: stubs are references, not content, and a
+second apply writes zero stubs and byte-identical output.
+
+Excluded from de-duplication everywhere: Library-10000 build-region
+scrolls and binary-format scrolls (artifacts, already canonical
+base64 — the census tallies them, and notes duplicate groups among
+binary scrolls, but never clusters them for rewriting), and
+zero-byte payloads (a stub is larger than the payload).
+
+Measured on the canonical corpus (2026-11-07), so the economics
+are on the record: the stub line costs ~103 bytes, and Volume 3's
+duplicated payloads are mostly micro-payloads (whitespace gaps,
+one-line declarations — 164,432 duplicated bytes across 1,444
+clusters, mean stubbed payload ~9 bytes). Full stubbing therefore
+*grows* this phext by 1,594,735 bytes (+2.5%): 132 of 17,549
+segment stubs save bytes (net +7,660), the rest are provenance,
+not compression. The corpus's real duplicated bytes live in the
+whole-scroll tier — 837,713 bytes (837,665 of them census-only),
+dominated by the Volume 1 slurp re-holding placed files. Read
+`analyze`
+as an audit instrument first and a rewriting instrument second;
+any future byte win is a size threshold on apply, not a different
+mechanism.
+
+**Safety law.** A rewrite is never silent about bindings. The
+segment/file hashes a rewrite changes are scanned against every
+scroll in the phext, and the apply report lists as
+**DEMOTED-TO-STALE** every binding the rewrite invalidates: gate
+verdicts and Proofs-collection receipts whose text names a changed
+hash, Design views that bind a changed hash or derive from a
+touched file, and the current gate verdict in any case (it binds
+the Volume 3 members digest of the whole phext). Demotion is the
+tier system's designed response to a source edit — receipts and
+views are listed, never edited, and read STALE until their own pass
+re-issues them. Scrolls that merely *mention* a changed hash
+without asserting a binding are listed separately, as mentions.
+
 ## Round-trip invariants (proven on the canonical corpus)
 
 - **tree → phext → tree: identity.** All 558 files byte-identical
@@ -76,6 +156,15 @@ Volume 1 source, or a stage-B error.
   (559/559), and the **entire Volume 3** (50,816/50,816 — every index
   scroll and every member payload). The segmentation is a fixed
   point of pack: unpack∘pack loses nothing the tree ever held.
+- **phext → dedup phext → tree: identity.** `analyze --apply` is
+  lossless by construction and by proof: unpack of the deduplicated
+  phext (both routes) reproduces the original tree byte-for-byte,
+  a census of the deduplicated phext reports zero exact clusters in
+  both rewritten classes, and re-packing the expanded tree
+  re-segments to the same member hashes. The end-to-end behaviour
+  (planted duplicates of every class, the demote list, the refusal
+  on unverifiable index hashes) is exercised by
+  `tools/test_analyze.py`.
 
 Placement completion (2026-11-07): the placement table predated F2
 and the seal, and a whole-tree pack of the current tree aborted on
@@ -140,3 +229,9 @@ reason.
   and the seal + `phext/**` named exclusions added 2026-11-07).
 - pack stage B: importers v3/v4 (`import_fn.py`, `import_v4.py`)
   run unmodified.
+- analyze (`phcc_analyze.py`, 2026-11-07): new module; the dedup
+  stub format lives in `phext_io.py` as a marked extension (the
+  byte format's first addition since Slice 1), and unpack's stub
+  expansion lives in `phcc_migrate.py`'s two routes, sharing
+  `resolve_stub`. Segment identification is the vol3 route's rule,
+  restated in the analyzer so both tools mean the same segments.
