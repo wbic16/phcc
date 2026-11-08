@@ -5675,6 +5675,80 @@ static void parse_builtin_params(int nc, const char *args)
         nocode_wanted--;
 }
 
+/* F32: __builtin_bswap16/32/64.  GNU semantics, measured against
+   gcc 13.3 and clang 18 (probes: bswap_types.c / bswap_const.c):
+   the argument is converted to the unsigned type of the width
+   (truncating, sign-blind); the 16-bit form returns int, the
+   32-bit form unsigned int, the 64-bit form unsigned long long.
+   A constant argument folds here, so the builtins work in every
+   integral constant-expression context (enum, case, array size,
+   static initializer, _Static_assert) exactly as the oracles'.
+   The runtime path is the byte-lane exchange ((x & M) << s) |
+   ((x >> s) & M) at s = 8, 16, 32, composed on the vstack over a
+   spilled copy of the value (load_packed_bf's pattern), so it is
+   backend-generic. */
+#if LONG_SIZE == 8
+# define VT_U64 (VT_LLONG | VT_LONG) /* uint64_t: unsigned long (gcc) */
+#else
+# define VT_U64 VT_LLONG             /* uint64_t: unsigned long long */
+#endif
+static void gen_bswap(int bits)
+{
+    CType type;
+    uint64_t v, r, m;
+    int i, nsteps, s;
+    const int rtype = bits == 16 ? (VT_SHORT | VT_UNSIGNED)
+        : VT_UNSIGNED | (bits == 32 ? VT_INT : VT_U64);
+
+    type.ref = NULL;
+    type.t = VT_UNSIGNED
+        | (bits == 16 ? VT_SHORT : bits == 32 ? VT_INT : VT_U64);
+    gen_cast(&type);
+    if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST
+        && !(vtop->r & VT_SYM)) {
+        v = vtop->c.i;
+        r = 0;
+        for (i = 0; i < bits; i += 8)
+            r = (r << 8) | ((v >> i) & 0xff);
+        vtop->c.i = r;
+        vtop->type.t = rtype;
+        return;
+    }
+    if (bits == 16) {
+        /* the value is < 2^16 and the result type is int:
+           do the single exchange at int width */
+        type.t = VT_INT;
+        gen_cast(&type);
+    }
+    nsteps = bits == 16 ? 1 : bits == 32 ? 2 : 3;
+    for (i = 0; i < nsteps; i++) {
+        s = 8 << i;
+        m = (1ULL << s) - 1;
+        for (r = s * 2; r < (uint64_t)bits; r += s * 2)
+            m |= ((1ULL << s) - 1) << r;
+        gv(RC_INT);
+        save_reg(vtop->r); /* spill: vdup copies then read the slot */
+        vdup();                                   /* x x */
+        if (bits == 64)
+            vpushll(m);
+        else
+            vpushi((int)m);
+        gen_op('&');                              /* x (x&M) */
+        vpushi(s);
+        gen_op(TOK_SHL);                          /* x ((x&M)<<s) */
+        vswap();                                  /* ((x&M)<<s) x */
+        vpushi(s);
+        gen_op(TOK_SHR);                          /* .. (x>>s) */
+        if (bits == 64)
+            vpushll(m);
+        else
+            vpushi((int)m);
+        gen_op('&');                              /* .. ((x>>s)&M) */
+        gen_op('|');                              /* step(x) */
+    }
+    vtop->type.t = rtype;
+}
+
 static void parse_atomic(int atok)
 {
     int size, align, arg, t, save = 0;
@@ -6057,6 +6131,17 @@ ST_FUNC void unary(void)
 	/* __builtin_expect is a no-op for now */
 	parse_builtin_params(0, "ee");
 	vpop();
+        break;
+    case TOK_builtin_bswap16:
+    case TOK_builtin_bswap32:
+    case TOK_builtin_bswap64:
+        n = tok == TOK_builtin_bswap16 ? 16
+            : tok == TOK_builtin_bswap32 ? 32 : 64;
+        next();
+        skip('(');
+        expr_eq();
+        skip(')');
+        gen_bswap(n);
         break;
     case TOK_builtin_types_compatible_p:
 	parse_builtin_params(0, "tt");
