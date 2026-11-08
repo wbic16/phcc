@@ -603,6 +603,12 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
         return strcpy(p, "<long double>");
     case TOK_CF128:
         return strcpy(p, "<float128>");
+    case TOK_CIFLOAT:
+        return strcpy(p, "<imaginary float>");
+    case TOK_CIDOUBLE:
+        return strcpy(p, "<imaginary double>");
+    case TOK_CILDOUBLE:
+        return strcpy(p, "<imaginary long double>");
     case TOK_LINENUM:
         return strcpy(p, "<linenumber>");
 
@@ -997,6 +1003,7 @@ static inline int tok_size(const int *p)
     case TOK_CCHAR:
     case TOK_LCHAR:
     case TOK_CFLOAT:
+    case TOK_CIFLOAT:
     case TOK_LINENUM:
         return 1 + 1;
     case TOK_STR:
@@ -1008,10 +1015,12 @@ static inline int tok_size(const int *p)
     case TOK_CULONG:
 	return 1 + LONG_SIZE / 4;
     case TOK_CDOUBLE:
+    case TOK_CIDOUBLE:
     case TOK_CLLONG:
     case TOK_CULLONG:
         return 1 + 2;
     case TOK_CLDOUBLE:
+    case TOK_CILDOUBLE:
         return 1 + LDOUBLE_WORDS;
     case TOK_CF128:
         return 1 + 4;
@@ -1122,6 +1131,7 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
     case TOK_U16CHAR:
     case TOK_U32CHAR:
     case TOK_CFLOAT:
+    case TOK_CIFLOAT:
     case TOK_LINENUM:
 #if LONG_SIZE == 4
     case TOK_CLONG:
@@ -1147,6 +1157,7 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
         }
         break;
     case TOK_CDOUBLE:
+    case TOK_CIDOUBLE:
     case TOK_CLLONG:
     case TOK_CULLONG:
 #if LONG_SIZE == 8
@@ -1157,6 +1168,7 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
         str[len++] = cv->tab[1];
         break;
     case TOK_CLDOUBLE:
+    case TOK_CILDOUBLE:
         str[len++] = cv->tab[0];
         str[len++] = cv->tab[1];
         if (LDOUBLE_WORDS >= 3)
@@ -1223,6 +1235,7 @@ static inline void tok_get(int *t, const int **pp, CValue *cv)
         cv->i = (unsigned)*p++;
         break;
     case TOK_CFLOAT:
+    case TOK_CIFLOAT:
 	tab[0] = *p++;
 	break;
     case TOK_STR:
@@ -1236,6 +1249,7 @@ static inline void tok_get(int *t, const int **pp, CValue *cv)
         p += (cv->str.size + sizeof(int) - 1) / sizeof(int);
         break;
     case TOK_CDOUBLE:
+    case TOK_CIDOUBLE:
     case TOK_CLLONG:
     case TOK_CULLONG:
 #if LONG_SIZE == 8
@@ -1245,6 +1259,7 @@ static inline void tok_get(int *t, const int **pp, CValue *cv)
         n = 2;
         goto copy;
     case TOK_CLDOUBLE:
+    case TOK_CILDOUBLE:
         n = LDOUBLE_WORDS;
         goto copy;
     case TOK_CF128:
@@ -2810,6 +2825,8 @@ static void parse_number(const char *p)
                 p += 4;
                 tok = TOK_CF128;
                 f128_from_hex(token_buf, exp_val - shift * f128_nfrac, tokc.tab);
+                if (toup(ch) == 'I' || toup(ch) == 'J')
+                    tcc_error("imaginary _Float128 constants are not supported (F40)");
                 return;
             }
             /* XXX: should patch directly float number */
@@ -2831,6 +2848,22 @@ static void parse_number(const char *p)
             } else {
                 tok = TOK_CDOUBLE;
                 tokc.d = (double)d;
+            }
+            if (toup(ch) == 'I' || toup(ch) == 'J') {
+                /* F40: imaginary suffix; it may precede the f/l
+                   suffix (1.0p0iF) or follow it (1.0p0Fi) */
+                ch = *p++;
+                if (tok == TOK_CDOUBLE && toup(ch) == 'F') {
+                    ch = *p++;
+                    tok = TOK_CFLOAT;
+                    tokc.f = (float)d;
+                } else if (tok == TOK_CDOUBLE && toup(ch) == 'L') {
+                    ch = *p++;
+                    tok = TOK_CLDOUBLE;
+                    tokc.ld = d;
+                }
+                tok = (tok == TOK_CFLOAT) ? TOK_CIFLOAT
+                    : (tok == TOK_CLDOUBLE) ? TOK_CILDOUBLE : TOK_CIDOUBLE;
             }
         } else {
             /* decimal floats */
@@ -2877,6 +2910,8 @@ static void parse_number(const char *p)
                 p += 4;
                 tok = TOK_CF128;
                 f128_from_decimal(token_buf, tokc.tab);
+                if (toup(ch) == 'I' || toup(ch) == 'J')
+                    tcc_error("imaginary _Float128 constants are not supported (F40)");
                 return;
             } else if (t == 'F') {
                 ch = *p++;
@@ -2889,6 +2924,23 @@ static void parse_number(const char *p)
             } else {
                 tok = TOK_CDOUBLE;
                 tokc.d = strtod(token_buf, NULL);
+            }
+            if (toup(ch) == 'I' || toup(ch) == 'J') {
+                /* F40: imaginary suffix; it may precede the f/l
+                   suffix (1.0iF -- glibc's _Complex_I spelling) or
+                   follow it (1.0Fi) */
+                ch = *p++;
+                if (tok == TOK_CDOUBLE && toup(ch) == 'F') {
+                    ch = *p++;
+                    tok = TOK_CFLOAT;
+                    tokc.f = strtof(token_buf, NULL);
+                } else if (tok == TOK_CDOUBLE && toup(ch) == 'L') {
+                    ch = *p++;
+                    tok = TOK_CLDOUBLE;
+                    tokc.ld = strtold(token_buf, NULL);
+                }
+                tok = (tok == TOK_CFLOAT) ? TOK_CIFLOAT
+                    : (tok == TOK_CLDOUBLE) ? TOK_CILDOUBLE : TOK_CIDOUBLE;
             }
         }
     } else {
@@ -2982,6 +3034,8 @@ static void parse_number(const char *p)
 	if (ucount)
 	    ++tok; /* TOK_CU... */
         tokc.i = n;
+        if (toup(ch) == 'I' || toup(ch) == 'J')
+            tcc_error("imaginary integer constants need _Complex integer types, a GNU extension not supported (F40)");
     }
     if (ch)
         tcc_error("invalid number");

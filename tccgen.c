@@ -93,6 +93,10 @@ static int func_old;
 ST_DATA const char *funcname;
 ST_DATA CType int_type, func_old_type, char_type, char_pointer_type;
 static CString initstr;
+/* F40: interned _Complex types (float/double/long double elements),
+   built in tccgen_init; a complex CType is VT_STRUCT|VT_COMPLEX_TAG
+   with ref = the shared descriptor Sym */
+static CType cx_types[3];
 
 #if PTR_SIZE == 4
 #define VT_SIZE_T (VT_INT | VT_UNSIGNED)
@@ -412,6 +416,35 @@ ST_FUNC void tccgen_init(TCCState *s1)
     func_old_type.ref = sym_push(SYM_FIELD, &int_type, 0, 0);
     func_old_type.ref->f.func_call = FUNC_CDECL;
     func_old_type.ref->f.func_type = FUNC_OLD;
+
+    /* F40: build the three interned _Complex type descriptors.
+       Each is a Sym in field space whose c/r carry the size and
+       alignment both oracles give the _Complex type (so type_size
+       and the struct machinery reproduce oracle layout for free),
+       with two fields of the element type chained on ->next:
+       real at offset 0, imaginary at offset = element size. */
+    {
+        static const int cx_elems[3] = { VT_FLOAT, VT_DOUBLE, VT_LDOUBLE };
+        int i;
+        for (i = 0; i < 3; i++) {
+            CType et, ct;
+            Sym *d, *fre, *fim;
+            int esize, ealign;
+            et.t = cx_elems[i];
+            et.ref = NULL;
+            esize = type_size(&et, &ealign);
+            ct.t = VT_STRUCT | VT_COMPLEX_TAG;
+            ct.ref = NULL;
+            d = sym_push(SYM_FIELD, &ct, ealign, 2 * esize);
+            fre = sym_push(TOK___real__ | SYM_FIELD, &et, 0, 0);
+            fim = sym_push(TOK___imag__ | SYM_FIELD, &et, 0, esize);
+            d->next = fre;
+            fre->next = fim;
+            fim->next = NULL;
+            ct.ref = d;
+            cx_types[i] = ct;
+        }
+    }
 #ifdef precedence_parser
     init_prec();
 #endif
@@ -3457,6 +3490,590 @@ static int compare_types(CType *type1, CType *type2, int unqualified)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* _Complex support (F40 representation/conversions, F41 arithmetic).
+   A complex value on the vstack is one of:
+   - a packed constant (VT_CONST, float/double element only): both
+     parts in CValue.tab, real first;
+   - an lvalue in memory (local slot, symbol, or deref): complex
+     values are never held in registers as a whole;
+   - a static slot (VT_SYM|VT_CONST, anonymous) in static contexts,
+     including all long double complex constants (32 bytes never fit
+     the packed form).
+   Everything structural (layout, arrays, struct members, brace
+   initializers, assignment of equals) is the VT_STRUCT machinery
+   working on the interned descriptors; what lives here is the
+   arithmetic surface the struct machinery cannot express. */
+
+static int combine_types(CType *dest, SValue *op1, SValue *op2, int op);
+
+static int cx_elem_bt(CType *t)
+{
+    return t->ref->next->type.t & VT_BTYPE;
+}
+
+static CType *cx_elem_type(CType *t)
+{
+    return &t->ref->next->type;
+}
+
+static CType *cx_type_of(int ebt)
+{
+    switch (ebt) {
+    case VT_FLOAT: return &cx_types[0];
+    case VT_DOUBLE: return &cx_types[1];
+    case VT_LDOUBLE: return &cx_types[2];
+    }
+    return NULL;
+}
+
+static int cx_esize(int ebt)
+{
+    return ebt == VT_FLOAT ? 4 : ebt == VT_DOUBLE ? 8 : 16;
+}
+
+/* vtop/sv is a packed complex constant (float/double element) */
+static int cx_is_tab_const(SValue *sv)
+{
+    return IS_COMPLEX(sv->type.t)
+        && (sv->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
+        && cx_elem_bt(&sv->type) != VT_LDOUBLE;
+}
+
+static long double cx_const_part(SValue *sv, int imag)
+{
+    if (cx_elem_bt(&sv->type) == VT_FLOAT) {
+        float f[2];
+        memcpy(f, sv->c.tab, sizeof f);
+        return f[imag];
+    } else {
+        double d[2];
+        memcpy(d, sv->c.tab, sizeof d);
+        return d[imag];
+    }
+}
+
+static void cx_pack_tab(CValue *cv, int ebt, long double re, long double im)
+{
+    memset(cv, 0, sizeof *cv);
+    if (ebt == VT_FLOAT) {
+        float f[2];
+        f[0] = (float)re, f[1] = (float)im;
+        memcpy(cv->tab, f, sizeof f);
+    } else {
+        double d[2];
+        d[0] = (double)re, d[1] = (double)im;
+        memcpy(cv->tab, d, sizeof d);
+    }
+}
+
+/* push a packed complex constant (float/double element) */
+static void cx_vpush_const(CType *cxt, long double re, long double im)
+{
+    vset(cxt, VT_CONST, 0);
+    cx_pack_tab(&vtop->c, cx_elem_bt(cxt), re, im);
+}
+
+/* read one part of an anonymous static complex slot (the offset
+   of such a reference lives in the ElfSym value, not in c) */
+static long double cx_static_part(SValue *sv, int imag)
+{
+    Section *sec = tcc_state->sections[elfsym(sv->sym)->st_shndx];
+    int ebt = cx_elem_bt(&sv->type);
+    const unsigned char *p = sec->data + elfsym(sv->sym)->st_value
+        + imag * cx_esize(ebt);
+    if (ebt == VT_FLOAT) {
+        float f;
+        memcpy(&f, p, sizeof f);
+        return f;
+    } else if (ebt == VT_DOUBLE) {
+        double d;
+        memcpy(&d, p, sizeof d);
+        return d;
+    } else {
+        long double v;
+        memcpy(&v, p, sizeof v);
+        return v;
+    }
+}
+
+/* a complex operand usable in a static context: a packed constant
+   or an anonymous static slot (literal / compound literal).  A
+   named variable is never a constant expression, however static
+   its storage -- both oracles reject it, and so does phcc. */
+static int cx_data_ok(SValue *sv)
+{
+    return cx_is_tab_const(sv)
+        || ((sv->r & VT_SYM) && sv->sym && sv->sym->v >= SYM_FIRST_ANOM);
+}
+
+/* part of a complex operand in a static context: packed constant
+   or static slot */
+static long double cx_data_part(SValue *sv, int imag)
+{
+    if (cx_is_tab_const(sv))
+        return cx_const_part(sv, imag);
+    return cx_static_part(sv, imag);
+}
+
+/* push an anonymous static (rodata) complex constant */
+static void cx_vpush_static(CType *cxt, long double re, long double im)
+{
+    int ebt = cx_elem_bt(cxt);
+    int align, size = type_size(cxt, &align);
+    unsigned long off = section_add(rodata_section, size, align);
+    unsigned char *p = rodata_section->data + off;
+    if (ebt == VT_FLOAT) {
+        float f[2];
+        f[0] = (float)re, f[1] = (float)im;
+        memcpy(p, f, sizeof f);
+    } else if (ebt == VT_DOUBLE) {
+        double d[2];
+        d[0] = (double)re, d[1] = (double)im;
+        memcpy(p, d, sizeof d);
+    } else {
+        long double v;
+        memset(p, 0, size);
+        v = re;
+        memcpy(p, &v, sizeof v);
+        v = im;
+        memcpy(p + 16, &v, sizeof v);
+    }
+    vpush_ref(cxt, rodata_section, off, size);
+    vtop->r |= VT_CONST | VT_LVAL;
+}
+
+/* allocate a local temp slot for a complex value; returns its offset */
+static int cx_temp(CType *cxt)
+{
+    int align, size = type_size(cxt, &align);
+    loc = (loc - size) & -align;
+    return loc;
+}
+
+/* vtop is a complex lvalue: transform it into the lvalue of its
+   real (imag = 0) or imaginary (imag = 1) part */
+static void cx_part(int imag)
+{
+    CType et = *cx_elem_type(&vtop->type);
+    int off = imag ? cx_esize(et.t & VT_BTYPE) : 0;
+    test_lvalue();
+    gaddrof();
+    vtop->type = char_pointer_type;
+    if (off) {
+        vpushi(off);
+        gen_op('+');
+    }
+    vtop->type = et;
+    vtop->r |= VT_LVAL;
+}
+
+/* push a scalar constant of an element type */
+static void cx_vpush_elem_const(CType *et, long double v)
+{
+    vset(et, VT_CONST, 0);
+    memset(&vtop->c, 0, sizeof(CValue));
+    switch (et->t & VT_BTYPE) {
+    case VT_FLOAT: vtop->c.f = (float)v; break;
+    case VT_DOUBLE: vtop->c.d = (double)v; break;
+    default: vtop->c.ld = v; break;
+    }
+}
+
+/* if sv is a packed constant, write it into a fresh temp slot and
+   return the slot value; otherwise return sv unchanged */
+static SValue cx_mat(SValue *sv)
+{
+    CType ct;
+    SValue r;
+    int off, p;
+    if (!cx_is_tab_const(sv))
+        return *sv;
+    ct = sv->type;
+    off = cx_temp(&ct);
+    for (p = 0; p < 2; p++) {
+        vset(&ct, VT_LOCAL | VT_LVAL, off);
+        cx_part(p);
+        cx_vpush_elem_const(cx_elem_type(&ct), cx_const_part(sv, p));
+        vstore();
+        vpop();
+    }
+    vset(&ct, VT_LOCAL | VT_LVAL, off);
+    r = *vtop;
+    vtop--;
+    return r;
+}
+
+/* one part of + or - computed in the element type (exact) */
+static long double cx_fop(int op, int ebt, long double x, long double y)
+{
+    switch (ebt) {
+    case VT_FLOAT: {
+        float a = (float)x, b = (float)y;
+        return op == '+' ? a + b : a - b;
+    }
+    case VT_DOUBLE: {
+        double a = (double)x, b = (double)y;
+        return op == '+' ? a + b : a - b;
+    }
+    default:
+        return op == '+' ? x + y : x - y;
+    }
+}
+
+/* part equality in the element type (NaN compares unequal, +0 == -0) */
+static int cx_feq(int ebt, long double x, long double y)
+{
+    switch (ebt) {
+    case VT_FLOAT: return (float)x == (float)y;
+    case VT_DOUBLE: return (double)x == (double)y;
+    default: return x == y;
+    }
+}
+
+/* conversions with a complex side; gen_cast() routes here */
+static void gen_castcx(CType *type)
+{
+    CType src = vtop->type;
+    int scx = IS_COMPLEX(src.t), dcx = IS_COMPLEX(type->t);
+    int dbt = type->t & VT_BTYPE;
+
+    if ((type->t & VT_BTYPE) == VT_VOID) {
+        vtop->type = *type;
+        return;
+    }
+    if (NOEVAL_WANTED) {
+        /* sizeof/typeof: relabel only, no value is produced */
+        vtop->type = *type;
+        return;
+    }
+    if (dcx && scx && cx_elem_bt(&src) == cx_elem_bt(type)) {
+        if (cx_is_tab_const(vtop)
+            && !(nocode_wanted & DATA_ONLY_WANTED)) {
+            /* a packed constant must materialize into memory
+               before generic machinery (struct stores, argument
+               marshalling, returns) can take its address */
+            SValue sv = *vtop, m;
+            vtop--;
+            m = cx_mat(&sv);
+            vpushv(&m);
+        }
+        vtop->type = *type;
+        return;
+    }
+    if (dcx) {
+        int ebt = cx_elem_bt(type);
+        CType et = *cx_elem_type(type);
+        if (!scx) {
+            int sbt = src.t & VT_BTYPE;
+            if (!is_integer_btype(sbt) && !is_float(sbt))
+                cast_error(&src, type);
+            if (nocode_wanted & DATA_ONLY_WANTED) {
+                if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+                    /* fold through the element type like gen_cast */
+                    long double re;
+                    gen_cast(&et);
+                    re = ebt == VT_FLOAT ? vtop->c.f
+                        : ebt == VT_DOUBLE ? vtop->c.d : vtop->c.ld;
+                    vtop--;
+                    if (ebt == VT_LDOUBLE)
+                        cx_vpush_static(type, re, 0.0L);
+                    else
+                        cx_vpush_const(type, re, 0.0L);
+                } else {
+                    vtop->type = *type;
+                }
+                return;
+            }
+            /* runtime: convert the scalar to the element type, then
+               store it as the real part over a +0 imaginary part */
+            gen_cast(&et);
+            {
+                SValue sv = *vtop;
+                int off;
+                vtop--;
+                off = cx_temp(type);
+                vset(type, VT_LOCAL | VT_LVAL, off);
+                cx_part(0);
+                vpushv(&sv);
+                vstore();
+                vpop();
+                vset(type, VT_LOCAL | VT_LVAL, off);
+                cx_part(1);
+                cx_vpush_elem_const(&et, 0.0L);
+                vstore();
+                vpop();
+                vset(type, VT_LOCAL | VT_LVAL, off);
+            }
+            return;
+        }
+        /* complex -> complex with a different element type */
+        if (nocode_wanted & DATA_ONLY_WANTED) {
+            long double re, im;
+            if (!cx_data_ok(vtop))
+                tcc_error("initializer element is not constant");
+            re = cx_data_part(vtop, 0);
+            im = cx_data_part(vtop, 1);
+            vtop--;
+            if (ebt == VT_LDOUBLE)
+                cx_vpush_static(type, re, im);
+            else
+                cx_vpush_const(type, re, im);
+            return;
+        }
+        if (cx_is_tab_const(vtop)) {
+            long double re = cx_const_part(vtop, 0);
+            long double im = cx_const_part(vtop, 1);
+            vtop--;
+            cx_vpush_const(type, re, im);
+            return;
+        }
+        {
+            SValue sv = *vtop;
+            int off, p;
+            vtop--;
+            sv = cx_mat(&sv);
+            off = cx_temp(type);
+            for (p = 0; p < 2; p++) {
+                vset(type, VT_LOCAL | VT_LVAL, off);
+                cx_part(p);
+                vpushv(&sv);
+                cx_part(p);
+                gen_cast(&et);
+                vstore();
+                vpop();
+            }
+            vset(type, VT_LOCAL | VT_LVAL, off);
+        }
+        return;
+    }
+    /* complex -> scalar */
+    if (!is_integer_btype(dbt) && !is_float(dbt))
+        cast_error(&src, type);
+    if (nocode_wanted & DATA_ONLY_WANTED) {
+        if (cx_data_ok(vtop)) {
+            long double re = cx_data_part(vtop, 0);
+            long double im = cx_data_part(vtop, 1);
+            CType et = *cx_elem_type(&src);
+            vtop--;
+            if (dbt == VT_BOOL) {
+                vpushi(re != 0.0L || im != 0.0L);
+                vtop->type = *type;
+            } else {
+                cx_vpush_elem_const(&et, re);
+                gen_cast(type);
+            }
+        } else {
+            vtop->type = *type;
+        }
+        return;
+    }
+    if (cx_is_tab_const(vtop)) {
+        long double re = cx_const_part(vtop, 0);
+        long double im = cx_const_part(vtop, 1);
+        CType et = *cx_elem_type(&src);
+        vtop--;
+        if (dbt == VT_BOOL) {
+            vpushi(re != 0.0L || im != 0.0L);
+            vtop->type = *type;
+        } else {
+            cx_vpush_elem_const(&et, re);
+            gen_cast(type);
+        }
+        return;
+    }
+    if (dbt == VT_BOOL) {
+        /* (_Bool)z is (re != 0) | (im != 0) */
+        CType et = *cx_elem_type(&src);
+        SValue sv = *vtop;
+        vtop--;
+        sv = cx_mat(&sv);
+        vpushv(&sv);
+        cx_part(0);
+        cx_vpush_elem_const(&et, 0.0L);
+        gen_op(TOK_NE);
+        gv(RC_INT);
+        vpushv(&sv);
+        cx_part(1);
+        cx_vpush_elem_const(&et, 0.0L);
+        gen_op(TOK_NE);
+        gv(RC_INT);
+        gen_op('|');
+        vtop->type = *type;
+        return;
+    }
+    /* arithmetic destination: convert the real part, the imaginary
+       part is discarded (C11 6.3.1.7) */
+    cx_part(0);
+    gen_cast(type);
+}
+
+/* unary - (both parts) and ~ (conjugate) on a complex vtop */
+static void cx_negate(int imag_only)
+{
+    CType ct = vtop->type;
+    int ebt = cx_elem_bt(&ct);
+    if (cx_is_tab_const(vtop)) {
+        long double re = cx_const_part(vtop, 0);
+        long double im = cx_const_part(vtop, 1);
+        if (imag_only)
+            im = -im;
+        else
+            re = -re, im = -im;
+        cx_pack_tab(&vtop->c, ebt, re, im);
+        return;
+    }
+    if (nocode_wanted & DATA_ONLY_WANTED) {
+        long double re, im;
+        if (!cx_data_ok(vtop))
+            tcc_error("initializer element is not constant");
+        re = cx_data_part(vtop, 0);
+        im = cx_data_part(vtop, 1);
+        if (imag_only)
+            im = -im;
+        else
+            re = -re, im = -im;
+        vtop--;
+        cx_vpush_static(&ct, re, im);
+        return;
+    }
+    {
+        SValue sv = *vtop, m;
+        int off, p;
+        vtop--;
+        m = cx_mat(&sv);
+        off = cx_temp(&ct);
+        for (p = 0; p < 2; p++) {
+            vset(&ct, VT_LOCAL | VT_LVAL, off);
+            cx_part(p);
+            vpushv(&m);
+            cx_part(p);
+            if (p == 1 || !imag_only)
+                gen_opif(TOK_NEG);
+            vstore();
+            vpop();
+        }
+        vset(&ct, VT_LOCAL | VT_LVAL, off);
+    }
+}
+
+/* * and / on complex operands (F41) */
+static void cx_muldiv(int op, SValue *pa, SValue *pb, CType *cxt)
+{
+    (void)op; (void)pa; (void)pb; (void)cxt;
+    tcc_error("_Complex multiplication/division is not yet supported (F41)");
+}
+
+/* binary operations with at least one complex operand; gen_op()
+   routes here.  vtop[-1] and vtop[0] are the operands. */
+static void gen_opcx(int op)
+{
+    CType *t1 = &vtop[-1].type, *t2 = &vtop[0].type;
+    CType et1, et2, comb, cxt;
+    SValue s1, s2, a, b;
+    int ebt;
+
+    if (op != '+' && op != '-' && op != '*' && op != '/'
+        && op != TOK_EQ && op != TOK_NE)
+        tcc_error("invalid operand types for binary operation");
+    et1 = IS_COMPLEX(t1->t) ? *cx_elem_type(t1) : *t1;
+    et2 = IS_COMPLEX(t2->t) ? *cx_elem_type(t2) : *t2;
+    memset(&s1, 0, sizeof s1);
+    s1.type = et1;
+    memset(&s2, 0, sizeof s2);
+    s2.type = et2;
+    if (!combine_types(&comb, &s1, &s2, 0)
+        || !cx_type_of(comb.t & VT_BTYPE))
+        tcc_error("invalid operand types for binary operation");
+    ebt = comb.t & VT_BTYPE;
+    cxt = *cx_type_of(ebt);
+    if (NOEVAL_WANTED) {
+        vtop--;
+        vtop->type = (op == TOK_EQ || op == TOK_NE) ? int_type : cxt;
+        return;
+    }
+    /* convert both operands to the common complex type */
+    gen_cast(&cxt);
+    vswap();
+    gen_cast(&cxt);
+    vswap();
+    a = vtop[-1];
+    b = vtop[0];
+    vtop -= 2;
+    if (nocode_wanted & DATA_ONLY_WANTED) {
+        /* static context: both operands must be constants */
+        if (!cx_data_ok(&a) || !cx_data_ok(&b))
+            tcc_error("initializer element is not constant");
+        if (op == '*' || op == '/')
+            tcc_error("_Complex multiplication/division in a static initializer is not yet supported (F41)");
+        if (op == TOK_EQ || op == TOK_NE) {
+            int eq = cx_feq(ebt, cx_data_part(&a, 0), cx_data_part(&b, 0))
+                && cx_feq(ebt, cx_data_part(&a, 1), cx_data_part(&b, 1));
+            vpushi(op == TOK_EQ ? eq : !eq);
+            return;
+        }
+        {
+            long double re = cx_fop(op, ebt, cx_data_part(&a, 0), cx_data_part(&b, 0));
+            long double im = cx_fop(op, ebt, cx_data_part(&a, 1), cx_data_part(&b, 1));
+            if (ebt == VT_LDOUBLE)
+                cx_vpush_static(&cxt, re, im);
+            else
+                cx_vpush_const(&cxt, re, im);
+        }
+        return;
+    }
+    if (op == '*' || op == '/') {
+        cx_muldiv(op, &a, &b, &cxt);
+        return;
+    }
+    if (cx_is_tab_const(&a) && cx_is_tab_const(&b)) {
+        if (op == TOK_EQ || op == TOK_NE) {
+            int eq = cx_feq(ebt, cx_const_part(&a, 0), cx_const_part(&b, 0))
+                && cx_feq(ebt, cx_const_part(&a, 1), cx_const_part(&b, 1));
+            vpushi(op == TOK_EQ ? eq : !eq);
+            return;
+        }
+        cx_vpush_const(&cxt,
+            cx_fop(op, ebt, cx_const_part(&a, 0), cx_const_part(&b, 0)),
+            cx_fop(op, ebt, cx_const_part(&a, 1), cx_const_part(&b, 1)));
+        return;
+    }
+    a = cx_mat(&a);
+    b = cx_mat(&b);
+    if (op == TOK_EQ || op == TOK_NE) {
+        int cop = (op == TOK_EQ) ? TOK_EQ : TOK_NE;
+        vpushv(&a);
+        cx_part(0);
+        vpushv(&b);
+        cx_part(0);
+        gen_op(cop);
+        gv(RC_INT);
+        vpushv(&a);
+        cx_part(1);
+        vpushv(&b);
+        cx_part(1);
+        gen_op(cop);
+        gv(RC_INT);
+        gen_op(op == TOK_EQ ? '&' : '|');
+        return;
+    }
+    {
+        int off = cx_temp(&cxt), p;
+        for (p = 0; p < 2; p++) {
+            vset(&cxt, VT_LOCAL | VT_LVAL, off);
+            cx_part(p);
+            vpushv(&a);
+            cx_part(p);
+            vpushv(&b);
+            cx_part(p);
+            gen_op(op);
+            vstore();
+            vpop();
+        }
+        vset(&cxt, VT_LOCAL | VT_LVAL, off);
+    }
+}
+
 #define CMP_OP 'C'
 #define SHIFT_OP 'S'
 
@@ -3553,6 +4170,28 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
         }
         if (op == CMP_OP)
           type.t = VT_SIZE_T;
+    } else if (IS_COMPLEX(t1) || IS_COMPLEX(t2)) {
+        /* F40: the common complex type of the operands' element
+           types under the scalar ladder; only the conditional
+           operator combines complex operands here (gen_op intercepts
+           the arithmetic and comparison operators itself) */
+        if (op != '?')
+            ret = 0;
+        else {
+            CType e1, e2;
+            SValue s1, s2;
+            e1 = IS_COMPLEX(t1) ? *cx_elem_type(type1) : *type1;
+            e2 = IS_COMPLEX(t2) ? *cx_elem_type(type2) : *type2;
+            memset(&s1, 0, sizeof s1);
+            s1.type = e1;
+            memset(&s2, 0, sizeof s2);
+            s2.type = e2;
+            if (!combine_types(&type, &s1, &s2, op)
+                || !cx_type_of(type.t & VT_BTYPE))
+                ret = 0;
+            else
+                type = *cx_type_of(type.t & VT_BTYPE);
+        }
     } else if (bt1 == VT_STRUCT || bt2 == VT_STRUCT) {
         if (op != '?' || !compare_types(type1, type2, 1))
           ret = 0;
@@ -3599,6 +4238,13 @@ ST_FUNC void gen_op(int op)
     int t1, t2, bt1, bt2, t;
     CType type1, combtype;
     int op_class = op;
+
+    /* F40: operations with a complex operand are computed by the
+       complex machinery, never by the struct/scalar paths below */
+    if (IS_COMPLEX(vtop[-1].type.t) || IS_COMPLEX(vtop[0].type.t)) {
+        gen_opcx(op);
+        return;
+    }
 
     if (op == TOK_SHR || op == TOK_SAR || op == TOK_SHL)
         op_class = SHIFT_OP;
@@ -3811,6 +4457,16 @@ static void gen_cast(CType *type)
 {
     int sbt, dbt, sf, df, c;
     int dbt_bt, sbt_bt, ds, ss, bits, trunc;
+
+    /* F40: conversions with a complex side are computed by the
+       complex machinery; the struct path below would silently
+       relabel a complex value as another element type */
+    if (IS_COMPLEX(vtop->type.t) || IS_COMPLEX(type->t)) {
+        gen_castcx(type);
+        vtop->type = *type;
+        vtop->type.t &= ~(VT_QUAL | VT_ARRAY | VT_TLS);
+        return;
+    }
 
     /* special delayed cast for char/short */
     if (vtop->r & VT_MUSTCAST)
@@ -4199,6 +4855,16 @@ static void verify_assign_cast(CType *dt)
         /* F38: both oracles make this an error, and the accepted
            program wrote to read-only storage and crashed. */
         tcc_error("assignment of read-only location");
+    if (IS_COMPLEX(dt->t) || IS_COMPLEX(st->t)) {
+        /* F40: complex <-> arithmetic assignment is valid in both
+           directions (C11 6.5.16.1); gen_cast converts */
+        int sok = IS_COMPLEX(st->t) || is_integer_btype(sbt) || is_float(sbt);
+        int dok = IS_COMPLEX(dt->t) || is_integer_btype(dbt) || is_float(dbt);
+        if (sok && dok)
+            return;
+        cast_error(st, dt);
+        return;
+    }
     switch(dbt) {
     case VT_VOID:
         if (sbt != dbt)
@@ -4295,6 +4961,25 @@ ST_FUNC void vstore(void)
     sbt = vtop->type.t & VT_BTYPE;
     dbt = ft & VT_BTYPE;
     verify_assign_cast(&vtop[-1].type);
+
+    /* F40: convert a complex source to the destination type (or a
+       scalar source to a complex destination) before the struct and
+       scalar store paths below classify the operands */
+    if (IS_COMPLEX(vtop->type.t) || IS_COMPLEX(ft)) {
+        if (cx_is_tab_const(vtop)
+            || !(IS_COMPLEX(vtop->type.t) && IS_COMPLEX(ft)
+                 && cx_elem_bt(&vtop->type) == cx_elem_bt(&vtop[-1].type)))
+            gen_cast(&vtop[-1].type);
+        if (cx_is_tab_const(vtop)) {
+            /* the struct store path below needs the source in
+               memory, not packed in a CValue */
+            SValue m = cx_mat(vtop);
+            *vtop = m;
+        }
+        ft = vtop[-1].type.t;
+        sbt = vtop->type.t & VT_BTYPE;
+        dbt = ft & VT_BTYPE;
+    }
 
     if (sbt == VT_STRUCT) {
         /* if structure, only generate pointer */
@@ -4462,6 +5147,9 @@ ST_FUNC void vstore(void)
 /* post defines POST/PRE add. c is the token ++ or -- */
 ST_FUNC void inc(int post, int c)
 {
+    if (IS_COMPLEX(vtop->type.t))
+        /* F40: ++/-- need a real or pointer operand (C11 6.5.2.4) */
+        tcc_error("invalid operand to increment/decrement: _Complex type (F40)");
     test_lvalue();
     vdup(); /* save lvalue */
     if (post) {
@@ -5446,7 +6134,7 @@ static void parse_btype_qualify(CType *type, int qualifiers)
  */
 static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
 {
-    int t, u, bt, st, type_found, typespec_found, g, n;
+    int t, u, bt, st, type_found, typespec_found, g, n, cx_spec;
     Sym *s;
     CType type1;
 
@@ -5454,6 +6142,7 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
     typedef_aligned = 0;
     auto_type_seen = 0;
     f128_typedef_name = 0;
+    cx_spec = 0;
     type_found = 0;
     typespec_found = 0;
     t = VT_INT;
@@ -5532,8 +6221,21 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         case TOK_BOOL:
             u = VT_BOOL;
             goto basic_type;
+        case TOK_IMAGINARY:
+            /* F40: both oracles reject _Imaginary types too */
+            tcc_error("_Imaginary types are not supported (F40)");
         case TOK_COMPLEX:
-            tcc_error("_Complex is not yet supported");
+        case TOK___complex__:
+            /* F40: _Complex <floating type>; the element type is
+               resolved at the_end from the accumulated specifiers.
+               typespec_found is deliberately not set here so a
+               following typedef name can still serve as the
+               element type (_Complex myfloat_t). */
+            if (cx_spec)
+                tcc_error("duplicate '_Complex' specifier");
+            cx_spec = 1;
+            next();
+            break;
         case TOK_FLOAT128:
         case TOK_FLOAT128B:
 #ifdef TCC_TARGET_ARM64
@@ -5743,6 +6445,29 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         type_found = 1;
     }
 the_end:
+    if (cx_spec) {
+        /* F40: resolve the _Complex element type from the
+           accumulated specifiers; a bare _Complex (no other
+           specifier consumed) is _Complex double */
+        int ebt = t & (VT_BTYPE | VT_LONG);
+        CType *cxt;
+        if (bt == -1 && st == -1 && ebt == VT_INT)
+            ebt = VT_DOUBLE;
+        cxt = (ebt == VT_FLOAT || ebt == VT_DOUBLE || ebt == VT_LDOUBLE)
+            ? cx_type_of(ebt) : NULL;
+        if (!cxt) {
+            if (ebt == VT_F128)
+                tcc_error("_Complex _Float128 is not supported (F40)");
+            tcc_error("invalid type specifier for '_Complex'");
+        }
+#if !defined TCC_TARGET_X86_64 || defined TCC_TARGET_PE
+        tcc_error("_Complex is only supported on Linux x86_64 (F40)");
+#endif
+        type->t = cxt->t | (t & (VT_QUAL | VT_STORAGE));
+        type->ref = cxt->ref;
+        check_restrict_type(type);
+        return type_found;
+    }
     if (tcc_state->char_is_unsigned) {
         if ((t & (VT_DEFSIGN|VT_BTYPE)) == VT_BYTE)
             t |= VT_UNSIGNED;
@@ -6159,6 +6884,12 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
         type.t &= ~VT_CONSTANT; /* need to do that to avoid false warning */
         gen_assign_cast(&type);
     }
+    /* F40: a packed complex constant argument must materialize
+       before the backend marshals it from memory */
+    if (cx_is_tab_const(vtop)) {
+        SValue m = cx_mat(vtop);
+        *vtop = m;
+    }
 }
 
 /* parse an expression and return its type without any side effect. */
@@ -6523,6 +7254,25 @@ ST_FUNC void unary(void)
     case TOK_CF128:
         t = VT_F128;
 	goto push_tokc;
+    case TOK_CIFLOAT:
+    case TOK_CIDOUBLE:
+    case TOK_CILDOUBLE:
+        /* F40: imaginary literal: a complex constant (0, value) */
+        {
+            CType *cxt = cx_type_of(tok == TOK_CIFLOAT ? VT_FLOAT
+                : tok == TOK_CIDOUBLE ? VT_DOUBLE : VT_LDOUBLE);
+            long double im = tok == TOK_CIFLOAT ? tokc.f
+                : tok == TOK_CIDOUBLE ? tokc.d : tokc.ld;
+            next();
+            if (nocode_wanted & DATA_ONLY_WANTED)
+                cx_vpush_static(cxt, 0.0L, im);
+            else if (cxt == &cx_types[2])
+                /* long double constants never ride the packed form */
+                cx_vpush_static(cxt, 0.0L, im);
+            else
+                cx_vpush_const(cxt, 0.0L, im);
+        }
+        break;
     case TOK_CLONG:
         t = (LONG_SIZE == 8 ? VT_LLONG : VT_INT) | VT_LONG;
 	goto push_tokc;
@@ -6660,12 +7410,59 @@ ST_FUNC void unary(void)
     case '~':
         next();
         unary();
+        if (IS_COMPLEX(vtop->type.t)) {
+            /* F40: both oracles take ~z as the conjugate (GNU) */
+            cx_negate(1);
+            break;
+        }
         vpushi(-1);
         gen_op('^');
+        break;
+    case TOK___real__:
+    case TOK___imag__:
+        /* F40: __real__/__imag__ part access (GNU).  On a complex
+           operand this is the part lvalue; on a real operand
+           __real__ is the identity and __imag__ a constant zero
+           (an rvalue: both oracles reject assigning to it). */
+        t = tok;
+        next();
+        unary();
+        if (IS_COMPLEX(vtop->type.t)) {
+            if (cx_is_tab_const(vtop)) {
+                long double pv = cx_const_part(vtop, t == TOK___imag__);
+                CType et = *cx_elem_type(&vtop->type);
+                vtop--;
+                cx_vpush_elem_const(&et, pv);
+            } else if ((nocode_wanted & DATA_ONLY_WANTED)
+                && cx_data_ok(vtop)) {
+                long double pv = cx_data_part(vtop, t == TOK___imag__);
+                CType et = *cx_elem_type(&vtop->type);
+                vtop--;
+                cx_vpush_elem_const(&et, pv);
+            } else {
+                cx_part(t == TOK___imag__);
+            }
+        } else if (is_float(vtop->type.t)
+            || is_integer_btype(vtop->type.t & VT_BTYPE)) {
+            if (t == TOK___imag__) {
+                /* rvalue zero of the operand's type */
+                CType et = vtop->type;
+                et.t &= ~(VT_QUAL | VT_ARRAY | VT_TLS);
+                vtop--;
+                cx_vpush_elem_const(&et, 0.0L);
+            }
+            /* __real__ of a real operand is the identity */
+        } else {
+            tcc_error("__real__/__imag__ applied to a non-arithmetic type");
+        }
         break;
     case '+':
         next();
         unary();
+        if (IS_COMPLEX(vtop->type.t))
+            break; /* F40: unary plus on complex is the identity,
+                      like both oracles (not an add of +0, which
+                      would lose the sign of a -0 part) */
         if ((vtop->type.t & VT_BTYPE) == VT_PTR)
             tcc_error("pointer not accepted for unary plus");
         /* In order to force cast, we add zero, except for floating point
@@ -6926,7 +7723,11 @@ ST_FUNC void unary(void)
     case '-':
         next();
         unary();
-	if (is_float(vtop->type.t)) {
+        if (IS_COMPLEX(vtop->type.t)) {
+            /* F40: negate both parts (a sign flip, exact for -0
+               and NaN payloads, unlike computing 0 - z) */
+            cx_negate(0);
+        } else if (is_float(vtop->type.t)) {
             gen_opif(TOK_NEG);
 	} else {
             vpushi(0);
@@ -7144,6 +7945,10 @@ special_math_val:
             }
             /* get return type */
             s = vtop->type.ref;
+            if (IS_COMPLEX(s->type.t) && cx_elem_bt(&s->type) == VT_LDOUBLE)
+                /* F40: the psABI returns these in %st(0)/%st(1),
+                   not through the sret pointer used below (F41) */
+                tcc_error("calling a function returning _Complex long double is not yet supported (F41)");
             next();
             sa = s->next; /* first parameter */
             nb_args = regsize = 0;
@@ -7728,6 +8533,10 @@ ST_FUNC int expr_const(void)
 #ifndef TCC_TARGET_ARM64
 static void gfunc_return(CType *func_type)
 {
+    if (IS_COMPLEX(func_type->t) && cx_elem_bt(func_type) == VT_LDOUBLE)
+        /* F40: the psABI returns these in %st(0)/%st(1), not
+           through the sret pointer used below (F41) */
+        tcc_error("returning _Complex long double is not yet supported (F41)");
     if ((func_type->t & VT_BTYPE) == VT_STRUCT) {
         CType type, ret_type;
         int ret_align, ret_nregs, regsize;
@@ -9060,6 +9869,15 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
         ptr = sec->data + c;
         val = vtop->c.i;
 
+        if (IS_COMPLEX(type->t)
+            && (vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+            /* F40: packed complex constant (float/double element):
+               the parts already lie in CValue.tab in memory order */
+            memcpy(ptr, vtop->c.tab, size);
+            vtop--;
+            return;
+        }
+
 	if ((vtop->r & (VT_SYM|VT_CONST)) == (VT_SYM|VT_CONST)
             && vtop->sym->v >= SYM_FIRST_ANOM
             && ((vtop->r & VT_LVAL) /* compound literal */
@@ -9239,6 +10057,10 @@ static int str_cat_narrow_as_elems(CString *out, int size1)
    allocation. 'flags & DIF_FIRST' is true if array '{' must be read (multi
    dimension implicit array init handling). 'flags & DIF_SIZE_ONLY' is true if
    size only evaluation is wanted (only for arrays). */
+/* F40: set while decl_initializer replays a saved _Complex brace
+   list, so the speculative-parse hook does not re-enter */
+static int cx_init_replay;
+
 static void decl_initializer(init_params *p, CType *type, unsigned long c, int flags)
 {
     int len, n, no_oblock, i;
@@ -9431,8 +10253,78 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
         /* Use i_c_parameter_t, to strip toplevel qualifiers.
            The source type might have VT_CONSTANT set, which is
            of course assignable to non-const elements.  */
-            && is_compatible_unqualified_types(type, &vtop->type)) {
+            && (is_compatible_unqualified_types(type, &vtop->type)
+                /* F40: a complex value is initialized from a scalar
+                   or complex expression as a whole (converted by
+                   init_putv's gen_assign_cast), not as a brace list
+                   of its parts */
+                || IS_COMPLEX(type->t))) {
         goto one_elem;
+
+    } else if (IS_COMPLEX(type->t) && tok == '{'
+        && !(flags & (DIF_SIZE_ONLY | DIF_DISCARD | DIF_HAVE_ELEM))
+        && !cx_init_replay) {
+        /* F40: a brace list whose first element is a complex
+           expression initializes the whole complex value (both
+           oracles treat it as a scalar initializer); the field-wise
+           list below would silently keep only its real part.  The
+           token string is saved, the first element is parsed once
+           speculatively (no code) to learn its type, and then the
+           list is consumed for real on the matching path. */
+        TokenString *ts = NULL;
+        int was_cx = 0, single = 0, desig = 0;
+        skip_or_save_block(&ts);
+        unget_tok(0); /* the delimiter after '}' goes back */
+        begin_macro(ts, 1);
+        next(); /* '{' */
+        next(); /* first content token */
+        if (tok == '.' || tok == '[')
+            desig = 1;
+        else {
+            ++nocode_wanted;
+            parse_init_elem(!p->sec ? EXPR_ANY : EXPR_CONST);
+            --nocode_wanted;
+            was_cx = IS_COMPLEX(vtop->type.t);
+            single = (tok == '}');
+            vpop();
+        }
+        if (was_cx) {
+            /* consume the list for real as a whole-value init */
+            macro_ptr = ts->str;
+            next(); /* '{' */
+            skip('{');
+            parse_init_elem(!p->sec ? EXPR_ANY : EXPR_CONST);
+            if (!single) {
+                /* excess elements after a whole complex value:
+                   warn and discard, as for a scalar (F15) */
+                tcc_warning("excess elements in scalar initializer");
+                while (tok == ',') {
+                    next();
+                    if (tok == '}')
+                        break;
+                    ++nocode_wanted;
+                    parse_init_elem(EXPR_ANY);
+                    --nocode_wanted;
+                    vpop();
+                }
+            }
+            skip('}');
+            init_putv(p, type, c);
+            end_macro();
+            next();
+            return;
+        }
+        (void)desig;
+        /* scalar first element (or a designator): the ordinary
+           field-wise path, replayed on the saved tokens */
+        macro_ptr = ts->str;
+        next(); /* '{' */
+        cx_init_replay = 1;
+        decl_initializer(p, type, c, flags);
+        cx_init_replay = 0;
+        end_macro();
+        next();
+        return;
 
     } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
         no_oblock = 1;
