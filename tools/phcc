@@ -9,6 +9,10 @@
     phcc analyze --phext X.phext --statements [--out REPORT]
     phcc analyze --phext X.phext --build-stmt --out Y.phext [--report R]
     phcc analyze --phext Y.phext --verify-stmt [--out REPORT]
+    phcc prune  --phext X.phext --out Y.phext --harvest H.json
+                [--report R.json] [--root SYM ...] [--keep-prefix P ...]
+                [--runtime-prefix P] [--keep-prefixes LIST]
+                [--keep-files LIST]
     phcc build-region list --phext X.phext
     phcc build-region wipe --phext X.phext --out Y.phext [--force]
     phcc seal   --phext X.phext [--out X.phext.xz] [--force]
@@ -28,15 +32,23 @@ statement tier (--statements / --build-stmt / --verify-stmt)
 re-expresses the corpus at statement grain: each distinct
 statement held once in a statement library, member scrolls as
 reference sequences that unpack expands.
+prune:  member-graph pruning — the -O2 ladder's rung A. From a
+build harvest (nm over the built tree's objects and archives),
+replay the link's own undefined-symbol closure for the demanded
+root set, walk reachability over the Volume 3 member graph, and
+emit a pruned phext: unreachable members dropped, uncompiled
+files dropped whole, the dropped list recorded in a prune
+manifest scroll. Tools-side only; the compiler is untouched.
 build-region: list or wipe the Library-10000 build-artifact region
 (binary build outputs, base64 in-phext; wiped and reset frequently).
 seal/unseal: the working phext is plain text; the xz seal is the
 persistence/publish form only (see tools/README.md).
 
 Thin dispatcher over phcc_migrate.py / phcc_analyze.py /
-phcc_builds.py in the same directory; see METHODS.md (repo:
-tools/METHODS.md) for the migration invariants, what is not
-preserved and why, and the failure behaviour.
+phcc_prune.py / phcc_builds.py in the same directory; see
+METHODS.md (repo: tools/METHODS.md) for the migration
+invariants, what is not preserved and why, and the failure
+behaviour.
 """
 import os, sys
 
@@ -60,11 +72,14 @@ def main(argv):
     if sub == "analyze":
         import phcc_analyze
         return phcc_analyze.cli(rest)
+    if sub == "prune":
+        import phcc_prune
+        return phcc_prune.cli(rest)
     if sub in ("build-region", "seal", "unseal"):
         import phcc_builds
         return phcc_builds.cli([sub] + rest)
     print(f"phcc: unknown command '{sub}' (expected: unpack, pack, "
-          f"analyze, build-region, seal, unseal)", file=sys.stderr)
+          f"analyze, prune, build-region, seal, unseal)", file=sys.stderr)
     print(USAGE, file=sys.stderr)
     return 2
 

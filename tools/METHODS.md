@@ -268,6 +268,115 @@ not a shipped codegen change: at statement grain the
 only where codegen is unoptimised, which is precisely phcc's
 own regime.
 
+## prune — member-graph pruning (the -O2 ladder, rung A)
+
+`phcc prune --phext X.phext --out Y.phext --harvest H.json` emits a
+pruned phext for one build configuration. Tools-side only: no
+compiler source is touched and no PATCHES entry is created; the
+prune is a statement about a *configuration* (a harvest of one
+build), never about the project in the abstract. The harvest
+(`nm -A` over a built tree's objects and archives, objects mapped
+to sources) is the compiler's own knowledge of what the link
+needed, and it is the ground truth throughout:
+
+- **Graph.** Nodes are Volume 3 members of *graph files* —
+  compiled sources, archive-constituent sources (including
+  archive members with no loose object: their stems resolve
+  against the carried set and their undefineds join the model),
+  and the `#include` closure over them — quoted includes, plus
+  angle includes the configured build graph vouches for (the
+  target resolves to exactly one carried file that is a
+  build prerequisite: gnulib's `<libc-config.h>` is real;
+  textually present but `#ifdef`-gated includes like
+  `<windows.h>` in a Linux build are not followed). Edges follow raw
+  identifier tokens in payloads (comments, string literals, asm
+  operands and macro bodies included — the safe direction), with
+  two fallbacks for identifiers no member is named by: a provider
+  index over type members' payloads (enum enumerators —
+  `ERROR_WARN`, the `TCC_OPTION_*` table), and a suffix index over
+  member names for paste families (`ELFW(R_INFO)` → `ELF64_R_INFO`).
+- **Roots.** Definers of `main`; definers of exactly the symbols
+  the replayed link closure demands (seed = every non-archive
+  object's undefineds; archive members pulled as the linker pulls
+  them; a pulled object's *undemanded* globals are not rooted —
+  they are the pruning frontier); members carrying
+  `__attribute__((constructor|destructor|used))`; every member of
+  a token-table file (`*-tok.h`, `tcctok.h` — positional
+  enumerator factories whose names are manufactured by pasting);
+  every member carrying an `#if`-family/`#endif` line (conditional
+  halves may live in different members); members named in ambient
+  text (keep-whole bytes and gap payloads); the paste net
+  (name-as-substring survivors); `--root` extras.
+- **File classes.** Keep-whole wins over graph membership
+  (a compiled test program is a test input, not pruning surface);
+  the runtime-prefix files the build did not compile are the
+  compiler's runtime-source surface and stay; uncompiled source
+  files drop whole — unless the build references them, in two
+  tiers: reachable as a prerequisite from the default goal in
+  the configured build's own dependency graph (the harvest's
+  `make -qp` database — generation templates live here:
+  coreutils' `lib/arpa_inet.in.h`, from which `arpa/inet.h` is
+  generated; unreachable rules, emitted for unconfigured
+  objects, do not rescue), or named by basename in a kept
+  build-instruction file (the Makefile names `conftest.c`).
+  A path-qualified text scan is deliberately not a tier:
+  template files name every file that could build under any
+  configuration. The keep sets are
+  per-project parameters (`--keep-prefixes`, `--keep-files`,
+  `--runtime-prefix`); coreutils, whose recipe builds neither its
+  tests nor a runtime surface, passes them empty and prunes at
+  whole-file grain.
+- **Emission.** Volume 1 verbatim; kept files byte-verbatim;
+  graph files with drops re-tiled at member grain (spans and
+  segment headers rewritten, payload hashes unchanged); the
+  placement manifest rewritten for the pruned set; a **prune
+  manifest** at Meta 1.1.1/1.2.10/2.1.1 records the base phext's
+  SHA-256, the configuration, counts, and the full auditable
+  dropped list (files, members with spans and payload hashes,
+  build-referenced keeps, archive pull results, closure-forced
+  keeps). Derived phases (Design/Tests/Proofs collections, gate
+  verdicts) are *not* carried: their hash bindings name the
+  unpruned source set. The emitted phext must pass the loader's
+  full verification before it replaces the output path.
+- **Validation.** After reachability, every undefined symbol of
+  every harvested source must still have a kept definer; a miss
+  force-keeps the definer, is recorded, and reachability resumes.
+  The receipts loop — prune → unpack → build → test — is the
+  outer gate: each failure class it exposed (enumerators,
+  build-referenced files, positional token tables, paste
+  suffixes, conditional halves) is now a root rule above and a
+  case in `tools/test_prune.py`.
+
+Receipts (2026-11-08, base = published tip 36a7932f, configuration
+= default host build + test suite, harvest from a gcc build):
+phcc's own carry — 612 files → 516 kept / 96 dropped whole;
+50,683 member rows → 2,031 dropped (4.0%); closure-forced keeps 0.
+Source volumes 22,243,000 → 10,258,757 bytes (Vol 2
+5,688,686 → 4,022,493; Vol 3 16,554,314 → 6,236,264).
+The pruned tree builds clean and passes `make test` in full; the
+pruned-built compiler rebuilds the pruned tree (stage 2) and the
+stage-2 compiler's output on the differential workload is
+identical to the unpruned compiler's (whose emitted workload
+binary is in fact byte-identical to the pruned compiler's).
+Conformance corpus under both compilers: 330/333 with the
+identical diverge set [a_pp_018, b_gnu_015, b_gnu_016], 0/333
+per-probe differences. Source volumes: the honest deltas are in
+the prune report; the total phext delta additionally reflects the
+omitted derived phases and must not be quoted as the pruning win.
+
+Second subject (phccbox's bundle unit, coreutils 9.12, carried
+whole-file since it has no Volume 3 segmentation): 3,848 files
+carried → 3,495 kept / 353 dropped whole (254 gnulib lib, 39 gl,
+46 gnulib-tests, 14 src — uncompiled modules and unconfigured
+SIMD variants); source bytes 53,503,476 → 51,781,301. The pruned
+carry builds with the same recipe, and in a same-directory A/B
+the single-binary `coreutils`, `libstdbuf.so`, and the localized
+phccbox bundle object are byte-identical to the unpruned carry's;
+a 17-applet smoke run is identical. (The box binary is
+build-path-sensitive, so the A/B shares one build directory.
+47 tree files — the info manual and .gmo catalogs — contain phext
+delimiter bytes and cannot ride a text carry at this tip.)
+
 ## Round-trip invariants (proven on the canonical corpus)
 
 - **tree → phext → tree: identity.** All 558 files byte-identical
