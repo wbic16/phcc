@@ -741,6 +741,9 @@ typedef struct ASMOperand {
 /* extra symbol attributes (not in symbol table) */
 struct sym_attr {
     unsigned got_offset;
+    /* base offset of the GOT pair (DTPMOD64/DTPOFF64) a GD or LD
+       reference to this symbol uses in a DLL (F30); 0 = no pair */
+    unsigned tls_pair_offset;
     unsigned plt_offset;
     int plt_sym;
     int dyn_index;
@@ -982,6 +985,13 @@ struct TCCState {
     #define qrel s1->qrel
 
     addr_t tls_start, tls_end;
+
+#ifdef TCC_TARGET_X86_64
+    /* set by build_got_entries when some reference to __tls_get_addr
+       is a direct call rather than the call half of a GD/LD sequence
+       (F30); relocate_syms consults it for static executables */
+    unsigned char tls_get_addr_direct;
+#endif
 
 #ifdef TCC_TARGET_RISCV64
     struct pcrel_hi { addr_t addr, val; } **pcrel_hi_entries;

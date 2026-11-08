@@ -357,24 +357,76 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
                     0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
                     /* lea -4(%rax),%rax */
                     0x48, 0x8d, 0x80, 0x00, 0x00, 0x00, 0x00 };
+                static const unsigned char replace_ie[] = {
+                    /* mov %fs:0,%rax */
+                    0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+                    /* add 0(%rip),%rax */
+                    0x48, 0x03, 0x05, 0x00, 0x00, 0x00, 0x00 };
+                ElfW(Sym) *sym;
 
-                if (memcmp (ptr-4, expect, sizeof(expect)) == 0) {
-                    ElfW(Sym) *sym;
-                    Section *sec;
+                sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+                if (s1->output_type == TCC_OUTPUT_DLL) {
+                    /* The sequence stays: __tls_get_addr is called
+                       with the address of the GOT pair that
+                       build_got_entries filled with DTPMOD64/DTPOFF64
+                       relocations.  The field takes the pair's
+                       PC-relative address (the GOTPCREL formula) and
+                       the following PLT32 -- the call -- stays live.  */
+                    add32le(ptr, s1->got->sh_addr - addr +
+                                 get_sym_attr(s1, sym_index, 0)->tls_pair_offset
+                                 + rel->r_addend);
+                } else if (memcmp (ptr-4, expect, sizeof(expect)) != 0) {
+                    tcc_error_noabort("unexpected R_X86_64_TLSGD pattern");
+                } else if (sym->st_shndx != SHN_UNDEF) {
+                    /* GD -> LE relaxation, as GNU ld performs for an
+                       executable: the sequence becomes a load of the
+                       thread pointer plus the symbol's tp-relative
+                       offset -- the val - tls_end formula the TPOFF
+                       cases use.  (The section-relative value this
+                       replaces was right only for a symbol sitting at
+                       its block's round-down point.)  */
                     int32_t x;
 
                     memcpy(ptr-4, replace, sizeof(replace));
                     rel[1].r_info = ELFW(R_INFO)(0, R_X86_64_NONE);
-                    sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
-                    sec = s1->sections[sym->st_shndx];
-                    x = sym->st_value - sec->sh_addr - sec->data_offset;
+                    if (s1->tls_end)
+                        /* val carries the relocation addend (the GD
+                           field's -4, folded in by relocate_section);
+                           it belongs to the lea being replaced, not
+                           to the tp-relative offset.  */
+                        x = val - rel->r_addend - s1->tls_end;
+                    else {
+                        Section *sec = s1->sections[sym->st_shndx];
+                        x = sym->st_value - sec->sh_addr - sec->data_offset;
+                    }
                     add32le(ptr + 8, x);
+                } else {
+                    /* GD -> IE relaxation: load the thread pointer and
+                       add the GOT slot's contents.  The slot is filled
+                       by the TPOFF64 relocation build_got_entries
+                       created for this symbol -- the GOTTPOFF
+                       arrangement.  */
+                    memcpy(ptr-4, replace_ie, sizeof(replace_ie));
+                    rel[1].r_info = ELFW(R_INFO)(0, R_X86_64_NONE);
+                    add32le(ptr + 8, s1->got->sh_addr - (addr + 8) +
+                                 get_sym_attr(s1, sym_index, 0)->got_offset
+                                 - 4);
                 }
-                else
-                    tcc_error_noabort("unexpected R_X86_64_TLSGD pattern");
             }
             break;
         case R_X86_64_TLSLD:
+            if (s1->output_type == TCC_OUTPUT_DLL) {
+                /* The sequence stays: __tls_get_addr is called with
+                   the address of a GOT pair whose DTPMOD64 slot names
+                   this module (symbol 0); the DTPOFF32/64 relocations
+                   after the call add offsets within the module's TLS
+                   block (see their case below).  The following PLT32
+                   stays live.  */
+                add32le(ptr, s1->got->sh_addr - addr +
+                             get_sym_attr(s1, sym_index, 0)->tls_pair_offset
+                             + rel->r_addend);
+                break;
+            }
             {
                 static const unsigned char expect[] = {
                     /* lea 0(%rip),%rdi */
@@ -401,7 +453,17 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
         case R_X86_64_TPOFF64:
             {
                 int32_t x;
-                if (s1->tls_end) {
+                if ((type == R_X86_64_DTPOFF32
+                     || type == R_X86_64_DTPOFF64)
+                    && s1->output_type == TCC_OUTPUT_DLL) {
+                    /* DTPOFF names the offset within this module's own
+                       TLS block; __tls_get_addr supplies the block
+                       base at runtime.  The tp-relative formula below
+                       is the executable form, where the LD -> LE
+                       relaxation has already turned the base into the
+                       thread pointer itself.  */
+                    x = val - s1->tls_start;
+                } else if (s1->tls_end) {
                     x = val - s1->tls_end;
                 } else {
                     ElfW(Sym) *sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];

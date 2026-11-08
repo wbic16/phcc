@@ -2086,6 +2086,18 @@ ST_FUNC void relocate_syms(TCCState *s1, Section *symtab, int do_resolve)
                it */
             if (!strcmp(name, "_fp_hw"))
                 goto found;
+#ifdef TCC_TARGET_X86_64
+            /* In a static executable every GD/LD __tls_get_addr call
+               is relaxed away by relocate() -- a pattern mismatch
+               aborts the link -- and glibc's libc.a defines no
+               __tls_get_addr a direct static call could bind to
+               (GNU ld relaxes the same calls before its resolution
+               pass complains).  When build_got_entries saw no direct
+               reference, the undefined symbol is dead.  */
+            if (s1->static_link && !s1->tls_get_addr_direct
+                && !strcmp(name, "__tls_get_addr"))
+                goto found;
+#endif
             /* only weak symbols are accepted to be undefined. Their
                value is zero */
             sym_bind = ELFW(ST_BIND)(sym->st_info);
@@ -2471,8 +2483,54 @@ static void fill_iplt_relocs(TCCState *s1)
 /* build GOT and PLT entries */
 /* Two passes because R_JMP_SLOT should become first. Some targets
    (arm, arm64) do not allow mixing R_JMP_SLOT and R_GLOB_DAT. */
+#ifdef TCC_TARGET_X86_64
+/* Classify this link's references to __tls_get_addr for
+   relocate_syms: a PLT32 immediately following an R_X86_64_TLSGD or
+   R_X86_64_TLSLD relocation in the same section is the call half of
+   a GD/LD sequence, which relocate() relaxes away in every non-DLL
+   output; any other reference is a direct call the link must
+   satisfy.  The result lands in s1->tls_get_addr_direct.  */
+static void scan_tls_get_addr_refs(TCCState *s1)
+{
+    Section *s;
+    ElfW_Rel *rel;
+    ElfW(Sym) *sym;
+    int i, prev_type;
+
+    if (s1->tls_get_addr_direct)
+        return;
+    for(i = 1; i < s1->nb_sections; i++) {
+        s = s1->sections[i];
+        if (s->sh_type != SHT_RELX)
+            continue;
+        if (s->link != symtab_section)
+            continue;
+        prev_type = R_X86_64_NONE;
+        for_each_elem(s, 0, rel, ElfW_Rel) {
+            int type = ELFW(R_TYPE)(rel->r_info);
+            int sym_index = ELFW(R_SYM)(rel->r_info);
+            sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+            if (sym->st_name) {
+                const char *name =
+                    (char *) symtab_section->link->data + sym->st_name;
+                if (!strcmp(name, "__tls_get_addr")
+                    && !(s1->output_type != TCC_OUTPUT_DLL
+                         && type == R_X86_64_PLT32
+                         && (prev_type == R_X86_64_TLSGD
+                             || prev_type == R_X86_64_TLSLD)))
+                    s1->tls_get_addr_direct = 1;
+            }
+            prev_type = type;
+        }
+    }
+}
+#endif
+
 ST_FUNC void build_got_entries(TCCState *s1, int got_sym)
 {
+#ifdef TCC_TARGET_X86_64
+    scan_tls_get_addr_refs(s1);
+#endif
     Section *s;
     ElfW_Rel *rel;
     ElfW(Sym) *sym;
@@ -2629,6 +2687,69 @@ redo:
                     }
                 } else
                     put_got_entry(s1, R_X86_64_TPOFF64, sym_index);
+                continue;
+            }
+#endif
+#ifdef TCC_TARGET_X86_64
+            if (type == R_X86_64_TLSGD || type == R_X86_64_TLSLD) {
+                if (s1->output_type != TCC_OUTPUT_DLL) {
+                    /* Executable (or memory) output: relocate()
+                       relaxes the sequence -- GD to LE for a defined
+                       symbol, GD to IE for an undefined one, LD to
+                       LE.  Only the IE form reads a GOT slot: the
+                       single TPOFF64 slot of the GOTTPOFF arrangement.
+                       The symbol is undefined there, hence global, so
+                       no local-marker case arises.  */
+                    if (type == R_X86_64_TLSGD
+                        && sym->st_shndx == SHN_UNDEF)
+                        put_got_entry(s1, R_X86_64_TPOFF64, sym_index);
+                    continue;
+                }
+                /* DLL output: the __tls_get_addr sequence stays,
+                   fed by a GOT pair -- DTPMOD64/DTPOFF64 against the
+                   symbol for GD, a lone DTPMOD64 against symbol 0
+                   (this module) for LD, whose second slot stays
+                   zero.  A defined local GD symbol goes through
+                   markers in the GOT relocation list, rewritten by
+                   fill_local_got_entries, as with F22's TPOFF64
+                   marker.  */
+                attr = get_sym_attr(s1, sym_index, 1);
+                if (!attr->tls_pair_offset) {
+                    unsigned off = s1->got->data_offset;
+
+                    attr->tls_pair_offset = off;
+                    section_ptr_add(s1->got, 2 * PTR_SIZE);
+                    if (type == R_X86_64_TLSLD) {
+                        put_elf_reloc(s1->dynsym, s1->got, off,
+                                      R_X86_64_DTPMOD64, 0);
+                    } else if (s1->dynsym
+                               && sym->st_shndx != SHN_UNDEF
+                               && ELFW(ST_BIND)(sym->st_info)
+                                   == STB_LOCAL) {
+                        put_elf_reloc(s1->dynsym, s1->got, off,
+                                      R_X86_64_DTPMOD64, sym_index);
+                        put_elf_reloc(s1->dynsym, s1->got,
+                                      off + PTR_SIZE,
+                                      R_X86_64_DTPOFF64, sym_index);
+                    } else {
+                        int dyn_index = attr->dyn_index;
+
+                        if (!dyn_index) {
+                            const char *name =
+                                (char *) symtab_section->link->data
+                                + sym->st_name;
+                            dyn_index = attr->dyn_index =
+                                set_elf_sym(s1->dynsym, sym->st_value,
+                                            sym->st_size, sym->st_info,
+                                            0, sym->st_shndx, name);
+                        }
+                        put_elf_reloc(s1->dynsym, s1->got, off,
+                                      R_X86_64_DTPMOD64, dyn_index);
+                        put_elf_reloc(s1->dynsym, s1->got,
+                                      off + PTR_SIZE,
+                                      R_X86_64_DTPOFF64, dyn_index);
+                    }
+                }
                 continue;
             }
 #endif
@@ -3239,6 +3360,37 @@ static void fill_local_got_entries(TCCState *s1)
         return;
     for_each_elem(s1->got->reloc, 0, rel, ElfW_Rel) {
 #ifdef TCC_TARGET_X86_64
+	if (ELFW(R_TYPE)(rel->r_info) == R_X86_64_DTPMOD64
+	    || ELFW(R_TYPE)(rel->r_info) == R_X86_64_DTPOFF64) {
+	    int sym_index = ELFW(R_SYM) (rel->r_info);
+	    ElfW(Sym) *sym = &((ElfW(Sym) *) symtab_section->data)[sym_index];
+	    struct sym_attr *attr = get_sym_attr(s1, sym_index, 0);
+	    unsigned offset = rel->r_offset - s1->got->sh_addr;
+	    /* A DTPMOD64/DTPOFF64 entry indexing a defined local TLS
+	       symbol in symtab_section is one half of a marker pair left
+	       by the GD pair allocation in build_got_entries (real
+	       entries index s1->dynsym; a marker is told apart by its
+	       slot offset, which belongs to the marker's own symbol).
+	       Rewrite to the symbol-less forms GNU ld emits: the module
+	       is this one, the offset is the symbol's offset within the
+	       TLS block.  */
+	    if (ELFW(ST_BIND)(sym->st_info) == STB_LOCAL
+		&& ELFW(ST_TYPE)(sym->st_info) == STT_TLS
+		&& sym->st_shndx != SHN_UNDEF
+		&& ((ELFW(R_TYPE)(rel->r_info) == R_X86_64_DTPMOD64
+		     && offset == attr->tls_pair_offset)
+		    || (ELFW(R_TYPE)(rel->r_info) == R_X86_64_DTPOFF64
+			&& offset == attr->tls_pair_offset + PTR_SIZE))) {
+		if (ELFW(R_TYPE)(rel->r_info) == R_X86_64_DTPMOD64) {
+		    rel->r_info = ELFW(R_INFO)(0, R_X86_64_DTPMOD64);
+		    rel->r_addend = 0;
+		} else {
+		    rel->r_info = ELFW(R_INFO)(0, R_X86_64_DTPOFF64);
+		    rel->r_addend = sym->st_value - s1->tls_start;
+		}
+	    }
+	    continue;
+	}
 	if (ELFW(R_TYPE)(rel->r_info) == R_X86_64_TPOFF64) {
 	    int sym_index = ELFW(R_SYM) (rel->r_info);
 	    ElfW(Sym) *sym = &((ElfW(Sym) *) symtab_section->data)[sym_index];
