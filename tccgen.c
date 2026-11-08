@@ -52,6 +52,12 @@ static int sotype_aligned;
    type-carried alignment apart from declarator attributes, which
    parse_btype's own attribute cases merge into the same AttributeDef */
 static int typedef_aligned;
+/* F33: set by parse_btype() when the declaration specifiers are
+   '__auto_type'; consumed by decl() immediately after its
+   parse_btype() call (typedef_aligned's pattern).  in_decl_btype
+   guards the token outside declaration statements. */
+static int auto_type_seen;
+static int in_decl_btype;
 ST_DATA char debug_modes;
 
 ST_DATA SValue *vtop;
@@ -4910,6 +4916,7 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
 
     memset(ad, 0, sizeof(AttributeDef));
     typedef_aligned = 0;
+    auto_type_seen = 0;
     type_found = 0;
     typespec_found = 0;
     t = VT_INT;
@@ -5075,6 +5082,20 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             t |= VT_DEFSIGN | VT_UNSIGNED;
             next();
             typespec_found = 1;
+            break;
+
+        case TOK_auto_type:
+            /* F33: '__auto_type' -- the base type is deduced from
+               the initializer in decl(); parse_btype only records
+               the marker and keeps the placeholder type. */
+            if (!in_decl_btype)
+                tcc_error("'__auto_type' is only valid in a declaration");
+            if (auto_type_seen)
+                tcc_error("duplicate '__auto_type' in declaration specifiers");
+            auto_type_seen = 1;
+            next();
+            typespec_found = 1;
+            bt = st = -2;
             break;
 
             /* storage */
@@ -9441,9 +9462,145 @@ static void pe_check_linkage(CType *type, AttributeDef *ad)
 /* 'l' is VT_LOCAL or VT_CONST to define default storage type
    or VT_CMP if parsing old style parameter list
    or VT_JMP if parsing c99 for decl: for (int i = 0, ...) */
+/* F33: a '__auto_type' declaration.  The declared type is the
+   type of the initializer expression (gcc's rule, measured
+   against gcc 13.3 and clang 18): arrays and functions decay to
+   pointers, the expression type's top-level qualifiers are
+   dropped, and the declaration's own storage and qualifiers
+   apply.  Only a single plain-identifier declarator with an
+   initializer is accepted -- gcc's restrictions; clang also
+   accepts multiple declarators and pointer declarators, and on
+   that split we follow gcc, the extension's owner.  The
+   initializer's tokens are captured once, evaluated under
+   nocode_wanted to read the type, then replayed into the
+   ordinary decl_initializer_alloc() path, so allocation,
+   storage classes and constant checking are the compiler's own.
+   Returns the declared identifier token. */
+static int decl_auto_type(CType *btype, AttributeDef *adbase, int l)
+{
+    CType dt;
+    AttributeDef ad = *adbase;
+    Sym *sym;
+    TokenString *cap = tok_str_alloc(), *w;
+    int v = 0, parens = 0, r, i, saved_nocode, level, t;
+
+    if (btype->t & VT_TYPEDEF)
+        tcc_error("'__auto_type' used with typedef");
+    if (l == VT_CMP)
+        tcc_error("'__auto_type' may only be used for a variable");
+
+    /* one parenthesized level around the identifier is accepted,
+       as in gcc's '__auto_type (x) = 5' */
+    if (tok == '(') {
+        next();
+        parens = 1;
+    }
+    if (tok < TOK_IDENT)
+        tcc_error("'__auto_type' requires a plain identifier as declarator");
+    v = tok;
+    next();
+    if (parens)
+        skip(')');
+    parse_attribute(&ad);
+    if (tok != '=')
+        tcc_error("'__auto_type' requires an initialized data declaration");
+
+    /* Capture the initializer tokens including the terminator so the
+       expression can be evaluated twice from the same text (the
+       func_vla_arg_code pattern); the terminator is left as the
+       current token in both passes so the macro frame stays live
+       for the stack restore below. */
+    next();
+    level = 0;
+    for (;;) {
+        t = tok;
+        if (t == TOK_EOF)
+            tcc_error("unexpected end of file");
+        tok_str_add_tok(cap);
+        if (level == 0 && (t == ',' || t == ';'))
+            break;
+        next();
+        if (t == '{' || t == '(' || t == '[')
+            level++;
+        else if (t == '}' || t == ')' || t == ']')
+            level--;
+    }
+    tok_str_add(cap, TOK_EOF);
+
+    /* Pass 1: evaluate without codegen to read the type.  Each pass
+       replays a private copy of the captured tokens, and afterwards
+       the macro stack is drained back to its pre-pass depth: a
+       string literal in the initializer runs its own save/replay
+       (decl_initializer_alloc with has_init == 2) whose unget_tok
+       frame can outlive the pass when the expression ends exactly
+       at the terminator, and a single end_macro would pop that
+       frame and leave this pass's frame stuck on the stream. */
+    saved_nocode = nocode_wanted;
+    nocode_wanted++;
+    w = tok_str_alloc();
+    for (i = 0; i < cap->len; i++)
+        tok_str_add(w, cap->str[i]);
+    begin_macro(w, 1);
+    next();
+    expr_eq();
+    /* Drain a leftover unget frame from a string literal's own
+       save/replay: its terminator token was consumed as the current
+       token, so its frame sits exhausted at its 0 sentinel; this
+       pass's own frame stops at TOK_EOF and is popped below. */
+    if (macro_ptr && *macro_ptr == 0)
+        end_macro();
+    end_macro();
+    nocode_wanted = saved_nocode;
+    dt = vtop->type;
+    vpop();
+
+    /* deduce: the initializer's type after lvalue conversion */
+    if ((dt.t & VT_BTYPE) == VT_VOID)
+        tcc_error("declaration of void object");
+    if ((dt.t & VT_BTYPE) == VT_ARRAY) {
+        dt = *pointed_type(&dt);
+        mk_pointer(&dt);
+    } else if ((dt.t & VT_BTYPE) == VT_FUNC) {
+        mk_pointer(&dt);
+    }
+    if (dt.t & VT_ARRAY)
+        dt.t &= ~VT_ARRAY;
+    dt.t &= ~(VT_CONSTANT | VT_VOLATILE);
+    dt.t |= (btype->t & (VT_EXTERN | VT_STATIC | VT_TYPEDEF |
+                         VT_INLINE | VT_TLS | VT_CONSTANT | VT_VOLATILE));
+
+    /* pass 2: the ordinary definition path parses the initializer
+       from a fresh copy of the same tokens and stops at the same
+       terminator */
+    r = VT_LVAL;
+    if (l == VT_CONST || (dt.t & VT_STATIC))
+        r |= VT_CONST;
+    else
+        r |= VT_LOCAL;
+    dt.t &= ~VT_EXTERN;
+    w = tok_str_alloc();
+    for (i = 0; i < cap->len; i++)
+        tok_str_add(w, cap->str[i]);
+    begin_macro(w, 1);
+    next();
+    decl_initializer_alloc(&dt, &ad, r, 1, v, l);
+    /* Drain a leftover unget frame from a string literal's own
+       save/replay: its terminator token was consumed as the current
+       token, so its frame sits exhausted at its 0 sentinel; this
+       pass's own frame stops at TOK_EOF and is popped below. */
+    if (macro_ptr && *macro_ptr == 0)
+        end_macro();
+    end_macro();
+    tok_str_free(cap);
+    if (tok == ',')
+        tcc_error("'__auto_type' may only be used with a single declarator");
+    return v;
+}
+
+
 static int decl(int l)
 {
-    int v, has_init, r, oldint;
+    int v, has_init, r, oldint, has_btype;
     CType type, btype;
     Sym *sym, *sa;
     AttributeDef ad, adbase;
@@ -9452,7 +9609,10 @@ static int decl(int l)
     while (1) {
 
         oldint = 0;
-        if (!parse_btype(&btype, &adbase, l == VT_LOCAL)) {
+        in_decl_btype = 1;
+        has_btype = parse_btype(&btype, &adbase, l == VT_LOCAL);
+        in_decl_btype = 0;
+        if (!has_btype) {
             if (l == VT_JMP)
                 return 0;
             /* skip redundant ';' if not in old parameter decl scope */
@@ -9481,6 +9641,15 @@ static int decl(int l)
                     expect("declaration");
                 break;
             }
+        }
+
+        if (auto_type_seen) {
+            auto_type_seen = 0;
+            v = decl_auto_type(&btype, &adbase, l);
+            if (l == VT_JMP)
+                return v;
+            skip(';');
+            continue;
         }
 
         if (tok == ';') {

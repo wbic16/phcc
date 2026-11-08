@@ -176,6 +176,7 @@
      DEF(TOK_builtin_bswap16, "__builtin_bswap16")
      DEF(TOK_builtin_bswap32, "__builtin_bswap32")
      DEF(TOK_builtin_bswap64, "__builtin_bswap64")
+     DEF(TOK_auto_type, "__auto_type")
      DEF(TOK_builtin_unreachable, "__builtin_unreachable")
      /*DEF(TOK_builtin_va_list, "__builtin_va_list")*/
 #if defined TCC_TARGET_PE && defined TCC_TARGET_X86_64
