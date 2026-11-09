@@ -10533,6 +10533,12 @@ static int type_is_vm(CType *t)
     for (;;) {
         if (t->t & VT_VLA)
             return 1;
+        /* F50 (PQ-28): nullptr_t is a VT_PTR whose ref is NULL by
+           design -- it has no pointee, and it is never variably
+           modified; chasing pointed_type() into it dereferenced
+           the NULL ref for every block-scope nullptr_t declarator */
+        if (IS_NULLPTR_T(t->t))
+            return 0;
         if ((t->t & VT_BTYPE) == VT_ARRAY || (t->t & VT_BTYPE) == VT_PTR)
             t = pointed_type(t);
         else
@@ -12697,7 +12703,12 @@ static void func_vla_arg(Sym *sym)
     Sym *arg;
 
     for (arg = sym->type.ref->next; arg; arg = arg->next)
-        if ((arg->type.t & VT_BTYPE) == VT_PTR && (arg->type.ref->type.t & VT_VLA))
+        /* F50 (PQ-28): a nullptr_t parameter is a VT_PTR whose ref
+           is NULL (no pointee); it cannot point at a VLA, and
+           reading ref->type for it dereferenced the NULL ref on
+           every definition of a function with such a parameter */
+        if ((arg->type.t & VT_BTYPE) == VT_PTR && arg->type.ref
+            && (arg->type.ref->type.t & VT_VLA))
             func_vla_arg_code(arg->type.ref);
 }
 

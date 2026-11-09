@@ -4033,3 +4033,85 @@ follows pointed_type() into the same NULL ref for every
 block-scope declarator.  Parse-time F47 machinery, not the
 debug walkers and not the -g regression; filed as PQ-28 with a
 minimized reproducer in this wave's record.
+
+## F50 — `nullptr_t` chased as a pointer by the parse-time walks: block-scope objects and parameters segfaulted (PQ-28)
+
+Defect (filed as PQ-28 in F49's residue, from that wave's
+extended probes): declaring a block-scope object of type
+nullptr_t segfaulted the compiler (rc=139), with or without
+-g.  Root cause: nullptr_t is a VT_PTR whose ref is NULL by
+design -- it has no pointee (F42).  F47's type_is_vm (tccgen.c)
+walks VT_ARRAY/VT_PTR types through pointed_type() -- which is
+&type->ref->type -- with no nullptr case, so every block-scope
+nullptr_t declarator (object or typedef) dereferenced the NULL
+ref from decl's registry hook.  ASan: type_is_vm, tccgen.c,
+via decl, on the minimized reproducer (a block-scope
+nullptr_t declaration initialized from nullptr).
+
+The audit this entry records found a second unguarded chase of
+the same shape, confirmed by its own ASan trace: func_vla_arg
+reads arg->type.ref->type for every VT_PTR parameter of every
+function definition, so a nullptr_t PARAMETER segfaulted in
+gen_function (func_vla_arg, tccgen.c) before the body was
+parsed.  Same invariant, second site.
+
+Fix (tccgen.c only): both walks stop at nullptr_t, in the
+terms F42 established.
+
+- type_is_vm returns 0 at a nullptr_t, tested with
+  IS_NULLPTR_T: a nullptr_t is not variably modified.  The
+  VT_VLA test still runs first at every level, so a variably
+  modified type whose element chain reaches nullptr_t (a VLA
+  of nullptr_t) is still registered -- measured below.
+- func_vla_arg skips a parameter whose type has no ref: a
+  nullptr_t parameter cannot point at a VLA.  The guard is
+  the ref itself (func_vla_arg_code already stops at a NULL
+  ref); pointer-to-VLA parameters are untouched.
+
+Neighbouring walks audited for the same unguarded chase:
+check_restrict_type, compare_types (nullptr settled at entry;
+array/pointer wrappers recurse back into that entry),
+is_null_pointer, indir, the call-through-pointer path,
+gen_op (entry guard for arithmetic; its pointer branches are
+reached only once nullptr operands are settled), gen_cast's
+nullptr cases, type_to_str -- each already carries its F42
+nullptr case.  The remaining pointed_type()/ref chases follow
+VT_ARRAY layers or struct field lists, whose refs are
+non-NULL by construction (decl_initializer's array walk, the
+__auto_type deduce, the conditional-operator qualifier merge,
+pointed_size's flexible-array caller).  The debug walkers
+were F49's.  The two sites above were the only unguarded
+chases a nullptr_t type can reach.
+
+Receipts (aletheia-core, D10 tip 5c81be62 + this fix): the
+minimized reproducer compiles and runs (rc 0), also under -g
+and -gdwarf.  Extended block-scope shapes, each compiled and
+run with correct results: plain declaration, declaration
+initialized from nullptr, assignment, function scope vs
+nested block scope, static local, block-scope array of
+nullptr_t, pointer to nullptr_t, block-scope typedefs of
+nullptr_t and of pointer-to-nullptr_t, a nullptr_t parameter
+called with nullptr, a nullptr_t argument passed to a void*
+parameter, the <stddef.h> shape under -std=c23, and
+nullptr_t as a struct member (the F49 control -- unchanged).
+Preservation: a goto into the scope of a VLA of nullptr_t is
+still rejected with F47's named error, exactly as gcc 13.3
+and clang 18 reject it; a goto within that scope, a VLA of
+nullptr_t in ordinary use, and a pointer-to-VLA parameter
+(the func_vla_arg machinery's own purpose) all still compile
+and run correctly.  Dereferencing or doing arithmetic on a
+nullptr_t value still fails with F42's named errors, not a
+crash.  F47's goto/VM corpus re-run in full: 28/28
+classification agreement with both oracles (the combined D10
+corpus, 58 probes including F48's, mismatch-free, run
+receipts equal).  make test: ALL TESTS PASSED.  Conformance
+spot 332/333, diverge set exactly [a_pp_018], no oracle
+splits.  Static gate cells 3/3.
+
+Residue, named: none known for PQ-28.  One examined non-fix:
+the __atomic builtin signature walk reads a pointee size
+through pointed_type(); its operand is by construction a
+pointer to the atomic object, so the chase lands on the
+object type, and no nullptr_t path to it was found (a bare
+nullptr_t value is not an atomic object pointer).  It is
+recorded here as examined, not fixed blind.
