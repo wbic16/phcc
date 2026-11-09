@@ -108473,7 +108473,7 @@ win32/tcc-win32.txt	1.1.1/4.2.9/5.6.1	7fe9f2dd7d20c45022ee2f21640decec7bf26a5a3e
 .gitignore	1.1.1/4.2.10/1.1.1	78bafaef56f765a7d75f79d69615942dd5fb938d873dd2f1a6054703c7986f20	853	100644
 BENCHMARKS.md	1.1.1/4.2.10/1.2.1	73d5b59f5e6cdca9f6016a11447d4ce0b84283fffe20422ff4c168ebafd64f78	24635	100644
 Makefile	1.1.1/4.2.10/1.3.1	7a73f6ca06bb90e7dc16c5279c659b0635bdf6ad4b1c6580376d761bb9523956	18751	100644
-PATCHES.md	1.1.1/4.2.10/1.4.1	6f4c52623b92649bd0165ec46796e60a6d5eda1078829f2691baef06a444b4bd	240681	100644
+PATCHES.md	1.1.1/4.2.10/1.4.1	69f957907daeb330187f24e046d9ea53e55b8046087057ae91ae436a7ed28c80	245135	100644
 README.md	1.1.1/4.2.10/1.5.1	73a9d4348bef037b646b419877a8288ce1a51091b3f3420783b338edab39bfde	4534	100644
 configure	1.1.1/4.2.10/1.6.1	0ce9b0e46a91b6c18f4f7aba447178b37e57c24912b6deedb4b864efe8e65350	21666	100755
 conftest.c	1.1.1/4.2.10/1.7.1	f7e9f80e1d50f5b255ee0c88052c8dc298f40b58162571cc09eb4c47c5e4fb90	8110	100644
@@ -248217,10 +248217,11 @@ refresh: 2026-11-08 (Wave D9 phext refresh, F42-F44) — source-sha256 re-bound 
 # The Slice 0 manifest (Meta Sec 1) is never edited; placements made after it live in addenda like this one, same columns.
 # columns: path <TAB> coordinate <TAB> sha256 <TAB> size <TAB> git-mode
 # Placement rule added: phext/** -> Book 10, Chapter 10 (the compiler's own phext library, beside tools/** at Ch 9).
-phext/phext.c	1.1.1/4.2.10/10.1.1	cfdab3fdf523749f5a8c62445b92da598355d949af7ce1f7bc0d67ee2dd6ebfe	77430	100644
-phext/phext.h	1.1.1/4.2.10/10.2.1	144653da92ecb3fa4de3f4c9e104d6c7798dfa051e86207c9384b2c1d88bdcc4	22420	100644
+phext/phext.c	1.1.1/4.2.10/10.1.1	4703c41022419692e83d6a17f663d843f22fc2091f96a9c6ffac7393dfb4bb7f	96538	100644
+phext/phext.h	1.1.1/4.2.10/10.2.1	180ac6ee188e4c58cfda7d9287f484c0c348ddb36c302cd8411a4f69945deff7	31529	100644
 # Recorded decisions: no Volume 3 member segmentation for these files yet (importer follow-on); no generated Design view (extract_design consumes Vol 3 members) — the Design series therefore starts at Scroll 2 with the generated assembly, keeping Scroll 1 reserved for the view.
 # re-issue (2026-11-07, F1 receipt re-issue pass): phext.c/h refreshed to the repo F4 bytes (phext.c cfdab3fdf523... 77430 B; phext.h 144653da92ec... 22420 B; hashmap store, phcc commit e34c21f2 as carried in the tree at e399b212); the phext object and its assembly listing were rebuilt from these bytes (build register Sec 15; region manifest at Library 10000 root).
+# refresh (2026-11-08, F45 parity pass): phext.c/h refreshed to the repo F45 bytes (phext.c 4703c4102241... 96538 B; phext.h 180ac6ee188e... 31529 B; libphext 0.5.0 parity — binary scrolls, xz seal, lenient-parse saturation; phcc commit 7bd02706).
 # phcc build register
 # Generated assembly + build region provenance (builds pass).
 compiler: tcc version 1.0.0 2026-11-07 attrfix@e399b212 (x86_64 Linux)
@@ -311934,8 +311935,8 @@ generated assembly (builds pass; report-only, flags never block):
   build register: 1.1.1/1.2.10/1.15.1 (compiler-commit e399b212271b7e1277371b4b7ac6a34095e13363; host aletheia-core; built-at 2026-11-07T11:57:28-06:00)
   STALE	1.1.1/3.2.7/1.2.2	lib/libtcc1.c x86_64: source changed since listing was generated
   STALE	1.1.1/3.2.7/1.2.3	lib/libtcc1.c arm64: source changed since listing was generated
-  CURRENT	1.1.1/3.2.10/10.1.2	phext/phext.c x86_64 (object present, binding current)
-  assembly listings checked: 3; CURRENT 1; STALE 2
+  STALE	1.1.1/3.2.10/10.1.2	phext/phext.c x86_64: source changed since listing was generated
+  assembly listings checked: 3; CURRENT 0; STALE 3
 
 conformance (phcc conformance programme, design §6; report-only, flags never block):
   run receipt: 1.1.1/5.2.11/9.1.1 (slice 1 run 2 + F5 verification re-run)
@@ -312883,7 +312884,7 @@ scroll	1.1.1/1.2.6/1.1.1	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991
 scroll	1.1.1/1.2.7/1.1.1	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0
 scroll	1.1.1/1.2.8/1.1.1	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0
 scroll	1.1.1/1.2.9/1.1.1	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0
-scroll	1.1.1/1.2.10/1.1.1	edfd1722a25f3bfaacd5a44035aad8ca0ac9f67bbeee83ae2ca34c92b65ec922	77114
+scroll	1.1.1/1.2.10/1.1.1	37dd36b7078b805a6e0050a0b54faa01f7f4e036c6d69e1a16dc696d72eb8b1a	77114
 scroll	1.1.1/1.2.10/1.2.1	e546c5666090cacde3af5e3202c016749181211086246b05ea1607b6e65aa53e	2106
 scroll	1.1.1/1.2.10/1.3.1	e360f87504e1be1ea748166fb34b34437c4f9452e123f5b91504796477a31712	57581
 scroll	1.1.1/1.2.10/1.4.1	ed013fd55730366b71aede9d1dff71de39381b08f26c81629b695ea080201bb4	152502
@@ -312896,7 +312897,7 @@ scroll	1.1.1/1.2.10/1.10.1	1ccf40d87f6f791b1713a98074cfe8f43a6211456d2dd894f120e
 scroll	1.1.1/1.2.10/1.11.1	9f68b31710e1ff17de346569a8061ec7bf306240c47e3d90e06a4bb4306a7e48	2897
 scroll	1.1.1/1.2.10/1.12.1	be476b923a5042cf709cbc23ba3dc4a43b3760b785729ac6cc126501f059680b	5153390
 scroll	1.1.1/1.2.10/1.13.1	e0b157136b614f509326f9663f089e224975898f3dae59aa87a8a4bc6d96b56f	8271
-scroll	1.1.1/1.2.10/1.14.1	89dfdee974f44d37c121743b40913b4264a15e4cd9706d4f5be0151322730c7a	1240
+scroll	1.1.1/1.2.10/1.14.1	5d0e11876e9fe877b93baef0917ba7a1ab3148c8bb5e65092938eb7732ac25e0	1490
 scroll	1.1.1/1.2.10/1.15.1	23f7349ca022276ef479079dd10f830d5a027cc11c8533d2c0db089a455e0de8	1318
 scroll	1.1.1/1.2.10/1.16.1	804d5748622d15296f52676e9ffa3d062f98a38c54ac4a2c712d0bdd2acd1142	9226
 scroll	1.1.1/1.2.10/1.17.1	d410f3821a2d06f86955ded996821d454f7177db2db33a8754a072c97e1ba279	6973
@@ -313770,7 +313771,7 @@ scroll	1.1.1/4.2.9/5.6.1	7fe9f2dd7d20c45022ee2f21640decec7bf26a5a3e006f5876c2de9
 scroll	1.1.1/4.2.10/1.1.1	78bafaef56f765a7d75f79d69615942dd5fb938d873dd2f1a6054703c7986f20	853
 scroll	1.1.1/4.2.10/1.2.1	73d5b59f5e6cdca9f6016a11447d4ce0b84283fffe20422ff4c168ebafd64f78	24635
 scroll	1.1.1/4.2.10/1.3.1	7a73f6ca06bb90e7dc16c5279c659b0635bdf6ad4b1c6580376d761bb9523956	18751
-scroll	1.1.1/4.2.10/1.4.1	6f4c52623b92649bd0165ec46796e60a6d5eda1078829f2691baef06a444b4bd	240681
+scroll	1.1.1/4.2.10/1.4.1	69f957907daeb330187f24e046d9ea53e55b8046087057ae91ae436a7ed28c80	245135
 scroll	1.1.1/4.2.10/1.5.1	73a9d4348bef037b646b419877a8288ce1a51091b3f3420783b338edab39bfde	4534
 scroll	1.1.1/4.2.10/1.6.1	0ce9b0e46a91b6c18f4f7aba447178b37e57c24912b6deedb4b864efe8e65350	21666
 scroll	1.1.1/4.2.10/1.7.1	f7e9f80e1d50f5b255ee0c88052c8dc298f40b58162571cc09eb4c47c5e4fb90	8110
@@ -314199,8 +314200,8 @@ scroll	1.1.1/4.2.10/9.19.1	adbed6a484d733ace46f028d74f4d11732c807a5ca7141be20161
 scroll	1.1.1/4.2.10/9.20.1	c077698c3259c1e9aaceecd37fb4dfeffa0feaf3edc63e295f6e06f2f4af7b60	16135
 scroll	1.1.1/4.2.10/9.21.1	b963e3703abff51ce1c2daa09232786338a564499e886f3c815df248d54febb0	9281
 scroll	1.1.1/4.2.10/9.22.1	d9e7ecf26c180705a63313dc3329f77838efb33bbd4af6882fa1ef6351f6256f	2348
-scroll	1.1.1/4.2.10/10.1.1	cfdab3fdf523749f5a8c62445b92da598355d949af7ce1f7bc0d67ee2dd6ebfe	77430
-scroll	1.1.1/4.2.10/10.2.1	144653da92ecb3fa4de3f4c9e104d6c7798dfa051e86207c9384b2c1d88bdcc4	22420
+scroll	1.1.1/4.2.10/10.1.1	4703c41022419692e83d6a17f663d843f22fc2091f96a9c6ffac7393dfb4bb7f	96538
+scroll	1.1.1/4.2.10/10.2.1	180ac6ee188e4c58cfda7d9287f484c0c348ddb36c302cd8411a4f69945deff7	31529
 scroll	1.1.1/4.3.1/1.1.1	4fb899e8e506ccc62d66a0006ecf248a844632b291bc0ea831e5bb3d23bfea2d	2292
 scroll	1.1.1/4.3.1/1.1.2	d8a1721885e23f1ffef30f8d38f6c83935c5d88365708d6cd7f75b5b0e40907f	957
 scroll	1.1.1/4.3.1/1.1.3	580dd9f754d632924ab114f873a94b45cf5f511059017aeae56a8497e074c2f8	159
@@ -661583,6 +661584,80 @@ alignment rather than the declared one — pre-existing
 upstream behaviour, mode-independent, unchanged by this
 wave.
 
+## F45 — C parity library: libphext 0.4.1 → 0.5.0 (binary scrolls, xz seal, lenient-parse saturation)
+
+Moves the top-level `phext/` C library from libphext-rs 0.4.1 parity
+to parity with the published libphext-rs **0.5.0** (the crates.io
+package artefact, SHA-256 `c8f8df75a786…`, audited from the release
+artefact itself, not a git branch). No compiler file changes; the
+library remains independent of the compiler proper. Base for this
+entry: `f65e68cc`. Full record: `phext/PARITY.md` §5–§7 and its 0.5.0
+outcome section.
+
+The 0.5.0 delta, implemented in `phext/phext.h` + `phext/phext.c`:
+
+- **Binary scrolls** (Rust `binary` module: 10 functions + the
+  `BINARY_SCROLL_HEADER` constant). The canonical format: header line
+  `phext-binary:1:base64`, one line break, RFC 4648 base64 (padding
+  required, no line wrapping); an empty payload is the header line
+  alone. `phext_decode_scroll` reproduces the base64 crate's
+  STANDARD-engine strictness exactly — canonical padding, no
+  whitespace anywhere, non-zero trailing bits in a padded quantum
+  rejected — pinned by a 22-case verdict table probed against the
+  published library. `phext_fetch_binary` is total: a well-formed
+  binary scroll decodes; plain text, a malformed binary scroll, and
+  an unoccupied coordinate all yield the scroll's own bytes verbatim.
+  The byte entry points (`phext_insert_bytes`, `phext_replace_bytes`,
+  `phext_ingest`) implement the ingestion rule: valid UTF-8 is stored
+  as ordinary text, non-UTF-8 as a binary scroll holding the base64
+  of the exact observed bytes, verbatim (strict UTF-8 validation
+  matching `str::from_utf8`, overlongs and surrogates included).
+  Rust's `Option` maps to the new status `PHEXT_ENONE`.
+- **The xz seal** (Rust `seal` module: 4 functions + `SEAL_PRESET`
+  6). `phext_seal` / `phext_seal_bytes` / `phext_unseal` /
+  `phext_unseal_string` over liblzma with a CRC64 check. The
+  streaming encoder is **byte-identical** to the Rust seal; the
+  one-shot buffer encoder is not (it writes size fields into the
+  block header) — measured on seven payload classes, then avoided.
+  Unseal requires the stream to be the whole input: trailing bytes
+  of any kind (junk, zero padding, a second concatenated stream) are
+  `PHEXT_EINVAL`, matching the Rust decoder's probed behaviour.
+  Rust's cargo feature-gating has no C analogue and is mapped
+  honestly (PARITY.md D-7): the binary module is always compiled
+  (its base64 is self-contained in `phext.c` — no dependency exists
+  to gate), while the seal maps to the build-time option
+  `PHEXT_WITH_XZ` + `-llzma`; compiled out, the seal functions
+  return the new status `PHEXT_ENOSEAL` and `phext_seal_compiled()`
+  returns 0.
+- **Lenient-parse saturation** — a core 0.5.0 change found by the
+  differential fuzz rather than by reading the delta: 0.5.0's
+  `to_coordinate` accumulates digits with
+  `saturating_mul`/`saturating_add` where 0.4.1 wrapped (release) and
+  the C port wrapped with it. The 20,000-case regression corpus
+  showed exactly 40 divergences, all op 21 (lenient parse) on
+  components above `u64::MAX`; `phext_to_coordinate` now saturates
+  identically (PARITY.md D-6, resolved). The strict parser needed no
+  change: 0.5.0's `TryFrom` returns `Err` where 0.4.1 panicked, so
+  the fuzz's op-20 panic class is gone (D-2).
+
+Receipts (rock-mountain): the ported suite, extended with the
+`test_binary.rs` + `test_seal.rs` ports, the base64 strictness table,
+the trailing-data unseal verdicts, and a saturation test —
+**163,955 checks / 0 failures** in the plain build and **163,987 / 0**
+with `PHEXT_WITH_XZ`, under both gcc and this tree's phcc (dogfood).
+Differential fuzz against a reference driver built on the published
+0.5.0 package (features `binary` + `xz`): 20,000 regression cases
+(ops 0–23) + 40,000 new cases (ops 24–38 — random non-UTF-8 payloads
+through ingest/fetch round-trips, malformed-header mutations, empty
+payloads, seal/unseal cross-checks in both directions) — **0
+divergences, 0 Rust panics**. Seal cross-check against this repo's
+own artefacts: C unseal of the shipped `phcc.phext.xz` reproduces
+`phcc.phext` byte-identically; the shipped seal is the refresh
+tooling's preset 9-extreme stream — a different encoder setting for
+the same format, not the library seal's output. Tree: `make test`
+ALL TESTS PASSED; conformance spot 332/333 (diverge set exactly
+`[a_pp_018]`, 0 oracle splits); static gate cells 3/3.
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in
@@ -699490,7 +699565,8 @@ sys.exit(0 if ok else 1)
 /* ----------------------------------------------------------------------------------------------------------
  * phext.c - Phext Buffer Library for C
  *
- * A literal port of libphext-rs v0.4.1 (src/phext.rs), the reference
+ * A literal port of libphext-rs v0.5.0 (src/phext.rs, plus the 0.5.0
+ * binary.rs and seal.rs sections at the end of this file), the reference
  * implementation of phext in Rust. Function by function, the algorithms
  * below follow the Rust source - including its quirks - so that defined
  * behaviour is byte-identical. The mapping and the divergences (all of
@@ -700090,7 +700166,8 @@ static int parse_usize_segment(const char *text, size_t len, size_t *out) {
         }
         digit = (unsigned)(text[i] - '0');
         if (value > (((size_t)-1) - digit) / 10) {
-            return 0; /* overflow: Rust's parse fails and TryFrom panics */
+            return 0; /* overflow: Rust's parse fails; 0.5.0's TryFrom
+                       * returns Err (0.4.1 panicked via expect()) */
         }
         value = value * 10 + digit;
     }
@@ -700187,7 +700264,15 @@ phext_coordinate phext_to_coordinate(const char *address) {
             value = 0;
         }
         if (byte >= 0x30 && byte <= 0x39) {
-            value = exp * value + (uint64_t)(byte - 0x30);
+            /* Rust 0.5.0: exp.saturating_mul(value).saturating_add(digit) -
+             * an over-long component saturates at u64::MAX (0.4.1 wrapped,
+             * and the C port wrapped with it; see PARITY.md D-2) */
+            uint64_t digit = (uint64_t)(byte - 0x30);
+            if (value > (UINT64_MAX - digit) / exp) {
+                value = UINT64_MAX;
+            } else {
+                value = exp * value + digit;
+            }
             if (index == 0) {
                 index = 1;
             }
@@ -701518,14 +701603,521 @@ phext_status phext_offset(const unsigned char *input, size_t len,
     *out_offset = result;
     return PHEXT_OK;
 }
+
+/* ----------------------------------------------------------------------------------------------------------
+ * binary scrolls (libphext-rs 0.5.0: src/binary.rs)
+ *
+ * The canonical binary scroll format: the header line
+ * "phext-binary:1:base64", one line break, then the payload in RFC 4648
+ * base64 (standard alphabet, padding required, no line wrapping). An
+ * empty payload is the header line alone.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+/* the header line plus its line break: the prefix of every binary scroll */
+static const char binary_scroll_prefix[] = PHEXT_BINARY_SCROLL_HEADER "\n";
+#define BINARY_SCROLL_PREFIX_LEN (sizeof(binary_scroll_prefix) - 1)
+
+/* strict UTF-8 validation with exactly Rust str::from_utf8's acceptance:
+ * no stray continuation bytes, no overlong forms, no surrogates,
+ * nothing above U+10FFFF, no truncated sequences */
+static int utf8_cont(unsigned char byte) {
+    return (byte & 0xC0) == 0x80;
+}
+
+static int utf8_valid(const unsigned char *bytes, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        unsigned char byte = bytes[i];
+        if (byte < 0x80) {
+            i += 1;
+        } else if (byte < 0xC2) {
+            return 0; /* continuation byte, or overlong 0xC0 / 0xC1 */
+        } else if (byte < 0xE0) {
+            if (i + 1 >= len || !utf8_cont(bytes[i + 1])) {
+                return 0;
+            }
+            i += 2;
+        } else if (byte < 0xF0) {
+            unsigned char lo = 0x80, hi = 0xBF;
+            if (byte == 0xE0) {
+                lo = 0xA0; /* overlong guard */
+            }
+            if (byte == 0xED) {
+                hi = 0x9F; /* surrogate guard */
+            }
+            if (i + 2 >= len || bytes[i + 1] < lo || bytes[i + 1] > hi ||
+                !utf8_cont(bytes[i + 2])) {
+                return 0;
+            }
+            i += 3;
+        } else if (byte < 0xF5) {
+            unsigned char lo = 0x80, hi = 0xBF;
+            if (byte == 0xF0) {
+                lo = 0x90; /* overlong guard */
+            }
+            if (byte == 0xF4) {
+                hi = 0x8F; /* U+10FFFF ceiling */
+            }
+            if (i + 3 >= len || bytes[i + 1] < lo || bytes[i + 1] > hi ||
+                !utf8_cont(bytes[i + 2]) || !utf8_cont(bytes[i + 3])) {
+                return 0;
+            }
+            i += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static const char b64_alphabet[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int b64_value(unsigned char byte) {
+    if (byte >= 'A' && byte <= 'Z') {
+        return byte - 'A';
+    }
+    if (byte >= 'a' && byte <= 'z') {
+        return byte - 'a' + 26;
+    }
+    if (byte >= '0' && byte <= '9') {
+        return byte - '0' + 52;
+    }
+    if (byte == '+') {
+        return 62;
+    }
+    if (byte == '/') {
+        return 63;
+    }
+    return -1;
+}
+
+/* append the base64 of `payload` (no header) to `out` */
+static phext_status b64_encode_into(phext_buffer *out, const unsigned char *payload, size_t len) {
+    phext_status status;
+    size_t i;
+    for (i = 0; i + 3 <= len; i += 3) {
+        uint32_t value = ((uint32_t)payload[i] << 16) |
+                         ((uint32_t)payload[i + 1] << 8) |
+                         (uint32_t)payload[i + 2];
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 18) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 12) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 6) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[value & 63])) != PHEXT_OK) return status;
+    }
+    if (len - i == 1) {
+        uint32_t value = (uint32_t)payload[i] << 16;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 18) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 12) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)'=')) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)'=')) != PHEXT_OK) return status;
+    } else if (len - i == 2) {
+        uint32_t value = ((uint32_t)payload[i] << 16) | ((uint32_t)payload[i + 1] << 8);
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 18) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 12) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 6) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)'=')) != PHEXT_OK) return status;
+    }
+    return PHEXT_OK;
+}
+
+/* append the full binary scroll (header line + base64) of `payload` to `out` */
+static phext_status encode_scroll_into(phext_buffer *out, const unsigned char *payload, size_t len) {
+    phext_status status = buf_append(out, (const unsigned char *)binary_scroll_prefix,
+                                     BINARY_SCROLL_PREFIX_LEN);
+    if (status != PHEXT_OK) {
+        return status;
+    }
+    return b64_encode_into(out, payload, len);
+}
+
+/* Strict base64 decode with the base64 crate's STANDARD-engine acceptance
+ * (what Rust's decode_scroll uses): the body length must be a multiple of
+ * 4, padding is required and canonical (one or two '=' at the very end),
+ * no whitespace or foreign bytes anywhere, and the unused low bits of a
+ * padded final quantum must be zero. Returns PHEXT_OK (payload appended
+ * to `out`), PHEXT_ENONE (malformed), or an allocation status. */
+static phext_status b64_decode_strict(const unsigned char *body, size_t len, phext_buffer *out) {
+    size_t pad = 0;
+    size_t data_len;
+    size_t i;
+    if (len % 4 != 0) {
+        return PHEXT_ENONE;
+    }
+    if (len >= 1 && body[len - 1] == '=') {
+        pad += 1;
+    }
+    if (len >= 2 && body[len - 2] == '=') {
+        pad += 1;
+    }
+    data_len = len - pad;
+    for (i = 0; i < data_len; i++) {
+        if (b64_value(body[i]) < 0) {
+            return PHEXT_ENONE;
+        }
+    }
+    if (pad == 1 && (b64_value(body[len - 2]) & 0x03) != 0) {
+        return PHEXT_ENONE; /* non-zero trailing bits */
+    }
+    if (pad == 2 && (b64_value(body[len - 3]) & 0x0F) != 0) {
+        return PHEXT_ENONE; /* non-zero trailing bits */
+    }
+    for (i = 0; i < len; i += 4) {
+        int v0 = b64_value(body[i]);
+        int v1 = b64_value(body[i + 1]);
+        int v2 = body[i + 2] == '=' ? 0 : b64_value(body[i + 2]);
+        int v3 = body[i + 3] == '=' ? 0 : b64_value(body[i + 3]);
+        uint32_t value = ((uint32_t)v0 << 18) | ((uint32_t)v1 << 12) |
+                         ((uint32_t)v2 << 6) | (uint32_t)v3;
+        size_t emit = (i + 4 == len) ? 3 - pad : 3;
+        phext_status status;
+        if ((status = buf_append_byte(out, (unsigned char)(value >> 16))) != PHEXT_OK) return status;
+        if (emit >= 2) {
+            if ((status = buf_append_byte(out, (unsigned char)(value >> 8))) != PHEXT_OK) return status;
+        }
+        if (emit >= 3) {
+            if ((status = buf_append_byte(out, (unsigned char)value)) != PHEXT_OK) return status;
+        }
+    }
+    return PHEXT_OK;
+}
+
+int phext_is_binary_scroll(const unsigned char *scroll, size_t len) {
+    if (len < BINARY_SCROLL_PREFIX_LEN) {
+        return 0;
+    }
+    return memcmp(scroll, binary_scroll_prefix, BINARY_SCROLL_PREFIX_LEN) == 0;
+}
+
+phext_status phext_encode_scroll(const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out) {
+    phext_buffer_reset(out);
+    return encode_scroll_into(out, payload, payload_len);
+}
+
+phext_status phext_decode_scroll(const unsigned char *scroll, size_t len,
+                                 phext_buffer *out) {
+    phext_status status;
+    phext_buffer_reset(out);
+    if (!phext_is_binary_scroll(scroll, len)) {
+        return PHEXT_ENONE;
+    }
+    status = b64_decode_strict(scroll + BINARY_SCROLL_PREFIX_LEN,
+                                len - BINARY_SCROLL_PREFIX_LEN, out);
+    if (status != PHEXT_OK) {
+        phext_buffer_reset(out);
+    }
+    return status;
+}
+
+phext_status phext_fetch_binary(const unsigned char *input, size_t len,
+                                phext_coordinate target, phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = phext_fetch(input, len, target, &scroll);
+    if (status == PHEXT_OK) {
+        int decoded = 0;
+        if (phext_is_binary_scroll(scroll.data, scroll.len)) {
+            phext_buffer_reset(out);
+            status = b64_decode_strict(scroll.data + BINARY_SCROLL_PREFIX_LEN,
+                                        scroll.len - BINARY_SCROLL_PREFIX_LEN, out);
+            if (status == PHEXT_OK) {
+                decoded = 1;
+            }
+        }
+        if (!decoded) {
+            /* plain text, a malformed binary scroll, or no scroll at all:
+             * the scroll's own bytes, verbatim (allocation failure inside
+             * the decode attempt above still wins - it is not a verdict) */
+            if (status != PHEXT_OK && status != PHEXT_ENONE) {
+                /* keep the allocation status */
+            } else {
+                status = buf_set(out, scroll.data, scroll.len);
+            }
+        }
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+phext_status phext_insert_binary(const unsigned char *input, size_t len,
+                                 phext_coordinate location,
+                                 const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = encode_scroll_into(&scroll, payload, payload_len);
+    if (status == PHEXT_OK) {
+        status = phext_insert(input, len, location, scroll.data, scroll.len, out);
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+phext_status phext_replace_binary(const unsigned char *input, size_t len,
+                                  phext_coordinate location,
+                                  const unsigned char *payload, size_t payload_len,
+                                  phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = encode_scroll_into(&scroll, payload, payload_len);
+    if (status == PHEXT_OK) {
+        status = phext_replace(input, len, location, scroll.data, scroll.len, out);
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+/* the stored form of an incoming scroll update, per the ingestion rule:
+ * valid UTF-8 stays text; anything else becomes a binary scroll holding
+ * the base64 of the exact observed bytes, verbatim */
+static phext_status stored_form(const unsigned char *payload, size_t payload_len,
+                                phext_buffer *out) {
+    phext_buffer_reset(out);
+    if (utf8_valid(payload, payload_len)) {
+        return buf_append(out, payload, payload_len);
+    }
+    return encode_scroll_into(out, payload, payload_len);
+}
+
+phext_status phext_insert_bytes(const unsigned char *input, size_t len,
+                                phext_coordinate location,
+                                const unsigned char *payload, size_t payload_len,
+                                phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = stored_form(payload, payload_len, &scroll);
+    if (status == PHEXT_OK) {
+        status = phext_insert(input, len, location, scroll.data, scroll.len, out);
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+phext_status phext_replace_bytes(const unsigned char *input, size_t len,
+                                 phext_coordinate location,
+                                 const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = stored_form(payload, payload_len, &scroll);
+    if (status == PHEXT_OK) {
+        status = phext_replace(input, len, location, scroll.data, scroll.len, out);
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+phext_status phext_phokenize_bytes(const unsigned char *input, size_t len,
+                                   phext_scrolls *out) {
+    /* Rust's phokenize_bytes is a byte-level transcription of phext.rs's
+     * phokenize - same loop, same nine structural breaks - differing only
+     * in that phokenize requires UTF-8 input and this does not. The C API
+     * is byte-oriented throughout (PARITY.md D-3), so the one C walker
+     * serves both, and the outputs coincide on every input. */
+    return phext_phokenize(input, len, out);
+}
+
+phext_status phext_ingest(const unsigned char *input, size_t len, phext_buffer *out) {
+    phext_scrolls parts;
+    phext_scrolls map;
+    phext_status status;
+    size_t i;
+    phext_scrolls_init(&parts);
+    phext_scrolls_init(&map);
+    status = phext_phokenize_bytes(input, len, &parts);
+    for (i = 0; status == PHEXT_OK && i < parts.len; i++) {
+        const phext_buffer *raw = &parts.items[i].scroll;
+        if (utf8_valid(raw->data, raw->len)) {
+            status = phext_map_insert(&map, parts.items[i].coord, raw->data, raw->len);
+        } else {
+            phext_buffer armoured;
+            phext_buffer_init(&armoured);
+            status = encode_scroll_into(&armoured, raw->data, raw->len);
+            if (status == PHEXT_OK) {
+                status = phext_map_insert(&map, parts.items[i].coord,
+                                          armoured.data, armoured.len);
+            }
+            phext_buffer_free(&armoured);
+        }
+    }
+    if (status == PHEXT_OK) {
+        status = phext_implode(&map, out);
+    }
+    phext_scrolls_free(&parts);
+    phext_scrolls_free(&map);
+    return status;
+}
+
+/* ----------------------------------------------------------------------------------------------------------
+ * the xz seal (libphext-rs 0.5.0: src/seal.rs)
+ *
+ * A standard xz stream over the document's exact bytes, encoded at
+ * preset PHEXT_SEAL_PRESET with a CRC64 check. Built only when phext.c
+ * is compiled with PHEXT_WITH_XZ and linked with -llzma (PARITY.md D-7);
+ * the unstubbed functions below are byte-identical to the Rust seal,
+ * which wraps the same liblzma.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+#ifdef PHEXT_WITH_XZ
+#include <lzma.h>
+#endif
+
+int phext_seal_compiled(void) {
+#ifdef PHEXT_WITH_XZ
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+#ifdef PHEXT_WITH_XZ
+
+phext_status phext_seal_bytes(const unsigned char *input, size_t len, phext_buffer *out) {
+    lzma_stream strm = LZMA_STREAM_INIT;
+    unsigned char chunk[65536];
+    phext_status status = PHEXT_OK;
+    phext_buffer_reset(out);
+    if (lzma_easy_encoder(&strm, PHEXT_SEAL_PRESET, LZMA_CHECK_CRC64) != LZMA_OK) {
+        return PHEXT_ENOMEM; /* the easy encoder only fails on allocation */
+    }
+    strm.next_in = input;
+    strm.avail_in = len;
+    for (;;) {
+        lzma_ret ret;
+        size_t produced;
+        strm.next_out = chunk;
+        strm.avail_out = sizeof(chunk);
+        ret = lzma_code(&strm, LZMA_FINISH);
+        produced = sizeof(chunk) - strm.avail_out;
+        if (produced > 0) {
+            status = buf_append(out, chunk, produced);
+            if (status != PHEXT_OK) {
+                break;
+            }
+        }
+        if (ret == LZMA_STREAM_END) {
+            break;
+        }
+        if (ret != LZMA_OK) {
+            status = PHEXT_EINVAL;
+            break;
+        }
+    }
+    lzma_end(&strm);
+    if (status != PHEXT_OK) {
+        phext_buffer_reset(out);
+    }
+    return status;
+}
+
+phext_status phext_unseal(const unsigned char *data, size_t len, phext_buffer *out) {
+    lzma_stream strm = LZMA_STREAM_INIT;
+    unsigned char chunk[65536];
+    phext_status status = PHEXT_OK;
+    phext_buffer_reset(out);
+    if (lzma_stream_decoder(&strm, UINT64_MAX, 0) != LZMA_OK) {
+        return PHEXT_ENOMEM; /* the decoder only fails init on allocation */
+    }
+    strm.next_in = data;
+    strm.avail_in = len;
+    for (;;) {
+        lzma_ret ret;
+        size_t produced;
+        strm.next_out = chunk;
+        strm.avail_out = sizeof(chunk);
+        ret = lzma_code(&strm, LZMA_FINISH);
+        produced = sizeof(chunk) - strm.avail_out;
+        if (produced > 0 && status == PHEXT_OK) {
+            status = buf_append(out, chunk, produced);
+        }
+        if (ret == LZMA_STREAM_END) {
+            break;
+        }
+        if (ret != LZMA_OK) {
+            status = PHEXT_EINVAL;
+            break;
+        }
+        if (produced == 0 && strm.avail_in == 0) {
+            status = PHEXT_EINVAL; /* input exhausted before the stream end */
+            break;
+        }
+    }
+    if (status == PHEXT_OK && strm.avail_in != 0) {
+        /* trailing bytes after the stream end - Rust's decoder errors on
+         * them too, zero padding included */
+        status = PHEXT_EINVAL;
+    }
+    lzma_end(&strm);
+    if (status != PHEXT_OK) {
+        phext_buffer_reset(out);
+    }
+    return status;
+}
+
+phext_status phext_unseal_string(const unsigned char *data, size_t len, phext_buffer *out) {
+    phext_status status = phext_unseal(data, len, out);
+    if (status == PHEXT_OK && !utf8_valid(out->data, out->len)) {
+        phext_buffer_reset(out);
+        return PHEXT_EINVAL; /* Rust: InvalidData from String::from_utf8 */
+    }
+    return status;
+}
+
+#else /* !PHEXT_WITH_XZ */
+
+phext_status phext_seal_bytes(const unsigned char *input, size_t len, phext_buffer *out) {
+    (void)input;
+    (void)len;
+    phext_buffer_reset(out);
+    return PHEXT_ENOSEAL;
+}
+
+phext_status phext_unseal(const unsigned char *data, size_t len, phext_buffer *out) {
+    (void)data;
+    (void)len;
+    phext_buffer_reset(out);
+    return PHEXT_ENOSEAL;
+}
+
+phext_status phext_unseal_string(const unsigned char *data, size_t len, phext_buffer *out) {
+    (void)data;
+    (void)len;
+    phext_buffer_reset(out);
+    return PHEXT_ENOSEAL;
+}
+
+#endif /* PHEXT_WITH_XZ */
+
+/* Rust: seal - the same function as seal_bytes on the text's bytes */
+phext_status phext_seal(const unsigned char *input, size_t len, phext_buffer *out) {
+    return phext_seal_bytes(input, len, out);
+}
 /* ----------------------------------------------------------------------------------------------------------
  * phext.h - Phext Buffer Library for C
  *
- * The C counterpart of libphext-rs (v0.4.1), the reference implementation of
+ * The C counterpart of libphext-rs (v0.5.0), the reference implementation of
  * phext in Rust. Every public capability of the Rust crate has a counterpart
  * here; the full mapping, including the handful of places where C idiom
  * forces a different shape (never different defined behaviour), lives in
  * PARITY.md and in the phext/ directory notes.
+ *
+ * The 0.5.0 additions are the binary-scroll module (canonical base64
+ * armouring for non-text payloads, plus the byte-oriented update entry
+ * points that apply the ingestion rule) and the xz seal. In Rust both
+ * modules are cargo features (`binary`, `xz`); the mapping to C is:
+ *   - binary scrolls are always available here: the C implementation is
+ *     self-contained (its own base64), so there is no dependency to gate;
+ *   - the seal needs liblzma, so it is a build-time option: compile
+ *     phext.c with PHEXT_WITH_XZ defined and link -llzma to enable it.
+ *     Without it, the seal functions return PHEXT_ENOSEAL and
+ *     phext_seal_compiled() returns 0.
+ * See PARITY.md, divergence D-7.
  *
  * Copyright: (c) 2024-2026 Will Bickford (Phext, Inc.)
  * License: MIT
@@ -701609,6 +702201,16 @@ extern "C" {
 #define PHEXT_ADDRESS_MACRO_BREAK ((unsigned char)'/') /* delimiter for macro-coordinates */
 #define PHEXT_ADDRESS_MACRO_ALT   ((unsigned char)';') /* also allowed, for url encoding */
 
+/* libphext-rs 0.5.0 additions: the binary-scroll header line (binary.rs
+ * BINARY_SCROLL_HEADER) and the seal preset (seal.rs SEAL_PRESET). A binary
+ * scroll's content is this line, a single 0x0A, then the RFC 4648 base64
+ * body (padding required, no line wrapping); an empty payload is the
+ * header line alone. */
+#define PHEXT_BINARY_SCROLL_HEADER "phext-binary:1:base64"
+#define PHEXT_SEAL_PRESET 6 /* the xz preset the seal encodes with; an encoder
+                               choice, not a format requirement - unsealing
+                               accepts any valid xz stream */
+
 /* ----------------------------------------------------------------------------------------------------------
  * status codes (Rust: Result<_, PhextParseError> and panics, mapped to codes)
  * ---------------------------------------------------------------------------------------------------------- */
@@ -701616,8 +702218,16 @@ typedef enum phext_status {
     PHEXT_OK = 0,      /* success */
     PHEXT_ENOMEM,      /* an allocation failed; outputs are left empty */
     PHEXT_EFORMAT,     /* address does not have the 3x3 segment shape (Rust: Err(PhextParseError)) */
-    PHEXT_ENUMBER      /* address component is not a number, or overflows size_t
-                          (Rust: the strict parser PANICS here via expect(); C returns this) */
+    PHEXT_ENUMBER,     /* address component is not a number, or overflows size_t
+                          (Rust 0.4.1: the strict parser PANICS here via expect(); C returns this.
+                           Rust 0.5.0 returns Err there too - see PARITY.md D-2) */
+    PHEXT_ENONE,       /* Rust: an Option-returning function returned None
+                          (phext_decode_scroll on a non-binary or malformed scroll) */
+    PHEXT_EINVAL,      /* Rust: an io::Error from the seal module - the data is
+                          not a valid xz stream, has trailing bytes after the
+                          stream end, or (unseal_string) is not valid UTF-8 */
+    PHEXT_ENOSEAL      /* the seal functions were called in a build without
+                          seal support (phext.c compiled without PHEXT_WITH_XZ) */
 } phext_status;
 
 /* The exact Display text of Rust's PhextParseError. */
@@ -701909,6 +702519,118 @@ phext_status phext_index(const unsigned char *input, size_t len, phext_buffer *o
  * last scroll before it; 0 when no scroll comes at or before it. */
 phext_status phext_offset(const unsigned char *input, size_t len,
                           phext_coordinate coord, size_t *out_offset);
+
+/* ----------------------------------------------------------------------------------------------------------
+ * binary scrolls (libphext-rs 0.5.0: binary.rs, cargo feature `binary`)
+ *
+ * A binary scroll stores arbitrary bytes as text: the header line
+ * PHEXT_BINARY_SCROLL_HEADER, one line break, then the payload in
+ * RFC 4648 base64 (standard alphabet, padding required, no wrapping).
+ * A scroll whose content begins with that header line IS a binary scroll
+ * by definition; a prefix-matching scroll whose body is not strict
+ * base64 is a malformed binary scroll.
+ *
+ * The ingestion rule (canonical, all ports): when non-UTF-8 data is
+ * observed in an incoming scroll update, it is encoded with base64
+ * verbatim. The byte-oriented entry points below never fail on non-UTF-8
+ * payload data: valid UTF-8 is stored as ordinary text, anything else as
+ * a binary scroll holding the base64 of the exact observed bytes, so the
+ * matching fetch returns the original bytes exactly.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+/* Rust: is_binary_scroll - true when the scroll carries the binary
+ * header line (content begins with the header + line break). Decoding
+ * success is a separate question - see phext_decode_scroll. */
+int phext_is_binary_scroll(const unsigned char *scroll, size_t len);
+/* Rust: encode_scroll - header line + base64 of the payload. */
+phext_status phext_encode_scroll(const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out);
+/* Rust: decode_scroll - the payload of a binary scroll. Returns
+ * PHEXT_ENONE when the scroll is not a binary scroll or its body is not
+ * strict base64 (Rust: None); PHEXT_OK and the payload otherwise. The
+ * strictness is the base64 crate's STANDARD engine: canonical padding
+ * required, no whitespace, non-zero trailing bits rejected. */
+phext_status phext_decode_scroll(const unsigned char *scroll, size_t len,
+                                 phext_buffer *out);
+/* Rust: fetch_binary - the bytes held at `target`. A well-formed binary
+ * scroll decodes to its payload; any other scroll - plain text, a
+ * malformed binary scroll, or no scroll at all - yields the scroll's
+ * own bytes (empty when the coordinate is unoccupied). Total: fails
+ * only on allocation failure. */
+phext_status phext_fetch_binary(const unsigned char *input, size_t len,
+                                phext_coordinate target, phext_buffer *out);
+/* Rust: insert_binary / replace_binary - store the payload at the
+ * location as a binary scroll, unconditionally (even when the payload
+ * happens to be valid UTF-8). Same document-edit shapes as
+ * phext_insert / phext_replace. */
+phext_status phext_insert_binary(const unsigned char *input, size_t len,
+                                 phext_coordinate location,
+                                 const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out);
+phext_status phext_replace_binary(const unsigned char *input, size_t len,
+                                  phext_coordinate location,
+                                  const unsigned char *payload, size_t payload_len,
+                                  phext_buffer *out);
+/* Rust: insert_bytes / replace_bytes - the byte-oriented updates: the
+ * payload is stored under the ingestion rule (UTF-8 as text, non-UTF-8
+ * as a base64-verbatim binary scroll). */
+phext_status phext_insert_bytes(const unsigned char *input, size_t len,
+                                phext_coordinate location,
+                                const unsigned char *payload, size_t payload_len,
+                                phext_buffer *out);
+phext_status phext_replace_bytes(const unsigned char *input, size_t len,
+                                 phext_coordinate location,
+                                 const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out);
+/* Rust: phokenize_bytes - the byte-level twin of phokenize: each
+ * scroll's coordinate and raw bytes, segmentation identical to
+ * phext_phokenize. In Rust the two functions differ because phokenize
+ * requires valid UTF-8 input; this C API is byte-oriented throughout
+ * (PARITY.md D-3), so the outputs coincide on every input. */
+phext_status phext_phokenize_bytes(const unsigned char *input, size_t len,
+                                   phext_scrolls *out);
+/* Rust: ingest - ingest an externally supplied phext byte stream:
+ * every scroll is observed as raw bytes; valid UTF-8 scrolls pass
+ * through verbatim, any other scroll is stored as a binary scroll
+ * holding the base64 of its exact bytes, so phext_fetch_binary at its
+ * coordinate returns the original bytes. The result is the canonical
+ * serialization (implode of the exploded map). Never fails on content;
+ * only on allocation failure. */
+phext_status phext_ingest(const unsigned char *input, size_t len, phext_buffer *out);
+
+/* ----------------------------------------------------------------------------------------------------------
+ * the xz seal (libphext-rs 0.5.0: seal.rs, cargo feature `xz`)
+ *
+ * Compression is a seal, not a working format: a finished phext may be
+ * sealed - xz-compressed as a whole - and unsealing restores the exact
+ * original bytes. The seal is a standard xz stream (liblzma) at preset
+ * PHEXT_SEAL_PRESET with a CRC64 check; unsealing accepts any valid xz
+ * stream, but the stream must be the WHOLE input - trailing bytes after
+ * the stream end (even zero padding) are an error, exactly as in Rust.
+ *
+ * Build-time option (PARITY.md D-7): available only when phext.c was
+ * compiled with PHEXT_WITH_XZ defined and linked with -llzma;
+ * phext_seal_compiled() reports which build this is. Without it, the
+ * four functions return PHEXT_ENOSEAL.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+/* C idiom support: 1 when this build of the library has seal support
+ * (PHEXT_WITH_XZ), 0 otherwise. */
+int phext_seal_compiled(void);
+/* Rust: seal_bytes - xz-seal raw bytes. (Rust's seal(&str) is the same
+ * function on the text's bytes; this byte-oriented API serves both.) */
+phext_status phext_seal_bytes(const unsigned char *input, size_t len, phext_buffer *out);
+/* Rust: seal - as phext_seal_bytes; the two Rust entry points differ
+ * only in input type (&str vs &[u8]), which C does not distinguish. */
+phext_status phext_seal(const unsigned char *input, size_t len, phext_buffer *out);
+/* Rust: unseal - restore the exact bytes a seal was made from.
+ * PHEXT_EINVAL when the input is not a valid xz stream or has any
+ * trailing bytes; PHEXT_ENOSEAL in a build without seal support. */
+phext_status phext_unseal(const unsigned char *data, size_t len, phext_buffer *out);
+/* Rust: unseal_string - unseal, then require valid UTF-8 (for content
+ * that may carry non-UTF-8 scrolls, use phext_unseal + phext_ingest).
+ * PHEXT_EINVAL when the unsealed bytes are not valid UTF-8. */
+phext_status phext_unseal_string(const unsigned char *data, size_t len, phext_buffer *out);
 
 #ifdef __cplusplus
 }
