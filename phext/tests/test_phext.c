@@ -1,10 +1,13 @@
 /* ----------------------------------------------------------------------------------------------------------
  * test_phext.c - conformance tests for the C phext library
  *
- * A port of libphext-rs v0.4.1's own test suites - src/test_lib.rs,
- * src/test_phokenize.rs, src/regressions.rs - with the same vectors and
- * the same expected values. Test names match the Rust names so a failure
- * here points at the same case there.
+ * A port of libphext-rs's own test suites - src/test_lib.rs,
+ * src/test_phokenize.rs, src/regressions.rs (v0.4.1), plus
+ * src/test_binary.rs and src/test_seal.rs (v0.5.0) - with the same
+ * vectors and the same expected values. Test names match the Rust names
+ * so a failure here points at the same case there. The seal tests run
+ * only in the PHEXT_WITH_XZ build (make test-xz); the plain build runs
+ * test_seal_not_compiled instead.
  *
  * Adaptations (no behavioural difference):
  *   - Rust HashMap iteration order is unspecified; the three-scroll
@@ -1787,6 +1790,484 @@ static void helios_stalled_parse(void) {
     phext_buffer_free(&replaced);
 }
 
+/* ----------------------------------------------------------------------------------------------------------
+ * src/test_binary.rs (libphext-rs 0.5.0) - same vectors, same names
+ * ---------------------------------------------------------------------------------------------------------- */
+
+static void test_encode_decode_round_trip(void) {
+    phext_buffer scroll, back;
+    size_t i;
+    TEST("test_encode_decode_round_trip");
+    phext_buffer_init(&scroll);
+    phext_buffer_init(&back);
+
+    /* empty payload: header line alone */
+    CHECK(phext_encode_scroll(LIT(""), &scroll) == PHEXT_OK);
+    CHECK_BUF(&scroll, "phext-binary:1:base64\n");
+    CHECK(phext_decode_scroll(scroll.data, scroll.len, &back) == PHEXT_OK);
+    CHECK(back.len == 0);
+
+    /* every byte value */
+    {
+        unsigned char all[256];
+        for (i = 0; i < 256; i++) {
+            all[i] = (unsigned char)i;
+        }
+        CHECK(phext_encode_scroll(all, sizeof(all), &scroll) == PHEXT_OK);
+        CHECK(phext_is_binary_scroll(scroll.data, scroll.len));
+        CHECK(phext_decode_scroll(scroll.data, scroll.len, &back) == PHEXT_OK);
+        CHECK_MEM(&back, all);
+    }
+
+    /* a plainly non-UTF-8 sequence */
+    {
+        static const unsigned char foreign[] = { 0xFF, 0xFE, 0x80, 0x00, 0x61, 0xC3, 0x28 };
+        CHECK(phext_encode_scroll(foreign, sizeof(foreign), &scroll) == PHEXT_OK);
+        CHECK(phext_decode_scroll(scroll.data, scroll.len, &back) == PHEXT_OK);
+        CHECK_MEM(&back, foreign);
+    }
+
+    /* >= 1 MiB payload, deterministic pattern covering all byte values */
+    {
+        size_t big_len = 1024 * 1024 + 13;
+        unsigned char *big = (unsigned char *)malloc(big_len);
+        CHECK(big != NULL);
+        for (i = 0; i < big_len; i++) {
+            big[i] = (unsigned char)(i % 256);
+        }
+        CHECK(phext_encode_scroll(big, big_len, &scroll) == PHEXT_OK);
+        CHECK(phext_decode_scroll(scroll.data, scroll.len, &back) == PHEXT_OK);
+        CHECK(back.len == big_len && memcmp(back.data, big, big_len) == 0);
+        free(big);
+    }
+
+    phext_buffer_free(&scroll);
+    phext_buffer_free(&back);
+}
+
+static void test_decode_scroll_rejects_non_binary(void) {
+    phext_buffer back;
+    TEST("test_decode_scroll_rejects_non_binary");
+    phext_buffer_init(&back);
+    CHECK(phext_decode_scroll(LIT("just some text"), &back) == PHEXT_ENONE);
+    CHECK(phext_decode_scroll(LIT(""), &back) == PHEXT_ENONE);
+    /* header must be a complete line: no line break, no binary scroll */
+    CHECK(phext_decode_scroll(LIT("phext-binary:1:base64"), &back) == PHEXT_ENONE);
+    CHECK(!phext_is_binary_scroll(LIT("phext-binary:1:base64")));
+    /* malformed base64 body: recognisably binary, undecodable */
+    CHECK(phext_is_binary_scroll(LIT("phext-binary:1:base64\n!!! not base64 !!!")));
+    CHECK(phext_decode_scroll(LIT("phext-binary:1:base64\n!!! not base64 !!!"), &back) == PHEXT_ENONE);
+    phext_buffer_free(&back);
+}
+
+static void test_insert_and_fetch_binary(void) {
+    static const unsigned char payload[] = { 0x00, 0x01, 0x02, 0xFE, 0xFF, 0x7F, 0x80 };
+    phext_buffer doc, got, decoded, next;
+    TEST("test_insert_and_fetch_binary");
+    phext_buffer_init(&doc);
+    phext_buffer_init(&got);
+    phext_buffer_init(&decoded);
+    phext_buffer_init(&next);
+    CHECK(phext_insert(LIT(""), C("1.1.1/1.1.1/1.1.1"), LIT("plain text scroll"), &doc) == PHEXT_OK);
+    /* chained edits build into a scratch buffer and swap, as everywhere
+     * in this suite (outputs are reset on entry; in == out unsupported) */
+    CHECK(phext_insert_binary(doc.data, doc.len, C("1.1.1/1.1.1/1.1.2"),
+                              payload, sizeof(payload), &next) == PHEXT_OK);
+    buf_swap(&doc, &next);
+    /* the text scroll next door is untouched */
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK_BUF(&got, "plain text scroll");
+    /* the binary scroll fetches back byte-identical */
+    CHECK(phext_fetch_binary(doc.data, doc.len, C("1.1.1/1.1.1/1.1.2"), &got) == PHEXT_OK);
+    CHECK_MEM(&got, payload);
+    /* and its stored form is the canonical binary scroll */
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.2"), &got) == PHEXT_OK);
+    CHECK(phext_is_binary_scroll(got.data, got.len));
+    CHECK(phext_decode_scroll(got.data, got.len, &decoded) == PHEXT_OK);
+    CHECK_MEM(&decoded, payload);
+    phext_buffer_free(&doc);
+    phext_buffer_free(&got);
+    phext_buffer_free(&decoded);
+    phext_buffer_free(&next);
+}
+
+static void test_fetch_binary_fallbacks(void) {
+    phext_buffer doc, got;
+    TEST("test_fetch_binary_fallbacks");
+    phext_buffer_init(&doc);
+    phext_buffer_init(&got);
+    CHECK(phext_insert(LIT(""), C("1.1.1/1.1.1/1.1.1"), LIT("hello"), &doc) == PHEXT_OK);
+    /* a plain text scroll yields its own UTF-8 bytes */
+    CHECK(phext_fetch_binary(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK_BUF(&got, "hello");
+    /* an unoccupied coordinate yields no bytes */
+    CHECK(phext_fetch_binary(doc.data, doc.len, C("9.9.9/9.9.9/9.9.9"), &got) == PHEXT_OK);
+    CHECK(got.len == 0);
+    /* a malformed binary scroll yields its own bytes verbatim */
+    CHECK(phext_insert(LIT(""), C("1.1.1/1.1.1/1.1.1"),
+                       LIT("phext-binary:1:base64\n!!!"), &doc) == PHEXT_OK);
+    CHECK(phext_fetch_binary(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK_BUF(&got, "phext-binary:1:base64\n!!!");
+    phext_buffer_free(&doc);
+    phext_buffer_free(&got);
+}
+
+static void test_update_rule_non_utf8_is_base64_verbatim(void) {
+    /* payload deliberately includes dimension-break bytes (0x17, 0x1C):
+     * armoured as base64, they round-trip as content, not structure */
+    static const unsigned char payload[] = { 0xFF, 0x17, 0x1C, 0x80, 0x00 };
+    phext_buffer doc, got;
+    TEST("test_update_rule_non_utf8_is_base64_verbatim");
+    phext_buffer_init(&doc);
+    phext_buffer_init(&got);
+    CHECK(phext_replace_bytes(LIT(""), C("1.1.1/1.1.1/1.1.1"),
+                              payload, sizeof(payload), &doc) == PHEXT_OK);
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK(phext_is_binary_scroll(got.data, got.len));
+    CHECK(phext_fetch_binary(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK_MEM(&got, payload);
+    /* same rule through the insert entry point */
+    CHECK(phext_insert_bytes(LIT(""), C("1.1.1/1.1.1/1.1.1"),
+                             payload, sizeof(payload), &doc) == PHEXT_OK);
+    CHECK(phext_fetch_binary(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK_MEM(&got, payload);
+    phext_buffer_free(&doc);
+    phext_buffer_free(&got);
+}
+
+static void test_update_rule_utf8_stays_text(void) {
+    /* "ordinary text" + U+2713 CHECK MARK (E2 9C 93) */
+    static const unsigned char text[] = "ordinary text \xE2\x9C\x93";
+    phext_buffer doc, got;
+    TEST("test_update_rule_utf8_stays_text");
+    phext_buffer_init(&doc);
+    phext_buffer_init(&got);
+    CHECK(phext_replace_bytes(LIT(""), C("1.1.1/1.1.1/1.1.1"),
+                              text, sizeof(text) - 1, &doc) == PHEXT_OK);
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK(buf_eq(&got, text, sizeof(text) - 1));
+    CHECK(!phext_is_binary_scroll(got.data, got.len));
+    CHECK(phext_fetch_binary(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK(buf_eq(&got, text, sizeof(text) - 1));
+    phext_buffer_free(&doc);
+    phext_buffer_free(&got);
+}
+
+static void test_ingest_foreign_byte_stream(void) {
+    /* a phext byte stream whose second scroll is not valid UTF-8 */
+    static const unsigned char stream[] =
+        { 'h', 'e', 'l', 'l', 'o', 0x17, 0xFF, 0xFE, 0x41, 0x80 };
+    static const unsigned char foreign[] = { 0xFF, 0xFE, 0x41, 0x80 };
+    phext_buffer doc, got;
+    TEST("test_ingest_foreign_byte_stream");
+    phext_buffer_init(&doc);
+    phext_buffer_init(&got);
+    CHECK(phext_ingest(stream, sizeof(stream), &doc) == PHEXT_OK);
+    /* text scroll passes through verbatim */
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK_BUF(&got, "hello");
+    /* foreign scroll: stored as a binary scroll, reads back as the original bytes */
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.2"), &got) == PHEXT_OK);
+    CHECK(phext_is_binary_scroll(got.data, got.len));
+    CHECK(phext_fetch_binary(doc.data, doc.len, C("1.1.1/1.1.1/1.1.2"), &got) == PHEXT_OK);
+    CHECK_MEM(&got, foreign);
+    phext_buffer_free(&doc);
+    phext_buffer_free(&got);
+}
+
+static void test_ingest_canonical_phext_is_identity(void) {
+    phext_buffer doc, back, next;
+    TEST("test_ingest_canonical_phext_is_identity");
+    phext_buffer_init(&doc);
+    phext_buffer_init(&back);
+    phext_buffer_init(&next);
+    CHECK(phext_insert(LIT(""), C("1.1.1/1.1.1/1.1.1"), LIT("first"), &doc) == PHEXT_OK);
+    CHECK(phext_insert(doc.data, doc.len, C("1.1.1/1.1.1/1.1.2"),
+                       LIT("second \xE2\x9C\x93 scroll"), &next) == PHEXT_OK);
+    buf_swap(&doc, &next);
+    CHECK(phext_insert(doc.data, doc.len, C("2.1.1/1.3.1/1.1.1"), LIT("far away"), &next) == PHEXT_OK);
+    buf_swap(&doc, &next);
+    /* the scrolls themselves are what Rust built (guard against a
+     * self-consistent corruption cancelling out of the identity check) */
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &back) == PHEXT_OK);
+    CHECK_BUF(&back, "first");
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.2"), &back) == PHEXT_OK);
+    CHECK_BUF(&back, "second \xE2\x9C\x93 scroll");
+    CHECK(phext_fetch(doc.data, doc.len, C("2.1.1/1.3.1/1.1.1"), &back) == PHEXT_OK);
+    CHECK_BUF(&back, "far away");
+    CHECK(phext_ingest(doc.data, doc.len, &back) == PHEXT_OK);
+    CHECK(back.len == doc.len && memcmp(back.data, doc.data, doc.len) == 0);
+    phext_buffer_free(&doc);
+    phext_buffer_free(&back);
+    phext_buffer_free(&next);
+}
+
+static void test_ingest_empty_and_break_only_streams(void) {
+    static const unsigned char breaks[] = { 0x17, 0x18 }; /* SCROLL_BREAK, SECTION_BREAK */
+    phext_buffer doc, got;
+    TEST("test_ingest_empty_and_break_only_streams");
+    phext_buffer_init(&doc);
+    phext_buffer_init(&got);
+    CHECK(phext_ingest(LIT(""), &doc) == PHEXT_OK);
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK_BUF(&got, "");
+    CHECK(phext_ingest(breaks, sizeof(breaks), &doc) == PHEXT_OK);
+    CHECK(phext_fetch(doc.data, doc.len, C("1.1.1/1.1.1/1.1.1"), &got) == PHEXT_OK);
+    CHECK_BUF(&got, "");
+    phext_buffer_free(&doc);
+    phext_buffer_free(&got);
+}
+
+static void test_phokenize_bytes_matches_phokenize(void) {
+    static const unsigned char doc[] = "alpha\x17" "beta\x18" "gamma";
+    phext_scrolls text_parts, byte_parts;
+    size_t i;
+    TEST("test_phokenize_bytes_matches_phokenize");
+    phext_scrolls_init(&text_parts);
+    phext_scrolls_init(&byte_parts);
+    CHECK(phext_phokenize(doc, sizeof(doc) - 1, &text_parts) == PHEXT_OK);
+    CHECK(phext_phokenize_bytes(doc, sizeof(doc) - 1, &byte_parts) == PHEXT_OK);
+    CHECK(text_parts.len == byte_parts.len);
+    for (i = 0; i < text_parts.len && i < byte_parts.len; i++) {
+        CHECK(phext_coordinate_compare(text_parts.items[i].coord, byte_parts.items[i].coord) == 0);
+        CHECK(buf_eq(&byte_parts.items[i].scroll,
+                     text_parts.items[i].scroll.data, text_parts.items[i].scroll.len));
+    }
+    phext_scrolls_free(&text_parts);
+    phext_scrolls_free(&byte_parts);
+}
+
+/* C-side addition: the strict base64 acceptance table of the base64
+ * crate's STANDARD engine, probed against the published Rust 0.5.0
+ * library (decode_scroll over "phext-binary:1:base64\n" + body) */
+static void test_base64_strictness(void) {
+    static const unsigned char want_f[] = { 0x66 };
+    static const unsigned char want_fo[] = { 0x66, 0x6F };
+    static const unsigned char want_foo[] = { 0x66, 0x6F, 0x6F };
+    static const unsigned char want_000[] = { 0x00, 0x00, 0x00 };
+    static const unsigned char want_00[] = { 0x00, 0x00 };
+    static const unsigned char want_0[] = { 0x00 };
+    static const struct {
+        const char *body; int ok; const unsigned char *want; size_t want_len;
+    } cases[] = {
+        { "Zg==",     1, want_f,   sizeof(want_f) },
+        { "Zm8=",     1, want_fo,  sizeof(want_fo) },
+        { "Zm9v",     1, want_foo, sizeof(want_foo) },
+        { "AAAA",     1, want_000, sizeof(want_000) },
+        { "AAA=",     1, want_00,  sizeof(want_00) },
+        { "AA==",     1, want_0,   sizeof(want_0) },
+        { "",         1, want_0,   0 },
+        { "Zh==",     0, NULL, 0 }, /* non-zero trailing bits */
+        { "Zm9=",     0, NULL, 0 }, /* non-zero trailing bits */
+        { "Zg",       0, NULL, 0 }, /* padding required */
+        { "Zg=",      0, NULL, 0 },
+        { "Zm9vYg",   0, NULL, 0 },
+        { "Zm9vYg=",  0, NULL, 0 },
+        { "AAE",      0, NULL, 0 },
+        { "AA",       0, NULL, 0 },
+        { "Zg==AAAA", 0, NULL, 0 }, /* data after padding */
+        { "Zg==Zg==", 0, NULL, 0 },
+        { "====",     0, NULL, 0 },
+        { "Z===",     0, NULL, 0 },
+        { "####",     0, NULL, 0 }, /* foreign alphabet */
+        { "Zm9 Yg==", 0, NULL, 0 }, /* whitespace is not skipped */
+        { "Zm9vYg== ", 0, NULL, 0 }, /* length not a multiple of 4 */
+    };
+    phext_buffer scroll, back;
+    size_t i;
+    TEST("test_base64_strictness");
+    phext_buffer_init(&scroll);
+    phext_buffer_init(&back);
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        phext_status status;
+        phext_buffer_reset(&scroll);
+        tappend(&scroll, LIT("phext-binary:1:base64\n"));
+        tappend(&scroll, (const unsigned char *)cases[i].body, strlen(cases[i].body));
+        status = phext_decode_scroll(scroll.data, scroll.len, &back);
+        if (cases[i].ok) {
+            CHECK(status == PHEXT_OK);
+            CHECK(buf_eq(&back, cases[i].want, cases[i].want_len));
+        } else {
+            CHECK(status == PHEXT_ENONE);
+        }
+    }
+    phext_buffer_free(&scroll);
+    phext_buffer_free(&back);
+}
+
+/* C-side addition (0.5.0 core): the lenient parser's digit accumulation
+ * saturates at u64::MAX instead of wrapping (0.4.1 wrapped, and the C
+ * port wrapped with it). Found by the differential fuzz (op 21) against
+ * the published 0.5.0 library; see PARITY.md D-2. */
+static void test_lenient_parse_saturates_at_u64_max(void) {
+    phext_coordinate c;
+    phext_buffer s;
+    TEST("test_lenient_parse_saturates_at_u64_max");
+    phext_buffer_init(&s);
+    c = phext_to_coordinate("18446744073709551616.1.1/1.1.1/1.1.1"); /* 2^64 */
+    CHECK(c.z.library == (size_t)18446744073709551615ULL);
+    c = phext_to_coordinate("99999999999999999999999.1.1/1.1.1/1.1.1");
+    CHECK(c.z.library == (size_t)18446744073709551615ULL);
+    /* exactly u64::MAX still parses exactly */
+    c = phext_to_coordinate("18446744073709551615.1.1/1.1.1/1.1.1");
+    CHECK(c.z.library == (size_t)18446744073709551615ULL);
+    phext_coordinate_to_string(c, &s);
+    CHECK_BUF(&s, "18446744073709551615.1.1/1.1.1/1.1.1");
+    phext_buffer_free(&s);
+}
+
+/* ----------------------------------------------------------------------------------------------------------
+ * src/test_seal.rs (libphext-rs 0.5.0) - same vectors, same names, plus
+ * the trailing-data verdicts probed against the published library.
+ * The Rust corpus test reads ../unit-test.phext, which the published
+ * .crate package does not ship; the C port seals the helios regression
+ * fixture instead - the same role (a real, multi-scroll phext).
+ * ---------------------------------------------------------------------------------------------------------- */
+
+#ifdef PHEXT_WITH_XZ
+
+static void test_seal_round_trip_real_phext(void) {
+    char path[1024];
+    phext_buffer corpus, sealed, restored;
+    static const unsigned char xz_magic[] = { 0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00 };
+    TEST("test_seal_round_trip_real_phext");
+    phext_buffer_init(&corpus);
+    phext_buffer_init(&sealed);
+    phext_buffer_init(&restored);
+    sprintf(path, "%s/regression-1-helios.phext", g_fixture_dir);
+    CHECK(phext_seal_compiled() == 1);
+    CHECK(read_file(path, &corpus));
+    CHECK(corpus.len > 0);
+    CHECK(phext_seal(corpus.data, corpus.len, &sealed) == PHEXT_OK);
+    CHECK(sealed.len > 0);
+    CHECK(sealed.len >= sizeof(xz_magic) && memcmp(sealed.data, xz_magic, sizeof(xz_magic)) == 0);
+    CHECK(phext_unseal_string(sealed.data, sealed.len, &restored) == PHEXT_OK);
+    CHECK(restored.len == corpus.len && memcmp(restored.data, corpus.data, corpus.len) == 0);
+    phext_buffer_free(&corpus);
+    phext_buffer_free(&sealed);
+    phext_buffer_free(&restored);
+}
+
+static void test_seal_round_trip_empty_and_small(void) {
+    phext_buffer sealed, back;
+    TEST("test_seal_round_trip_empty_and_small");
+    phext_buffer_init(&sealed);
+    phext_buffer_init(&back);
+    CHECK(phext_seal(LIT(""), &sealed) == PHEXT_OK);
+    CHECK(phext_unseal_string(sealed.data, sealed.len, &back) == PHEXT_OK);
+    CHECK_BUF(&back, "");
+    CHECK(phext_seal(LIT("hello phext"), &sealed) == PHEXT_OK);
+    CHECK(phext_unseal(sealed.data, sealed.len, &back) == PHEXT_OK);
+    CHECK_BUF(&back, "hello phext");
+    phext_buffer_free(&sealed);
+    phext_buffer_free(&back);
+}
+
+static void test_seal_carrying_binary_scrolls(void) {
+    static const unsigned char doc[] =
+        "cover text\x17" "phext-binary:1:base64\nAAEC/f7/fw==\x17" "after";
+    phext_buffer sealed, restored;
+    TEST("test_seal_carrying_binary_scrolls");
+    phext_buffer_init(&sealed);
+    phext_buffer_init(&restored);
+    CHECK(phext_seal(doc, sizeof(doc) - 1, &sealed) == PHEXT_OK);
+    CHECK(phext_unseal_string(sealed.data, sealed.len, &restored) == PHEXT_OK);
+    CHECK(buf_eq(&restored, doc, sizeof(doc) - 1));
+    phext_buffer_free(&sealed);
+    phext_buffer_free(&restored);
+}
+
+static void test_seal_is_deterministic(void) {
+    static const unsigned char doc[] =
+        "the same phext, sealed twice\x17" "the same phext, sealed twice";
+    phext_buffer first, second;
+    TEST("test_seal_is_deterministic");
+    phext_buffer_init(&first);
+    phext_buffer_init(&second);
+    CHECK(phext_seal(doc, sizeof(doc) - 1, &first) == PHEXT_OK);
+    CHECK(phext_seal(doc, sizeof(doc) - 1, &second) == PHEXT_OK);
+    CHECK(first.len == second.len && memcmp(first.data, second.data, first.len) == 0);
+    phext_buffer_free(&first);
+    phext_buffer_free(&second);
+}
+
+static void test_unseal_rejects_non_xz_data(void) {
+    phext_buffer back;
+    TEST("test_unseal_rejects_non_xz_data");
+    phext_buffer_init(&back);
+    CHECK(phext_unseal(LIT("this is not an xz stream"), &back) == PHEXT_EINVAL);
+    CHECK(phext_unseal(LIT(""), &back) == PHEXT_EINVAL);
+    CHECK(phext_unseal_string(LIT("phext, but unsealed"), &back) == PHEXT_EINVAL);
+    phext_buffer_free(&back);
+}
+
+/* C-side addition: the Rust decoder errors on ANY bytes after the
+ * stream end - probed against the published library (trailing junk,
+ * trailing zero padding, a second concatenated stream, truncation) */
+static void test_unseal_rejects_trailing_data(void) {
+    phext_buffer sealed, back;
+    TEST("test_unseal_rejects_trailing_data");
+    phext_buffer_init(&sealed);
+    phext_buffer_init(&back);
+    CHECK(phext_seal(LIT("hello phext"), &sealed) == PHEXT_OK);
+    /* trailing junk */
+    tappend(&sealed, LIT("junk"));
+    CHECK(phext_unseal(sealed.data, sealed.len, &back) == PHEXT_EINVAL);
+    /* trailing zero padding */
+    CHECK(phext_seal(LIT("hello phext"), &sealed) == PHEXT_OK);
+    {
+        static const unsigned char zeros[] = { 0, 0, 0, 0 };
+        tappend(&sealed, zeros, sizeof(zeros));
+    }
+    CHECK(phext_unseal(sealed.data, sealed.len, &back) == PHEXT_EINVAL);
+    /* a second concatenated stream */
+    CHECK(phext_seal(LIT("hello phext"), &sealed) == PHEXT_OK);
+    {
+        phext_buffer again;
+        phext_buffer_init(&again);
+        CHECK(phext_seal(LIT("hello phext"), &again) == PHEXT_OK);
+        tappend(&sealed, again.data, again.len);
+        phext_buffer_free(&again);
+    }
+    CHECK(phext_unseal(sealed.data, sealed.len, &back) == PHEXT_EINVAL);
+    /* truncated stream */
+    CHECK(phext_seal(LIT("hello phext"), &sealed) == PHEXT_OK);
+    CHECK(sealed.len > 10);
+    CHECK(phext_unseal(sealed.data, sealed.len - 10, &back) == PHEXT_EINVAL);
+    phext_buffer_free(&sealed);
+    phext_buffer_free(&back);
+}
+
+static void test_unseal_string_rejects_non_utf8(void) {
+    static const unsigned char raw[] = { 0xFF, 0x00, 0xFE };
+    phext_buffer sealed, back;
+    TEST("test_unseal_string_rejects_non_utf8");
+    phext_buffer_init(&sealed);
+    phext_buffer_init(&back);
+    CHECK(phext_seal_bytes(raw, sizeof(raw), &sealed) == PHEXT_OK);
+    CHECK(phext_unseal(sealed.data, sealed.len, &back) == PHEXT_OK);
+    CHECK_MEM(&back, raw);
+    CHECK(phext_unseal_string(sealed.data, sealed.len, &back) == PHEXT_EINVAL);
+    phext_buffer_free(&sealed);
+    phext_buffer_free(&back);
+}
+
+#else /* !PHEXT_WITH_XZ */
+
+static void test_seal_not_compiled(void) {
+    phext_buffer back;
+    TEST("test_seal_not_compiled");
+    phext_buffer_init(&back);
+    CHECK(phext_seal_compiled() == 0);
+    CHECK(phext_seal_bytes(LIT("hello phext"), &back) == PHEXT_ENOSEAL);
+    CHECK(phext_seal(LIT("hello phext"), &back) == PHEXT_ENOSEAL);
+    CHECK(phext_unseal(LIT("hello phext"), &back) == PHEXT_ENOSEAL);
+    CHECK(phext_unseal_string(LIT("hello phext"), &back) == PHEXT_ENOSEAL);
+    phext_buffer_free(&back);
+}
+
+#endif /* PHEXT_WITH_XZ */
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         g_fixture_dir = argv[1];
@@ -1847,6 +2328,33 @@ int main(int argc, char **argv) {
 
     /* regressions.rs */
     helios_stalled_parse();
+
+    /* test_binary.rs (0.5.0) */
+    test_encode_decode_round_trip();
+    test_decode_scroll_rejects_non_binary();
+    test_insert_and_fetch_binary();
+    test_fetch_binary_fallbacks();
+    test_update_rule_non_utf8_is_base64_verbatim();
+    test_update_rule_utf8_stays_text();
+    test_ingest_foreign_byte_stream();
+    test_ingest_canonical_phext_is_identity();
+    test_ingest_empty_and_break_only_streams();
+    test_phokenize_bytes_matches_phokenize();
+    test_base64_strictness();
+    test_lenient_parse_saturates_at_u64_max();
+
+    /* test_seal.rs (0.5.0) */
+#ifdef PHEXT_WITH_XZ
+    test_seal_round_trip_real_phext();
+    test_seal_round_trip_empty_and_small();
+    test_seal_carrying_binary_scrolls();
+    test_seal_is_deterministic();
+    test_unseal_rejects_non_xz_data();
+    test_unseal_rejects_trailing_data();
+    test_unseal_string_rejects_non_utf8();
+#else
+    test_seal_not_compiled();
+#endif
 
     printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures != 0;

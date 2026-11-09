@@ -3,11 +3,16 @@
 Task 41.10.7/11.11.14/11.10.15 — Will: "make sure phcc has every capability
 libphext-rs has, so developers can quickly handle phext data."
 
-**Reference:** libphext-rs **v0.4.1**, read from source at
-`~/workspace/libphext-provable/libphext-rs` (`src/phext.rs`, 1377 lines;
+**Reference:** libphext-rs **v0.5.0**, the published crates.io package
+(the `.crate` artefact, SHA-256
+`c8f8df75a786bc56bc7261e068e26cfa089341a26feb7d0c2a299ef2a6b4da8c`,
+matching the crates.io index checksum), read from the extracted package
+source: `src/phext.rs` (1404 lines), `src/binary.rs`, `src/seal.rs`,
 `src/lib.rs`; tests in `src/test_lib.rs`, `src/test_phokenize.rs`,
-`src/regressions.rs`). Every row below was derived from that source, not
-from memory of older versions.
+`src/regressions.rs`, `src/test_binary.rs`, `src/test_seal.rs`. Every
+row below was derived from that source, not from memory of older
+versions. (The 0.4.1 audit read a local checkout; 0.5.0 is audited
+against the canonical release artefact Will published.)
 
 **Established 0.4.x facts (verified in the source):** coordinate components
 are 1-based (`COORDINATE_MINIMUM = 1`); there is **no upper bound** — the
@@ -28,7 +33,9 @@ Rust idioms do not all have C spellings; the mappings used throughout:
 | `&str` / `&[u8]` input | `const unsigned char *` + `size_t` length. Embedded NUL bytes are ordinary bytes, exactly as in Rust. Phext scrolls are text; the C API is byte-oriented and never validates UTF-8 (Rust `&str` inputs are valid UTF-8 by construction; Rust *panics* when an edit would produce invalid UTF-8 — C cannot panic, so it does not check. Divergence D-3 below.) |
 | `Vec<PositionedScroll>` | `phext_scrolls`: a growable array of `phext_positioned_scroll { phext_coordinate coord; phext_buffer scroll; }`, iterated by index. Rust iterators map to index loops / the array itself. |
 | `HashMap<Coordinate, String>` | `phext_scrolls` kept **sorted by coordinate** (`phext_map_get`, `phext_map_insert` provided). Divergence D-4: Rust's map is unordered; the C map's order is defined, and `implode` output is byte-identical either way because Rust's `implode` sorts before serializing. |
-| `Result<T, PhextParseError>` | `phext_status` return code: `PHEXT_OK`, `PHEXT_EFORMAT` (wrong segment counts), `PHEXT_ENUMBER` (non-numeric / overflowing component — Rust **panics** there via `.expect()`; C returns an error instead. Divergence D-2), `PHEXT_ENOMEM`. |
+| `Result<T, PhextParseError>` | `phext_status` return code: `PHEXT_OK`, `PHEXT_EFORMAT` (wrong segment counts), `PHEXT_ENUMBER` (non-numeric / overflowing component), `PHEXT_ENOMEM`. Rust 0.4.1 **panicked** on the ENUMBER cases via `.expect()`; the merged parse-never-panics fix (in-tree 0.4.2) and 0.5.0 return `Err` there too — C keeps the two-way split where Rust has the one error value (D-2). |
+| `Option<Vec<u8>>` (0.5.0 `decode_scroll`) | `phext_status`: `PHEXT_OK` + payload, or `PHEXT_ENONE` for Rust's `None`. |
+| `io::Result<Vec<u8>>` (0.5.0 seal module) | `phext_status`: `PHEXT_OK`, `PHEXT_EINVAL` (invalid / trailing-data / truncated stream; `unseal_string` non-UTF-8), `PHEXT_ENOSEAL` (seal not compiled into this build). Divergence D-8. |
 | Panics (`expect`, indexing) | Never in C. Every failure is a status code. |
 | `fmt::Display` | `phext_*_display` functions: unconditional formatting, byte-identical output to Rust's `Display` impls. Kept distinct from `to_string` where Rust keeps them distinct (see Coordinate row). |
 | `#[derive(Hash)]` | `phext_coordinate_hash` (FNV-1a over the 9 components) — a C-side utility for building hash tables. **Not** value-compatible with Rust: Rust's `Hash` output via `DefaultHasher` (SipHash) is explicitly not a stable or portable value, and no libphext test pins one. Counterpart by idiom, not by value. |
@@ -49,7 +56,7 @@ order, so comparison is lexicographic by
 library → shelf → series → collection → volume → book → chapter → section → scroll.
 `phext_coordinate_compare` implements exactly this.
 
-## 1. Constants — 26 of 26 have counterparts
+## 1. Constants — 28 of 28 have counterparts
 
 | libphext-rs | Value | C counterpart |
 |---|---|---|
@@ -69,6 +76,8 @@ library → shelf → series → collection → volume → book → chapter → 
 | `ADDRESS_MICRO_BREAK` | `'.'` | `PHEXT_ADDRESS_MICRO_BREAK` |
 | `ADDRESS_MACRO_BREAK` | `'/'` | `PHEXT_ADDRESS_MACRO_BREAK` |
 | `ADDRESS_MACRO_ALT` | `';'` | `PHEXT_ADDRESS_MACRO_ALT` |
+| `BINARY_SCROLL_HEADER` (0.5.0, `binary`) | `"phext-binary:1:base64"` | `PHEXT_BINARY_SCROLL_HEADER` |
+| `SEAL_PRESET` (0.5.0, `seal`) | 6 | `PHEXT_SEAL_PRESET` |
 
 ## 2. Types — 7 of 7 have counterparts
 
@@ -92,8 +101,8 @@ library → shelf → series → collection → volume → book → chapter → 
 | `to_string()` | `phext_coordinate_to_string()` | Returns **empty** for an invalid coordinate (Rust checks validity first). |
 | `Display` impl | `phext_coordinate_display()` | Formats unconditionally — differs from `to_string` for invalid coordinates, exactly as in Rust. |
 | `to_urlencoded()` | `phext_coordinate_to_urlencoded()` | `;` macro separators; empty if invalid. |
-| `TryFrom<&str>` | `phext_coordinate_parse()` | Strict: exactly 3 macro parts × 3 micro parts, else `PHEXT_EFORMAT`. Non-numeric or `usize`-overflowing components: Rust panics (`.expect()`); C returns `PHEXT_ENUMBER` (D-2). |
-| `to_coordinate()` (free fn) | `phext_to_coordinate()` | The *lenient* parser, ported literally: separators `.` `/` `;` assign components in order, extra separators ignored, missing components stay 1, **0 components are preserved** (and then fail validation), digit accumulation in `uint64_t` wraps on overflow (Rust: `u64` wrapping in release; debug panics — C matches release. D-6). |
+| `TryFrom<&str>` | `phext_coordinate_parse()` | Strict: exactly 3 macro parts × 3 micro parts, else `PHEXT_EFORMAT`. Non-numeric or `usize`-overflowing components: `PHEXT_ENUMBER`. Rust 0.4.1 panicked there (`.expect()`); 0.5.0 returns `Err` — the remaining difference is only that C splits the error in two where Rust has one error value (D-2). |
+| `to_coordinate()` (free fn) | `phext_to_coordinate()` | The *lenient* parser, ported literally: separators `.` `/` `;` assign components in order, extra separators ignored, missing components stay 1, **0 components are preserved** (and then fail validation), digit accumulation in `uint64_t` **saturates** at `u64::MAX` on overflow — 0.5.0 switched Rust to `saturating_mul`/`saturating_add` (0.4.1 wrapped in release, panicked in debug); C saturates identically in all build modes (D-6, resolved). |
 | `scroll_break()` | `phext_coordinate_scroll_break()` | scroll += 1. |
 | `section_break()` | `phext_coordinate_section_break()` | section += 1, scroll = 1. |
 | `chapter_break()` | `phext_coordinate_chapter_break()` | chapter += 1, section/section reset. |
@@ -148,21 +157,60 @@ Private Rust helpers with no public counterpart in either language
 `index_phokens`, `apply_break`, `dephokenize`, `append_scroll`,
 `validate_dimension_index`.
 
-## 5. Divergences (complete list)
+## 5. Binary scrolls (0.5.0, module `binary`, cargo feature `binary`) — 10 of 10 have counterparts
 
-- **D-2 — strict parse errors:** Rust `TryFrom` *panics* on a non-numeric
-  or overflowing component (`.expect("Library missing")` etc.) and only
-  returns `Err` for wrong segment counts. C never panics:
-  `phext_coordinate_parse` returns `PHEXT_EFORMAT` / `PHEXT_ENUMBER`.
-  Defined behaviour (segment counts, valid parses) is identical.
-  **RESOLVED (2026-11-07):** libphext-rs PR #8 (parse-never-panics)
-  merged — the Rust strict parse now returns `Err(PhextParseError)` on
-  malformed components instead of panicking (in-tree libphext-rs 0.4.2;
-  merged, not published to crates.io). The C library's
-  `PHEXT_EFORMAT`/`PHEXT_ENUMBER` behaviour now agrees with the
-  reference exactly, and the differential fuzz's op-20 (strict-parse)
-  divergence class is closed. The paragraph above stands as the
-  historical record of the divergence as found against 0.4.1.
+The canonical binary scroll format: a scroll whose content is the header
+line `phext-binary:1:base64`, one line break, then the payload in
+RFC 4648 base64 (standard alphabet, padding required, no line wrapping)
+carries binary payload; an empty payload is the header line alone. The
+ingestion rule (Will, canonical for all ports): *when non-UTF-8 data is
+observed in an incoming scroll update, it is encoded with base64
+verbatim.*
+
+| libphext-rs | C counterpart | Behaviour notes |
+|---|---|---|
+| `is_binary_scroll` | `phext_is_binary_scroll()` | Prefix test: content begins with the header + line break. A bare header without the break is **not** a binary scroll. Returns `int` (Rust `bool`). |
+| `encode_scroll` | `phext_encode_scroll()` | Header line + base64 of the payload. |
+| `decode_scroll` | `phext_decode_scroll()` | `PHEXT_OK` + payload, else `PHEXT_ENONE` (Rust `None`): not a binary scroll, or body not strict base64. Strictness is the `base64` crate's STANDARD engine, probed against the published library on 22 verdict cases: length a multiple of 4, canonical padding (1–2 `=` at the very end), no whitespace or foreign bytes, non-zero trailing bits in a padded quantum rejected (`Zh==`, `Zm9=` → None). |
+| `fetch_binary` | `phext_fetch_binary()` | Total: a well-formed binary scroll decodes; **any** other scroll — plain text, a malformed binary scroll, an unoccupied coordinate — yields the scroll's own bytes verbatim (empty when unoccupied). Fails only on allocation failure. |
+| `insert_binary` | `phext_insert_binary()` | Stores the payload as a binary scroll unconditionally (even valid-UTF-8 payloads). |
+| `replace_binary` | `phext_replace_binary()` | Same, via `replace`. |
+| `insert_bytes` | `phext_insert_bytes()` | The ingestion rule: valid-UTF-8 payloads are stored as ordinary text; anything else as a binary scroll holding the base64 of the exact bytes. |
+| `replace_bytes` | `phext_replace_bytes()` | Same, via `replace`. |
+| `phokenize_bytes` | `phext_phokenize_bytes()` | Rust's function is a byte-level transcription of `phokenize`'s loop (same nine structural breaks), differing only in that `phokenize` requires UTF-8 input. The C API is byte-oriented throughout (D-3), so the one C walker serves both and the outputs coincide on every input; the differential fuzz (op 32) verifies the equivalence against Rust on arbitrary byte streams. |
+| `ingest` | `phext_ingest()` | Byte-stream ingestion: phokenize as bytes; each valid-UTF-8 scroll passes through verbatim, each other scroll is stored as a binary scroll of its exact bytes; result is the canonical serialization (`implode` of the exploded map, duplicates resolved last-wins by document order, as in Rust). Never fails on content. |
+
+## 6. The xz seal (0.5.0, module `seal`, cargo feature `xz`) — 4 of 4 have counterparts
+
+Compression is a seal, not a working format: `seal` xz-compresses a
+finished document as a whole (liblzma via the `xz2` crate, preset
+`SEAL_PRESET` = 6, CRC64 check); `unseal` restores the exact original
+bytes. Available in C when built with `PHEXT_WITH_XZ` (D-7).
+
+| libphext-rs | C counterpart | Behaviour notes |
+|---|---|---|
+| `seal` | `phext_seal()` | On the text's bytes; identical to `seal_bytes` — the two Rust entry points differ only in input type (`&str` vs `&[u8]`), which the byte-oriented C API does not distinguish. Byte-identical output to Rust (both wrap the same liblzma; verified on payloads from 0 B to 5 MiB and on this repo's own `phcc.phext`). |
+| `seal_bytes` | `phext_seal_bytes()` | The one implementation serving both Rust rows (the `phext_insert` owned-`String` precedent). |
+| `unseal` | `phext_unseal()` | Accepts any valid xz stream (any preset/check — the repo's own `phcc.phext.xz`, sealed at preset 9-extreme by the refresh tooling, unseals byte-identically). The stream must be the **whole** input: Rust errors on any trailing bytes after the stream end (junk, zero padding, a second concatenated stream — all probed), on truncation, and on non-xz data; C returns `PHEXT_EINVAL` for each (D-8). |
+| `unseal_string` | `phext_unseal_string()` | `unseal` + UTF-8 validation; non-UTF-8 content → `PHEXT_EINVAL` (Rust: `InvalidData`). For content that may carry non-UTF-8 scrolls, use `phext_unseal` + `phext_ingest`. |
+
+## 7. Divergences (complete list)
+
+- **D-2 — strict parse errors:** As found against 0.4.1, Rust `TryFrom`
+  *panicked* on a non-numeric or overflowing component
+  (`.expect("Library missing")` etc.) and only returned `Err` for wrong
+  segment counts, while C returned `PHEXT_EFORMAT` / `PHEXT_ENUMBER`.
+  **RESOLVED in two steps:** libphext-rs PR #8 (parse-never-panics,
+  merged 2026-11-07; in-tree 0.4.2) made the strict parse return
+  `Err(PhextParseError)` on malformed components, and the published
+  **0.5.0 carries that behaviour** — verified against the release
+  artefact: the 0.5.0 differential fuzz's op-20 class shows **zero**
+  Rust panics (0.4.1 showed 173 + 166 across the two seeds). What
+  remains is a spelling difference, not a behavioural one: Rust has
+  the single `PhextParseError` value for every strict-parse failure,
+  while C splits it into `PHEXT_EFORMAT` (segment shape) and
+  `PHEXT_ENUMBER` (component not a number / overflows). Every input's
+  accept/reject verdict is identical.
 - **D-3 — UTF-8:** Rust functions take `&str` and `expect` valid UTF-8
   results. The C API is byte-oriented and imposes no UTF-8 requirement.
   On all inputs that are valid UTF-8, results are byte-identical.
@@ -198,14 +246,45 @@ Private Rust helpers with no public counterpart in either language
   shorter than 4 bytes; C prints what exists. Identical whenever Rust
   returns normally.
 - **D-6 — lenient parse overflow:** `to_coordinate` accumulates into a
-  `u64`; Rust release builds wrap, debug builds panic. C wraps (release
-  semantics). Only reachable with >19-digit components.
+  `u64`. In 0.4.1 Rust release builds wrapped (debug panicked) and C
+  wrapped with them. **RESOLVED (0.5.0):** Rust switched the
+  accumulation to `saturating_mul`/`saturating_add` — an over-long
+  component now saturates at `u64::MAX` — and the C port saturates
+  identically (PATCHES.md F45). Found by the 0.5.0 differential fuzz:
+  the 20,000-case regression corpus showed exactly 40 divergences, all
+  op-21 components above `u64::MAX`; after the fix, 0. Saturating
+  arithmetic does not panic in debug builds either, so C now matches
+  both Rust build profiles. Only reachable with >19-digit components.
+- **D-7 — feature gating (0.5.0):** Rust gates `binary` and `xz`
+  behind opt-in cargo features (`default = []`) because they pull
+  dependencies (`base64`, `xz2`). Cargo features have no C analogue;
+  the honest mapping is: the `binary` module is compiled into the C
+  library **unconditionally** — its base64 is self-contained in
+  `phext.c`, so there is no dependency to gate — while the seal
+  genuinely needs liblzma and maps to the build-time option
+  **`PHEXT_WITH_XZ`** (compile `phext.c` with `-DPHEXT_WITH_XZ`, link
+  `-llzma`). In a build without it, the four seal functions return
+  `PHEXT_ENOSEAL` and `phext_seal_compiled()` returns 0 (a C-idiom
+  support predicate; not a capability row). Capability parity is
+  claimed for the all-features-on configuration — the configuration
+  the Rust reference driver is built with — with this gating
+  difference recorded rather than papered over.
+- **D-8 — seal error surface (0.5.0):** Rust's seal functions return
+  `io::Result`, whose error is an opaque `io::Error`; the API does not
+  enumerate kinds. C maps the observable cases: not-a-stream,
+  truncated, and any-trailing-bytes inputs, and `unseal_string`'s
+  non-UTF-8 result, all → `PHEXT_EINVAL`; seal-called-in-a-no-seal
+  build → `PHEXT_ENOSEAL` (which has no Rust analogue at all — a
+  no-feature Rust build has no seal symbols; see D-7). Accept/reject
+  verdicts are identical; only the error vocabulary differs, as with
+  D-2.
 
-No capability is missing. **77 capability rows: 26 constants, 7 types,
-17 Coordinate-surface items (incl. sub-coordinate Display impls), 27 free
-functions — 77 with C counterparts, 0 without.**
+No capability is missing. **93 capability rows: 28 constants, 7 types,
+17 Coordinate-surface items (incl. sub-coordinate Display impls), 27
+core free functions, 10 binary functions, 4 seal functions — 93 with
+C counterparts, 0 without.**
 
-## 6. What phcc already had, and how the library relates
+## 8. What phcc already had, and how the library relates
 
 phcc's pre-existing phext surface (from the 2024 seed commits, rebased in
 Slice 0; PATCHES.md R-series) is *preprocessor awareness*, not a library:
@@ -227,7 +306,7 @@ the compiler's own position tracking and the developer library share one
 representation. That is a compiler change, separate from this parity work,
 and wants its own slice and its own PATCHES.md entry when Will directs it.
 
-## 7. Conformance plan (Phase C)
+## 9. Conformance plan (Phase C)
 
 - Port every Rust test: `test_lib.rs` (49 tests), `test_phokenize.rs`
   (8 tests), `regressions.rs` (1 test, fixtures copied) → C harness in
@@ -247,7 +326,7 @@ Implemented as planned: **77 capabilities audited, 77 with C counterparts,
 C spelling under the mapping above. Divergences D-2…D-6 stand as recorded
 (D-1 was an audit-stage note, resolved during implementation;
 D-2 was resolved upstream on 2026-11-07, and D-4 was superseded the
-same day by F4 — see §5 for both).
+same day by F4 — see §7 for both).
 
 Conformance, all on aletheia-core:
 
@@ -266,3 +345,60 @@ Conformance, all on aletheia-core:
 Follow-on named, not done: wiring the tcc preprocessor's phext counters
 (tcc.h/tccpp.c) to this library (F3-candidate). The counters stay as they
 are; the library is independent.
+
+## Outcome — 0.5.0 (2026-11-08, PATCHES.md F45)
+
+The 0.5.0 delta was 16 capabilities — the whole `binary` module (2
+constants' worth of format + 10 functions) and the whole `seal` module
+(1 constant + 4 functions) — plus one core behaviour change found by
+re-audit: the lenient parser's saturating accumulation (D-6). The C
+library now stands at **93 capabilities audited, 93 with counterparts,
+0 gaps**; divergences D-7/D-8 record the feature-gating mapping and the
+seal error vocabulary, and D-2's remaining content is the EFORMAT/
+ENUMBER spelling split. The F3 follow-on named above has since landed
+(the preprocessor's counters are wired to the library); F4's hash index
+is the only other post-0.4.1 change, and the 0.5.0 work sits on top of
+both unchanged.
+
+One Rust-side packaging note from the audit: `test_seal.rs` reads
+`../unit-test.phext` via `include_str!`, but the published `.crate`
+package does not ship that file, so the crate's own seal corpus test
+cannot build from the package alone. The C port seals the helios
+regression fixture in the same role (a real, multi-scroll phext from
+this repo's own test corpus).
+
+Conformance, all on rock-mountain, base phcc `f65e68cc` (the D9 tip
+`611b763e` plus the h8 receipt-port commit, which landed after this
+wave's clone and was fast-forwarded to before work began):
+
+- The ported suite, extended with `test_binary.rs` (9 tests),
+  `test_seal.rs` (5 tests), a 22-case base64 strictness table, the
+  trailing-data unseal verdicts, and the saturation test:
+  **163,955 checks, 0 failures under gcc** (plain build) and
+  **163,987 checks, 0 failures under gcc with `PHEXT_WITH_XZ`**;
+  **163,955 / 163,987, 0 failures under phcc itself** (the tree's
+  freshly built `tcc`, both variants — the dogfood receipt). The
+  plain build's lower count is the seal tests replaced by the
+  `PHEXT_ENOSEAL` stub test (D-7).
+- Differential fuzz vs a Rust reference driver built against the
+  **published 0.5.0 package** (features `binary` + `xz`): the 0.4.1
+  regression corpus (20,000 cases, ops 0–23) shows **0 divergences and
+  0 Rust panics** — the op-20 panic class is gone in 0.5.0, as D-2
+  records — after the saturation fix (40 op-21 divergences before it).
+  The new corpus (40,000 cases, ops 24–38: binary payloads incl.
+  random non-UTF-8 through `ingest`/`fetch_binary` round-trips,
+  malformed-header mutations, empty payloads, seal/unseal
+  cross-checks in both directions) shows **0 divergences, 0 panics**.
+- Seal cross-checks against this repo's own artefacts: C `unseal` of
+  the shipped `phcc.phext.xz` reproduces `phcc.phext` byte-identically;
+  C `seal` is byte-identical to the Rust library's seal (and to
+  Python `lzma` preset 6 / CRC64). The shipped repo seal itself is
+  produced by the refresh tooling at preset 9-extreme (`xz -9e`) — a
+  different encoder setting for the same stream format; it unseals
+  identically in Rust, C, and Python, and is not the library seal's
+  business to match byte-for-byte.
+- Tree receipts on the final tree: `make test` **ALL TESTS PASSED**;
+  conformance spot **332/333** (diverge set exactly `[a_pp_018]`, 0
+  oracle splits); static gate cells **3/3** (static hello + repaired
+  IRELATIVE bounds, static Lua byte-identical, static phccbox awk
+  prints 42).

@@ -1,7 +1,8 @@
 /* ----------------------------------------------------------------------------------------------------------
  * phext.c - Phext Buffer Library for C
  *
- * A literal port of libphext-rs v0.4.1 (src/phext.rs), the reference
+ * A literal port of libphext-rs v0.5.0 (src/phext.rs, plus the 0.5.0
+ * binary.rs and seal.rs sections at the end of this file), the reference
  * implementation of phext in Rust. Function by function, the algorithms
  * below follow the Rust source - including its quirks - so that defined
  * behaviour is byte-identical. The mapping and the divergences (all of
@@ -601,7 +602,8 @@ static int parse_usize_segment(const char *text, size_t len, size_t *out) {
         }
         digit = (unsigned)(text[i] - '0');
         if (value > (((size_t)-1) - digit) / 10) {
-            return 0; /* overflow: Rust's parse fails and TryFrom panics */
+            return 0; /* overflow: Rust's parse fails; 0.5.0's TryFrom
+                       * returns Err (0.4.1 panicked via expect()) */
         }
         value = value * 10 + digit;
     }
@@ -698,7 +700,15 @@ phext_coordinate phext_to_coordinate(const char *address) {
             value = 0;
         }
         if (byte >= 0x30 && byte <= 0x39) {
-            value = exp * value + (uint64_t)(byte - 0x30);
+            /* Rust 0.5.0: exp.saturating_mul(value).saturating_add(digit) -
+             * an over-long component saturates at u64::MAX (0.4.1 wrapped,
+             * and the C port wrapped with it; see PARITY.md D-2) */
+            uint64_t digit = (uint64_t)(byte - 0x30);
+            if (value > (UINT64_MAX - digit) / exp) {
+                value = UINT64_MAX;
+            } else {
+                value = exp * value + digit;
+            }
             if (index == 0) {
                 index = 1;
             }
@@ -2028,4 +2038,499 @@ phext_status phext_offset(const unsigned char *input, size_t len,
     phext_scrolls_free(&indexed);
     *out_offset = result;
     return PHEXT_OK;
+}
+
+/* ----------------------------------------------------------------------------------------------------------
+ * binary scrolls (libphext-rs 0.5.0: src/binary.rs)
+ *
+ * The canonical binary scroll format: the header line
+ * "phext-binary:1:base64", one line break, then the payload in RFC 4648
+ * base64 (standard alphabet, padding required, no line wrapping). An
+ * empty payload is the header line alone.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+/* the header line plus its line break: the prefix of every binary scroll */
+static const char binary_scroll_prefix[] = PHEXT_BINARY_SCROLL_HEADER "\n";
+#define BINARY_SCROLL_PREFIX_LEN (sizeof(binary_scroll_prefix) - 1)
+
+/* strict UTF-8 validation with exactly Rust str::from_utf8's acceptance:
+ * no stray continuation bytes, no overlong forms, no surrogates,
+ * nothing above U+10FFFF, no truncated sequences */
+static int utf8_cont(unsigned char byte) {
+    return (byte & 0xC0) == 0x80;
+}
+
+static int utf8_valid(const unsigned char *bytes, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        unsigned char byte = bytes[i];
+        if (byte < 0x80) {
+            i += 1;
+        } else if (byte < 0xC2) {
+            return 0; /* continuation byte, or overlong 0xC0 / 0xC1 */
+        } else if (byte < 0xE0) {
+            if (i + 1 >= len || !utf8_cont(bytes[i + 1])) {
+                return 0;
+            }
+            i += 2;
+        } else if (byte < 0xF0) {
+            unsigned char lo = 0x80, hi = 0xBF;
+            if (byte == 0xE0) {
+                lo = 0xA0; /* overlong guard */
+            }
+            if (byte == 0xED) {
+                hi = 0x9F; /* surrogate guard */
+            }
+            if (i + 2 >= len || bytes[i + 1] < lo || bytes[i + 1] > hi ||
+                !utf8_cont(bytes[i + 2])) {
+                return 0;
+            }
+            i += 3;
+        } else if (byte < 0xF5) {
+            unsigned char lo = 0x80, hi = 0xBF;
+            if (byte == 0xF0) {
+                lo = 0x90; /* overlong guard */
+            }
+            if (byte == 0xF4) {
+                hi = 0x8F; /* U+10FFFF ceiling */
+            }
+            if (i + 3 >= len || bytes[i + 1] < lo || bytes[i + 1] > hi ||
+                !utf8_cont(bytes[i + 2]) || !utf8_cont(bytes[i + 3])) {
+                return 0;
+            }
+            i += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static const char b64_alphabet[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int b64_value(unsigned char byte) {
+    if (byte >= 'A' && byte <= 'Z') {
+        return byte - 'A';
+    }
+    if (byte >= 'a' && byte <= 'z') {
+        return byte - 'a' + 26;
+    }
+    if (byte >= '0' && byte <= '9') {
+        return byte - '0' + 52;
+    }
+    if (byte == '+') {
+        return 62;
+    }
+    if (byte == '/') {
+        return 63;
+    }
+    return -1;
+}
+
+/* append the base64 of `payload` (no header) to `out` */
+static phext_status b64_encode_into(phext_buffer *out, const unsigned char *payload, size_t len) {
+    phext_status status;
+    size_t i;
+    for (i = 0; i + 3 <= len; i += 3) {
+        uint32_t value = ((uint32_t)payload[i] << 16) |
+                         ((uint32_t)payload[i + 1] << 8) |
+                         (uint32_t)payload[i + 2];
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 18) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 12) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 6) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[value & 63])) != PHEXT_OK) return status;
+    }
+    if (len - i == 1) {
+        uint32_t value = (uint32_t)payload[i] << 16;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 18) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 12) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)'=')) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)'=')) != PHEXT_OK) return status;
+    } else if (len - i == 2) {
+        uint32_t value = ((uint32_t)payload[i] << 16) | ((uint32_t)payload[i + 1] << 8);
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 18) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 12) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)b64_alphabet[(value >> 6) & 63])) != PHEXT_OK) return status;
+        if ((status = buf_append_byte(out, (unsigned char)'=')) != PHEXT_OK) return status;
+    }
+    return PHEXT_OK;
+}
+
+/* append the full binary scroll (header line + base64) of `payload` to `out` */
+static phext_status encode_scroll_into(phext_buffer *out, const unsigned char *payload, size_t len) {
+    phext_status status = buf_append(out, (const unsigned char *)binary_scroll_prefix,
+                                     BINARY_SCROLL_PREFIX_LEN);
+    if (status != PHEXT_OK) {
+        return status;
+    }
+    return b64_encode_into(out, payload, len);
+}
+
+/* Strict base64 decode with the base64 crate's STANDARD-engine acceptance
+ * (what Rust's decode_scroll uses): the body length must be a multiple of
+ * 4, padding is required and canonical (one or two '=' at the very end),
+ * no whitespace or foreign bytes anywhere, and the unused low bits of a
+ * padded final quantum must be zero. Returns PHEXT_OK (payload appended
+ * to `out`), PHEXT_ENONE (malformed), or an allocation status. */
+static phext_status b64_decode_strict(const unsigned char *body, size_t len, phext_buffer *out) {
+    size_t pad = 0;
+    size_t data_len;
+    size_t i;
+    if (len % 4 != 0) {
+        return PHEXT_ENONE;
+    }
+    if (len >= 1 && body[len - 1] == '=') {
+        pad += 1;
+    }
+    if (len >= 2 && body[len - 2] == '=') {
+        pad += 1;
+    }
+    data_len = len - pad;
+    for (i = 0; i < data_len; i++) {
+        if (b64_value(body[i]) < 0) {
+            return PHEXT_ENONE;
+        }
+    }
+    if (pad == 1 && (b64_value(body[len - 2]) & 0x03) != 0) {
+        return PHEXT_ENONE; /* non-zero trailing bits */
+    }
+    if (pad == 2 && (b64_value(body[len - 3]) & 0x0F) != 0) {
+        return PHEXT_ENONE; /* non-zero trailing bits */
+    }
+    for (i = 0; i < len; i += 4) {
+        int v0 = b64_value(body[i]);
+        int v1 = b64_value(body[i + 1]);
+        int v2 = body[i + 2] == '=' ? 0 : b64_value(body[i + 2]);
+        int v3 = body[i + 3] == '=' ? 0 : b64_value(body[i + 3]);
+        uint32_t value = ((uint32_t)v0 << 18) | ((uint32_t)v1 << 12) |
+                         ((uint32_t)v2 << 6) | (uint32_t)v3;
+        size_t emit = (i + 4 == len) ? 3 - pad : 3;
+        phext_status status;
+        if ((status = buf_append_byte(out, (unsigned char)(value >> 16))) != PHEXT_OK) return status;
+        if (emit >= 2) {
+            if ((status = buf_append_byte(out, (unsigned char)(value >> 8))) != PHEXT_OK) return status;
+        }
+        if (emit >= 3) {
+            if ((status = buf_append_byte(out, (unsigned char)value)) != PHEXT_OK) return status;
+        }
+    }
+    return PHEXT_OK;
+}
+
+int phext_is_binary_scroll(const unsigned char *scroll, size_t len) {
+    if (len < BINARY_SCROLL_PREFIX_LEN) {
+        return 0;
+    }
+    return memcmp(scroll, binary_scroll_prefix, BINARY_SCROLL_PREFIX_LEN) == 0;
+}
+
+phext_status phext_encode_scroll(const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out) {
+    phext_buffer_reset(out);
+    return encode_scroll_into(out, payload, payload_len);
+}
+
+phext_status phext_decode_scroll(const unsigned char *scroll, size_t len,
+                                 phext_buffer *out) {
+    phext_status status;
+    phext_buffer_reset(out);
+    if (!phext_is_binary_scroll(scroll, len)) {
+        return PHEXT_ENONE;
+    }
+    status = b64_decode_strict(scroll + BINARY_SCROLL_PREFIX_LEN,
+                                len - BINARY_SCROLL_PREFIX_LEN, out);
+    if (status != PHEXT_OK) {
+        phext_buffer_reset(out);
+    }
+    return status;
+}
+
+phext_status phext_fetch_binary(const unsigned char *input, size_t len,
+                                phext_coordinate target, phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = phext_fetch(input, len, target, &scroll);
+    if (status == PHEXT_OK) {
+        int decoded = 0;
+        if (phext_is_binary_scroll(scroll.data, scroll.len)) {
+            phext_buffer_reset(out);
+            status = b64_decode_strict(scroll.data + BINARY_SCROLL_PREFIX_LEN,
+                                        scroll.len - BINARY_SCROLL_PREFIX_LEN, out);
+            if (status == PHEXT_OK) {
+                decoded = 1;
+            }
+        }
+        if (!decoded) {
+            /* plain text, a malformed binary scroll, or no scroll at all:
+             * the scroll's own bytes, verbatim (allocation failure inside
+             * the decode attempt above still wins - it is not a verdict) */
+            if (status != PHEXT_OK && status != PHEXT_ENONE) {
+                /* keep the allocation status */
+            } else {
+                status = buf_set(out, scroll.data, scroll.len);
+            }
+        }
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+phext_status phext_insert_binary(const unsigned char *input, size_t len,
+                                 phext_coordinate location,
+                                 const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = encode_scroll_into(&scroll, payload, payload_len);
+    if (status == PHEXT_OK) {
+        status = phext_insert(input, len, location, scroll.data, scroll.len, out);
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+phext_status phext_replace_binary(const unsigned char *input, size_t len,
+                                  phext_coordinate location,
+                                  const unsigned char *payload, size_t payload_len,
+                                  phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = encode_scroll_into(&scroll, payload, payload_len);
+    if (status == PHEXT_OK) {
+        status = phext_replace(input, len, location, scroll.data, scroll.len, out);
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+/* the stored form of an incoming scroll update, per the ingestion rule:
+ * valid UTF-8 stays text; anything else becomes a binary scroll holding
+ * the base64 of the exact observed bytes, verbatim */
+static phext_status stored_form(const unsigned char *payload, size_t payload_len,
+                                phext_buffer *out) {
+    phext_buffer_reset(out);
+    if (utf8_valid(payload, payload_len)) {
+        return buf_append(out, payload, payload_len);
+    }
+    return encode_scroll_into(out, payload, payload_len);
+}
+
+phext_status phext_insert_bytes(const unsigned char *input, size_t len,
+                                phext_coordinate location,
+                                const unsigned char *payload, size_t payload_len,
+                                phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = stored_form(payload, payload_len, &scroll);
+    if (status == PHEXT_OK) {
+        status = phext_insert(input, len, location, scroll.data, scroll.len, out);
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+phext_status phext_replace_bytes(const unsigned char *input, size_t len,
+                                 phext_coordinate location,
+                                 const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out) {
+    phext_buffer scroll;
+    phext_status status;
+    phext_buffer_init(&scroll);
+    status = stored_form(payload, payload_len, &scroll);
+    if (status == PHEXT_OK) {
+        status = phext_replace(input, len, location, scroll.data, scroll.len, out);
+    }
+    phext_buffer_free(&scroll);
+    return status;
+}
+
+phext_status phext_phokenize_bytes(const unsigned char *input, size_t len,
+                                   phext_scrolls *out) {
+    /* Rust's phokenize_bytes is a byte-level transcription of phext.rs's
+     * phokenize - same loop, same nine structural breaks - differing only
+     * in that phokenize requires UTF-8 input and this does not. The C API
+     * is byte-oriented throughout (PARITY.md D-3), so the one C walker
+     * serves both, and the outputs coincide on every input. */
+    return phext_phokenize(input, len, out);
+}
+
+phext_status phext_ingest(const unsigned char *input, size_t len, phext_buffer *out) {
+    phext_scrolls parts;
+    phext_scrolls map;
+    phext_status status;
+    size_t i;
+    phext_scrolls_init(&parts);
+    phext_scrolls_init(&map);
+    status = phext_phokenize_bytes(input, len, &parts);
+    for (i = 0; status == PHEXT_OK && i < parts.len; i++) {
+        const phext_buffer *raw = &parts.items[i].scroll;
+        if (utf8_valid(raw->data, raw->len)) {
+            status = phext_map_insert(&map, parts.items[i].coord, raw->data, raw->len);
+        } else {
+            phext_buffer armoured;
+            phext_buffer_init(&armoured);
+            status = encode_scroll_into(&armoured, raw->data, raw->len);
+            if (status == PHEXT_OK) {
+                status = phext_map_insert(&map, parts.items[i].coord,
+                                          armoured.data, armoured.len);
+            }
+            phext_buffer_free(&armoured);
+        }
+    }
+    if (status == PHEXT_OK) {
+        status = phext_implode(&map, out);
+    }
+    phext_scrolls_free(&parts);
+    phext_scrolls_free(&map);
+    return status;
+}
+
+/* ----------------------------------------------------------------------------------------------------------
+ * the xz seal (libphext-rs 0.5.0: src/seal.rs)
+ *
+ * A standard xz stream over the document's exact bytes, encoded at
+ * preset PHEXT_SEAL_PRESET with a CRC64 check. Built only when phext.c
+ * is compiled with PHEXT_WITH_XZ and linked with -llzma (PARITY.md D-7);
+ * the unstubbed functions below are byte-identical to the Rust seal,
+ * which wraps the same liblzma.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+#ifdef PHEXT_WITH_XZ
+#include <lzma.h>
+#endif
+
+int phext_seal_compiled(void) {
+#ifdef PHEXT_WITH_XZ
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+#ifdef PHEXT_WITH_XZ
+
+phext_status phext_seal_bytes(const unsigned char *input, size_t len, phext_buffer *out) {
+    lzma_stream strm = LZMA_STREAM_INIT;
+    unsigned char chunk[65536];
+    phext_status status = PHEXT_OK;
+    phext_buffer_reset(out);
+    if (lzma_easy_encoder(&strm, PHEXT_SEAL_PRESET, LZMA_CHECK_CRC64) != LZMA_OK) {
+        return PHEXT_ENOMEM; /* the easy encoder only fails on allocation */
+    }
+    strm.next_in = input;
+    strm.avail_in = len;
+    for (;;) {
+        lzma_ret ret;
+        size_t produced;
+        strm.next_out = chunk;
+        strm.avail_out = sizeof(chunk);
+        ret = lzma_code(&strm, LZMA_FINISH);
+        produced = sizeof(chunk) - strm.avail_out;
+        if (produced > 0) {
+            status = buf_append(out, chunk, produced);
+            if (status != PHEXT_OK) {
+                break;
+            }
+        }
+        if (ret == LZMA_STREAM_END) {
+            break;
+        }
+        if (ret != LZMA_OK) {
+            status = PHEXT_EINVAL;
+            break;
+        }
+    }
+    lzma_end(&strm);
+    if (status != PHEXT_OK) {
+        phext_buffer_reset(out);
+    }
+    return status;
+}
+
+phext_status phext_unseal(const unsigned char *data, size_t len, phext_buffer *out) {
+    lzma_stream strm = LZMA_STREAM_INIT;
+    unsigned char chunk[65536];
+    phext_status status = PHEXT_OK;
+    phext_buffer_reset(out);
+    if (lzma_stream_decoder(&strm, UINT64_MAX, 0) != LZMA_OK) {
+        return PHEXT_ENOMEM; /* the decoder only fails init on allocation */
+    }
+    strm.next_in = data;
+    strm.avail_in = len;
+    for (;;) {
+        lzma_ret ret;
+        size_t produced;
+        strm.next_out = chunk;
+        strm.avail_out = sizeof(chunk);
+        ret = lzma_code(&strm, LZMA_FINISH);
+        produced = sizeof(chunk) - strm.avail_out;
+        if (produced > 0 && status == PHEXT_OK) {
+            status = buf_append(out, chunk, produced);
+        }
+        if (ret == LZMA_STREAM_END) {
+            break;
+        }
+        if (ret != LZMA_OK) {
+            status = PHEXT_EINVAL;
+            break;
+        }
+        if (produced == 0 && strm.avail_in == 0) {
+            status = PHEXT_EINVAL; /* input exhausted before the stream end */
+            break;
+        }
+    }
+    if (status == PHEXT_OK && strm.avail_in != 0) {
+        /* trailing bytes after the stream end - Rust's decoder errors on
+         * them too, zero padding included */
+        status = PHEXT_EINVAL;
+    }
+    lzma_end(&strm);
+    if (status != PHEXT_OK) {
+        phext_buffer_reset(out);
+    }
+    return status;
+}
+
+phext_status phext_unseal_string(const unsigned char *data, size_t len, phext_buffer *out) {
+    phext_status status = phext_unseal(data, len, out);
+    if (status == PHEXT_OK && !utf8_valid(out->data, out->len)) {
+        phext_buffer_reset(out);
+        return PHEXT_EINVAL; /* Rust: InvalidData from String::from_utf8 */
+    }
+    return status;
+}
+
+#else /* !PHEXT_WITH_XZ */
+
+phext_status phext_seal_bytes(const unsigned char *input, size_t len, phext_buffer *out) {
+    (void)input;
+    (void)len;
+    phext_buffer_reset(out);
+    return PHEXT_ENOSEAL;
+}
+
+phext_status phext_unseal(const unsigned char *data, size_t len, phext_buffer *out) {
+    (void)data;
+    (void)len;
+    phext_buffer_reset(out);
+    return PHEXT_ENOSEAL;
+}
+
+phext_status phext_unseal_string(const unsigned char *data, size_t len, phext_buffer *out) {
+    (void)data;
+    (void)len;
+    phext_buffer_reset(out);
+    return PHEXT_ENOSEAL;
+}
+
+#endif /* PHEXT_WITH_XZ */
+
+/* Rust: seal - the same function as seal_bytes on the text's bytes */
+phext_status phext_seal(const unsigned char *input, size_t len, phext_buffer *out) {
+    return phext_seal_bytes(input, len, out);
 }

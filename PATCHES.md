@@ -3696,6 +3696,80 @@ alignment rather than the declared one — pre-existing
 upstream behaviour, mode-independent, unchanged by this
 wave.
 
+## F45 — C parity library: libphext 0.4.1 → 0.5.0 (binary scrolls, xz seal, lenient-parse saturation)
+
+Moves the top-level `phext/` C library from libphext-rs 0.4.1 parity
+to parity with the published libphext-rs **0.5.0** (the crates.io
+package artefact, SHA-256 `c8f8df75a786…`, audited from the release
+artefact itself, not a git branch). No compiler file changes; the
+library remains independent of the compiler proper. Base for this
+entry: `f65e68cc`. Full record: `phext/PARITY.md` §5–§7 and its 0.5.0
+outcome section.
+
+The 0.5.0 delta, implemented in `phext/phext.h` + `phext/phext.c`:
+
+- **Binary scrolls** (Rust `binary` module: 10 functions + the
+  `BINARY_SCROLL_HEADER` constant). The canonical format: header line
+  `phext-binary:1:base64`, one line break, RFC 4648 base64 (padding
+  required, no line wrapping); an empty payload is the header line
+  alone. `phext_decode_scroll` reproduces the base64 crate's
+  STANDARD-engine strictness exactly — canonical padding, no
+  whitespace anywhere, non-zero trailing bits in a padded quantum
+  rejected — pinned by a 22-case verdict table probed against the
+  published library. `phext_fetch_binary` is total: a well-formed
+  binary scroll decodes; plain text, a malformed binary scroll, and
+  an unoccupied coordinate all yield the scroll's own bytes verbatim.
+  The byte entry points (`phext_insert_bytes`, `phext_replace_bytes`,
+  `phext_ingest`) implement the ingestion rule: valid UTF-8 is stored
+  as ordinary text, non-UTF-8 as a binary scroll holding the base64
+  of the exact observed bytes, verbatim (strict UTF-8 validation
+  matching `str::from_utf8`, overlongs and surrogates included).
+  Rust's `Option` maps to the new status `PHEXT_ENONE`.
+- **The xz seal** (Rust `seal` module: 4 functions + `SEAL_PRESET`
+  6). `phext_seal` / `phext_seal_bytes` / `phext_unseal` /
+  `phext_unseal_string` over liblzma with a CRC64 check. The
+  streaming encoder is **byte-identical** to the Rust seal; the
+  one-shot buffer encoder is not (it writes size fields into the
+  block header) — measured on seven payload classes, then avoided.
+  Unseal requires the stream to be the whole input: trailing bytes
+  of any kind (junk, zero padding, a second concatenated stream) are
+  `PHEXT_EINVAL`, matching the Rust decoder's probed behaviour.
+  Rust's cargo feature-gating has no C analogue and is mapped
+  honestly (PARITY.md D-7): the binary module is always compiled
+  (its base64 is self-contained in `phext.c` — no dependency exists
+  to gate), while the seal maps to the build-time option
+  `PHEXT_WITH_XZ` + `-llzma`; compiled out, the seal functions
+  return the new status `PHEXT_ENOSEAL` and `phext_seal_compiled()`
+  returns 0.
+- **Lenient-parse saturation** — a core 0.5.0 change found by the
+  differential fuzz rather than by reading the delta: 0.5.0's
+  `to_coordinate` accumulates digits with
+  `saturating_mul`/`saturating_add` where 0.4.1 wrapped (release) and
+  the C port wrapped with it. The 20,000-case regression corpus
+  showed exactly 40 divergences, all op 21 (lenient parse) on
+  components above `u64::MAX`; `phext_to_coordinate` now saturates
+  identically (PARITY.md D-6, resolved). The strict parser needed no
+  change: 0.5.0's `TryFrom` returns `Err` where 0.4.1 panicked, so
+  the fuzz's op-20 panic class is gone (D-2).
+
+Receipts (rock-mountain): the ported suite, extended with the
+`test_binary.rs` + `test_seal.rs` ports, the base64 strictness table,
+the trailing-data unseal verdicts, and a saturation test —
+**163,955 checks / 0 failures** in the plain build and **163,987 / 0**
+with `PHEXT_WITH_XZ`, under both gcc and this tree's phcc (dogfood).
+Differential fuzz against a reference driver built on the published
+0.5.0 package (features `binary` + `xz`): 20,000 regression cases
+(ops 0–23) + 40,000 new cases (ops 24–38 — random non-UTF-8 payloads
+through ingest/fetch round-trips, malformed-header mutations, empty
+payloads, seal/unseal cross-checks in both directions) — **0
+divergences, 0 Rust panics**. Seal cross-check against this repo's
+own artefacts: C unseal of the shipped `phcc.phext.xz` reproduces
+`phcc.phext` byte-identically; the shipped seal is the refresh
+tooling's preset 9-extreme stream — a different encoder setting for
+the same format, not the library seal's output. Tree: `make test`
+ALL TESTS PASSED; conformance spot 332/333 (diverge set exactly
+`[a_pp_018]`, 0 oracle splits); static gate cells 3/3.
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in

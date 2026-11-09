@@ -1,11 +1,23 @@
 /* ----------------------------------------------------------------------------------------------------------
  * phext.h - Phext Buffer Library for C
  *
- * The C counterpart of libphext-rs (v0.4.1), the reference implementation of
+ * The C counterpart of libphext-rs (v0.5.0), the reference implementation of
  * phext in Rust. Every public capability of the Rust crate has a counterpart
  * here; the full mapping, including the handful of places where C idiom
  * forces a different shape (never different defined behaviour), lives in
  * PARITY.md and in the phext/ directory notes.
+ *
+ * The 0.5.0 additions are the binary-scroll module (canonical base64
+ * armouring for non-text payloads, plus the byte-oriented update entry
+ * points that apply the ingestion rule) and the xz seal. In Rust both
+ * modules are cargo features (`binary`, `xz`); the mapping to C is:
+ *   - binary scrolls are always available here: the C implementation is
+ *     self-contained (its own base64), so there is no dependency to gate;
+ *   - the seal needs liblzma, so it is a build-time option: compile
+ *     phext.c with PHEXT_WITH_XZ defined and link -llzma to enable it.
+ *     Without it, the seal functions return PHEXT_ENOSEAL and
+ *     phext_seal_compiled() returns 0.
+ * See PARITY.md, divergence D-7.
  *
  * Copyright: (c) 2024-2026 Will Bickford (Phext, Inc.)
  * License: MIT
@@ -89,6 +101,16 @@ extern "C" {
 #define PHEXT_ADDRESS_MACRO_BREAK ((unsigned char)'/') /* delimiter for macro-coordinates */
 #define PHEXT_ADDRESS_MACRO_ALT   ((unsigned char)';') /* also allowed, for url encoding */
 
+/* libphext-rs 0.5.0 additions: the binary-scroll header line (binary.rs
+ * BINARY_SCROLL_HEADER) and the seal preset (seal.rs SEAL_PRESET). A binary
+ * scroll's content is this line, a single 0x0A, then the RFC 4648 base64
+ * body (padding required, no line wrapping); an empty payload is the
+ * header line alone. */
+#define PHEXT_BINARY_SCROLL_HEADER "phext-binary:1:base64"
+#define PHEXT_SEAL_PRESET 6 /* the xz preset the seal encodes with; an encoder
+                               choice, not a format requirement - unsealing
+                               accepts any valid xz stream */
+
 /* ----------------------------------------------------------------------------------------------------------
  * status codes (Rust: Result<_, PhextParseError> and panics, mapped to codes)
  * ---------------------------------------------------------------------------------------------------------- */
@@ -96,8 +118,16 @@ typedef enum phext_status {
     PHEXT_OK = 0,      /* success */
     PHEXT_ENOMEM,      /* an allocation failed; outputs are left empty */
     PHEXT_EFORMAT,     /* address does not have the 3x3 segment shape (Rust: Err(PhextParseError)) */
-    PHEXT_ENUMBER      /* address component is not a number, or overflows size_t
-                          (Rust: the strict parser PANICS here via expect(); C returns this) */
+    PHEXT_ENUMBER,     /* address component is not a number, or overflows size_t
+                          (Rust 0.4.1: the strict parser PANICS here via expect(); C returns this.
+                           Rust 0.5.0 returns Err there too - see PARITY.md D-2) */
+    PHEXT_ENONE,       /* Rust: an Option-returning function returned None
+                          (phext_decode_scroll on a non-binary or malformed scroll) */
+    PHEXT_EINVAL,      /* Rust: an io::Error from the seal module - the data is
+                          not a valid xz stream, has trailing bytes after the
+                          stream end, or (unseal_string) is not valid UTF-8 */
+    PHEXT_ENOSEAL      /* the seal functions were called in a build without
+                          seal support (phext.c compiled without PHEXT_WITH_XZ) */
 } phext_status;
 
 /* The exact Display text of Rust's PhextParseError. */
@@ -389,6 +419,118 @@ phext_status phext_index(const unsigned char *input, size_t len, phext_buffer *o
  * last scroll before it; 0 when no scroll comes at or before it. */
 phext_status phext_offset(const unsigned char *input, size_t len,
                           phext_coordinate coord, size_t *out_offset);
+
+/* ----------------------------------------------------------------------------------------------------------
+ * binary scrolls (libphext-rs 0.5.0: binary.rs, cargo feature `binary`)
+ *
+ * A binary scroll stores arbitrary bytes as text: the header line
+ * PHEXT_BINARY_SCROLL_HEADER, one line break, then the payload in
+ * RFC 4648 base64 (standard alphabet, padding required, no wrapping).
+ * A scroll whose content begins with that header line IS a binary scroll
+ * by definition; a prefix-matching scroll whose body is not strict
+ * base64 is a malformed binary scroll.
+ *
+ * The ingestion rule (canonical, all ports): when non-UTF-8 data is
+ * observed in an incoming scroll update, it is encoded with base64
+ * verbatim. The byte-oriented entry points below never fail on non-UTF-8
+ * payload data: valid UTF-8 is stored as ordinary text, anything else as
+ * a binary scroll holding the base64 of the exact observed bytes, so the
+ * matching fetch returns the original bytes exactly.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+/* Rust: is_binary_scroll - true when the scroll carries the binary
+ * header line (content begins with the header + line break). Decoding
+ * success is a separate question - see phext_decode_scroll. */
+int phext_is_binary_scroll(const unsigned char *scroll, size_t len);
+/* Rust: encode_scroll - header line + base64 of the payload. */
+phext_status phext_encode_scroll(const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out);
+/* Rust: decode_scroll - the payload of a binary scroll. Returns
+ * PHEXT_ENONE when the scroll is not a binary scroll or its body is not
+ * strict base64 (Rust: None); PHEXT_OK and the payload otherwise. The
+ * strictness is the base64 crate's STANDARD engine: canonical padding
+ * required, no whitespace, non-zero trailing bits rejected. */
+phext_status phext_decode_scroll(const unsigned char *scroll, size_t len,
+                                 phext_buffer *out);
+/* Rust: fetch_binary - the bytes held at `target`. A well-formed binary
+ * scroll decodes to its payload; any other scroll - plain text, a
+ * malformed binary scroll, or no scroll at all - yields the scroll's
+ * own bytes (empty when the coordinate is unoccupied). Total: fails
+ * only on allocation failure. */
+phext_status phext_fetch_binary(const unsigned char *input, size_t len,
+                                phext_coordinate target, phext_buffer *out);
+/* Rust: insert_binary / replace_binary - store the payload at the
+ * location as a binary scroll, unconditionally (even when the payload
+ * happens to be valid UTF-8). Same document-edit shapes as
+ * phext_insert / phext_replace. */
+phext_status phext_insert_binary(const unsigned char *input, size_t len,
+                                 phext_coordinate location,
+                                 const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out);
+phext_status phext_replace_binary(const unsigned char *input, size_t len,
+                                  phext_coordinate location,
+                                  const unsigned char *payload, size_t payload_len,
+                                  phext_buffer *out);
+/* Rust: insert_bytes / replace_bytes - the byte-oriented updates: the
+ * payload is stored under the ingestion rule (UTF-8 as text, non-UTF-8
+ * as a base64-verbatim binary scroll). */
+phext_status phext_insert_bytes(const unsigned char *input, size_t len,
+                                phext_coordinate location,
+                                const unsigned char *payload, size_t payload_len,
+                                phext_buffer *out);
+phext_status phext_replace_bytes(const unsigned char *input, size_t len,
+                                 phext_coordinate location,
+                                 const unsigned char *payload, size_t payload_len,
+                                 phext_buffer *out);
+/* Rust: phokenize_bytes - the byte-level twin of phokenize: each
+ * scroll's coordinate and raw bytes, segmentation identical to
+ * phext_phokenize. In Rust the two functions differ because phokenize
+ * requires valid UTF-8 input; this C API is byte-oriented throughout
+ * (PARITY.md D-3), so the outputs coincide on every input. */
+phext_status phext_phokenize_bytes(const unsigned char *input, size_t len,
+                                   phext_scrolls *out);
+/* Rust: ingest - ingest an externally supplied phext byte stream:
+ * every scroll is observed as raw bytes; valid UTF-8 scrolls pass
+ * through verbatim, any other scroll is stored as a binary scroll
+ * holding the base64 of its exact bytes, so phext_fetch_binary at its
+ * coordinate returns the original bytes. The result is the canonical
+ * serialization (implode of the exploded map). Never fails on content;
+ * only on allocation failure. */
+phext_status phext_ingest(const unsigned char *input, size_t len, phext_buffer *out);
+
+/* ----------------------------------------------------------------------------------------------------------
+ * the xz seal (libphext-rs 0.5.0: seal.rs, cargo feature `xz`)
+ *
+ * Compression is a seal, not a working format: a finished phext may be
+ * sealed - xz-compressed as a whole - and unsealing restores the exact
+ * original bytes. The seal is a standard xz stream (liblzma) at preset
+ * PHEXT_SEAL_PRESET with a CRC64 check; unsealing accepts any valid xz
+ * stream, but the stream must be the WHOLE input - trailing bytes after
+ * the stream end (even zero padding) are an error, exactly as in Rust.
+ *
+ * Build-time option (PARITY.md D-7): available only when phext.c was
+ * compiled with PHEXT_WITH_XZ defined and linked with -llzma;
+ * phext_seal_compiled() reports which build this is. Without it, the
+ * four functions return PHEXT_ENOSEAL.
+ * ---------------------------------------------------------------------------------------------------------- */
+
+/* C idiom support: 1 when this build of the library has seal support
+ * (PHEXT_WITH_XZ), 0 otherwise. */
+int phext_seal_compiled(void);
+/* Rust: seal_bytes - xz-seal raw bytes. (Rust's seal(&str) is the same
+ * function on the text's bytes; this byte-oriented API serves both.) */
+phext_status phext_seal_bytes(const unsigned char *input, size_t len, phext_buffer *out);
+/* Rust: seal - as phext_seal_bytes; the two Rust entry points differ
+ * only in input type (&str vs &[u8]), which C does not distinguish. */
+phext_status phext_seal(const unsigned char *input, size_t len, phext_buffer *out);
+/* Rust: unseal - restore the exact bytes a seal was made from.
+ * PHEXT_EINVAL when the input is not a valid xz stream or has any
+ * trailing bytes; PHEXT_ENOSEAL in a build without seal support. */
+phext_status phext_unseal(const unsigned char *data, size_t len, phext_buffer *out);
+/* Rust: unseal_string - unseal, then require valid UTF-8 (for content
+ * that may carry non-UTF-8 scrolls, use phext_unseal + phext_ingest).
+ * PHEXT_EINVAL when the unsealed bytes are not valid UTF-8. */
+phext_status phext_unseal_string(const unsigned char *data, size_t len, phext_buffer *out);
 
 #ifdef __cplusplus
 }
