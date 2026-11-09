@@ -3968,3 +3968,68 @@ leak class as F42/F43's flags; member register is invalid
 code anyway).  A decay reached through dereferencing a
 register pointer-to-array variable is not caught -- the
 pointee is anonymous at the designator.
+
+## F49 — debug info: `nullptr_t` walked as a pointer; every `-g` compile of `<stddef.h>` segfaulted
+
+Defect (found by Wave D10's gate work): any translation unit that
+includes <stddef.h>, compiled with -g, segfaulted the compiler
+(rc=139).  Root cause: F42 added
+`typedef typeof(nullptr) nullptr_t;` to the bundled stddef.h, and
+nullptr_t is a VT_PTR whose ref is NULL by design -- it has no
+pointee.  Every -g compilation walks that typedef through
+tcc_debug_typedef, and both debug type walkers in tccdbg.c -- the
+stabs walker tcc_get_debug_info and the DWARF walker
+tcc_get_dwarf_info -- chase VT_PTR types through ref with no
+nullptr case, dereferencing the NULL ref.  tccgen.c got its
+nullptr cases in F42; tccdbg.c got none.  Bisection (D10): clean
+at the D8 tip 47ccbb89, crashing from F42 (9114a290) onward.
+Plain -g reaches the stabs walker; -gdwarf reaches the DWARF
+walker; both crashed identically (ASan: tcc_get_debug_info,
+tccdbg.c, via tcc_debug_typedef from decl).
+
+Fix (tccdbg.c only): the walkers treat nullptr_t the way the
+codegen does -- a type with no pointee, tested with the same
+IS_NULLPTR_T macro F42 established.
+
+- Both walkers' pointer chases stop at nullptr_t instead of
+  following its NULL ref, and the DWARF emission loop treats it
+  as a terminal type rather than a pointer to one.
+- DWARF: nullptr_t's terminal is a DW_TAG_unspecified_type
+  named "nullptr_t" (new abbrev 27, DW_AT_name only), emitted
+  once per compilation unit and cached beside the base-type
+  cache.  That is the oracles' shape: gcc 13.3 -std=c2x -g and
+  clang 18 -std=c23 -g both emit DW_TAG_typedef "nullptr_t"
+  pointing at a DW_TAG_unspecified_type (gcc names it
+  "nullptr_t", clang "decltype(nullptr)"; phcc uses its own
+  type name, as in type_to_str).
+- Stabs has no unspecified type, so nullptr_t is counted as one
+  pointer level onto a void terminal: the typedef describes as
+  pointer-to-void (measured: `nullptr_t:t38=39=*29`, 29 being
+  void's stabs number).  Well-formed and parseable; stabs
+  consumers see the pre-C23 representation.
+
+Receipts (aletheia-core, D10 tip 8696a8e6 + this fix): the
+two-line reproducer (#include <stddef.h> and an empty main)
+compiles under -g and -gdwarf, rc 0 (was 139 in both modes).
+D10's reproducer conf1.c under -g now reaches the file's own
+C11 #error and exits rc 1, exactly its behaviour without -g
+(was 139).  Extended shapes -- nullptr_t as a struct member, a
+global, a pointer's target, an array element, a function
+return type -- compile and run with correct results in both
+debug modes; the DWARF parses clean under readelf and the
+typedef chain matches the oracles' structure.  Project spots:
+gawk 5.4.1 with MPFR configured and built end to end with
+CFLAGS="-g" (configure rc 0 -- its conftest probes are the
+conf1 class -- make rc 0, the binary runs); Lua 5.4.9 built
+with -g (36 translation units) and runs; hello runs under -g
+and -gdwarf.  make test: ALL TESTS PASSED.  Conformance spot
+332/333, diverge set exactly [a_pp_018], no oracle splits.
+Static gate cells 3/3.
+
+Residue, named: declaring a block-scope object of type
+nullptr_t still segfaults the compiler, with or without -g --
+a separate defect in F47's type_is_vm (tccgen.c), which
+follows pointed_type() into the same NULL ref for every
+block-scope declarator.  Parse-time F47 machinery, not the
+debug walkers and not the -g regression; filed as PQ-28 with a
+minimized reproducer in this wave's record.

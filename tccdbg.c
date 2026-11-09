@@ -121,6 +121,7 @@ static const struct {
 #define	DWARF_ABBREV_SUBROUTINE_TYPE		24
 #define	DWARF_ABBREV_SUBROUTINE_EMPTY_TYPE	25
 #define	DWARF_ABBREV_FORMAL_PARAMETER2		26
+#define	DWARF_ABBREV_UNSPECIFIED_TYPE	27
 
 /* all entries should have been generated with dwarf_uleb128 except
    has_children. All values are currently below 128 so this currently
@@ -300,6 +301,9 @@ static const unsigned char dwarf_abbrev_init[] = {
     DWARF_ABBREV_FORMAL_PARAMETER2, DW_TAG_formal_parameter, 0,
           DW_AT_type, DW_FORM_ref4,
           0, 0,
+    DWARF_ABBREV_UNSPECIFIED_TYPE, DW_TAG_unspecified_type, 0,
+          DW_AT_name, DW_FORM_strp,
+          0, 0,
   0
 };
 
@@ -392,6 +396,7 @@ struct _tccdbg {
         Sym *func;
         int line;
         int base_type_used[N_DEFAULT_DEBUG];
+        int nullptr_type_used;
     } dwarf_info;
 
     struct dwarf_str_hash *dwarf_str[N_STR_HASH];
@@ -1291,6 +1296,7 @@ ST_FUNC void tcc_debug_start(TCCState *s1)
             for (i = 0; i < PTR_SIZE; i++)
     	        dwarf_line_op(s1, 0);
             memset(&dwarf_info.base_type_used, 0, sizeof(dwarf_info.base_type_used));
+            dwarf_info.nullptr_type_used = 0;
         }
         else
         {
@@ -1828,11 +1834,19 @@ static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
 
     for (;;) {
         type = remove_type_info (t->type.t);
-        if (type == VT_PTR || type == (VT_PTR | VT_ARRAY))
-            n++, t = t->type.ref;
+        if (type == VT_PTR || type == (VT_PTR | VT_ARRAY)) {
+            n++;
+            if (IS_NULLPTR_T(t->type.t))
+                break; /* F49: nullptr_t has no pointee (ref is NULL);
+                          the chase counts it as one pointer level and
+                          its terminal is described as void below */
+            t = t->type.ref;
+        }
         else
             break;
     }
+    if (IS_NULLPTR_T(t->type.t))
+        type = VT_VOID;
     if ((type & VT_BTYPE) == VT_STRUCT) {
         t = t->type.ref;
         if (stabs_struct_find(s1, t, &debug_type)) {
@@ -1919,6 +1933,9 @@ static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
         }
         else
             break;
+        if (IS_NULLPTR_T(t->type.t))
+            break; /* F49: nullptr_t's '*' is printed above; its ref
+                      is NULL and must not be followed */
         t = t->type.ref;
     }
     cstr_printf (result, "%d", debug_type);
@@ -1945,7 +1962,8 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
         put_new_file(s1);
     for (;;) {
         type = remove_type_info (t->type.t);
-        if (type == VT_PTR || type == (VT_PTR | VT_ARRAY))
+        if ((type == VT_PTR || type == (VT_PTR | VT_ARRAY))
+            && !IS_NULLPTR_T(t->type.t))
             t = t->type.ref;
         else
             break;
@@ -2026,6 +2044,17 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    tcc_free(pos_type);
         }
     }
+    else if (IS_NULLPTR_T(t->type.t)) {
+        /* F49: nullptr_t has no pointee (ref is NULL); gcc and clang
+           describe the type as an unspecified type of this name */
+        debug_type = dwarf_info.nullptr_type_used;
+        if (debug_type == 0) {
+            debug_type = dwarf_info_section->data_offset;
+            dwarf_data1(dwarf_info_section, DWARF_ABBREV_UNSPECIFIED_TYPE);
+            dwarf_strp(dwarf_info_section, "nullptr_t");
+            dwarf_info.nullptr_type_used = debug_type;
+        }
+    }
     else if (IS_ENUM(type)) {
         t = t->type.ref;
 	debug_type = tcc_debug_find(s1, t, 1);
@@ -2092,7 +2121,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
     t = s;
     for (;;) {
         type = remove_type_info (t->type.t);
-        if (type == VT_PTR) {
+        if (type == VT_PTR && !IS_NULLPTR_T(t->type.t)) {
 	    i = dwarf_info_section->data_offset;
 	    if (retval == debug_type)
 		retval = i;
