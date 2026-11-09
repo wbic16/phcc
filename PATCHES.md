@@ -3910,3 +3910,61 @@ checked.
 Every future phcc change lands as: (1) a commit, (2) a row or edit in
 this file in the same commit, (3) on upstream sync, a rebase (never a
 merge) with conflicts resolved under the R1–R7 principle and logged here.
+
+F48: PQ-27 -- address of a register variable is a constraint
+violation (C11 6.5.3.2p1: the operand of unary & shall not be
+declared register, whether the object or a part of one -- the
+classic case being an element of a register array); phcc
+accepted every shape and returned the stack address of an
+object the register allocator believed unaddressable.
+Measured against gcc 13.3 / clang 18.1 on a 41-probe corpus:
+every rejection now matches, every acceptance runs with
+oracle-identical results (58/58 consensus across the F47 and
+F48 corpora combined, plus the full test suite and the
+332/333 conformance standing).
+
+Machinery: SymAttr gains is_register (a spare bit; the
+16-bit layout is unchanged).  parse_btype records a pending
+register class in a file-static flag (the F42/F43 discipline);
+decl() stamps local objects at its bottom-of-declarator
+funnel, post_type stamps prototype parameters, decl()'s
+VT_CMP branch stamps K&R parameters.  A file-scope register
+object is rejected outright ("illegal storage class on
+file-scoped variable", clang's wording).
+
+Checks (check_reg_addr + one inline twin), placed only where
+the operand is a genuine designator -- SValue.sym is NOT an
+invariant of the codegen machinery (measured: a check at
+gen_op entry segfaulted on computed operands from gvtst_set),
+so no check dereferences a symbol outside a designator
+contract:
+- unary &: the whole object and its parts, plus the one
+  register-indirect shape that still designates the object:
+  &a[i] with a variable index (an array's value is its own
+  address; measured at postfix -- the base symbol's type
+  carries VT_ARRAY, where &p[1] through a pointer variable
+  presents a non-array symbol and stays legal, as does &*p).
+- gaddrof: array decay inside address arithmetic (a + 1 as
+  an address expression).
+- gen_cast: array-to-pointer decay (assignment, argument,
+  return, the conditional operator).
+- combine_types: operator decay (a + 0, a == 0, if (a));
+  gen_op relabels array operands to pointers before loading
+  them, so this is the last point the raw designators are
+  visible; the synthetic operands of its internal recursive
+  calls are memset to zero and cannot fire.  The subscript
+  machinery's own address computation is exempted by the
+  reg_subscript_op flag postfix sets around its gen_op.
+
+Oracle splits followed: subscripting a register array is
+legal C (the elements are not the object) -- gcc accepts,
+clang rejects; phcc follows gcc.  register on a parameter is
+ignorable per 6.7.1p2's as-if rule except that & is still
+banned -- both oracles reject &param, and so does phcc.
+
+Residues, named: a `register` inside a struct member list
+leaks the pending flag to the next declarator (the same
+leak class as F42/F43's flags; member register is invalid
+code anyway).  A decay reached through dereferencing a
+register pointer-to-array variable is not caught -- the
+pointee is anonymous at the designator.

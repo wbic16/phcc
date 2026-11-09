@@ -69,6 +69,16 @@ static const char *auto_type_name = "__auto_type";
 /* F43: set by parse_btype() when the declaration specifiers contain
    'constexpr'; consumed by decl() the same way as c23_auto_seen */
 static int constexpr_seen;
+
+/* F48: set by parse_btype() when the declaration specifiers
+   contain 'register'; consumed by decl() (objects, K&R
+   parameters) and post_type() (prototype parameters) with the
+   same take-and-clear discipline as the F42/F43 flags */
+static int register_seen;
+/* F48: set by postfix() around the subscript machinery's own
+   gen_op('+'), so the decay checks do not fire for the one
+   address formation that is the subscript itself */
+static int reg_subscript_op;
 /* F43: recorded constant values of scalar constexpr objects, keyed
    by the object's Sym.  The Sym's own constexpr_obj attribute bit
    is the guard: unary() consults this table only for a sym whose
@@ -1680,9 +1690,46 @@ static void move_reg(int r, int s, int t)
     }
 }
 
+/* F48: taking the address of a register object -- directly,
+   or implicitly by decaying a register array -- is a constraint
+   violation (C11 6.5.3.2): both oracles reject it.  TCC keeps
+   locals in stack slots regardless, so the check is a legality
+   gate, not a codegen change. */
+static void check_reg_addr(SValue *sv, int arrays_only)
+{
+    int vm = sv->r & VT_VALMASK;
+    if (vm == VT_CONST || vm == VT_LOCAL || vm == VT_LLOCAL) {
+        /* designator forms: the symbol is the object's own */
+        if (sv->sym && sv->sym->a.is_register
+            && (sv->type.t & VT_BTYPE) != VT_FUNC
+            && (!arrays_only || (sv->type.t & VT_ARRAY)))
+            tcc_error("address of register variable '%s' requested",
+                      get_tok_str(sv->sym->v, NULL));
+        return;
+    }
+    /* Register-indirect forms designate whatever the base value
+       points at -- a pointee, for a pointer variable (&p[1] and
+       &*p are legal).  The one exception is a base symbol that
+       is itself an array object: an array's value is its own
+       address, so &a[i] designates part of the register object.
+       Only the unary & funnel passes arrays_only == 0, and its
+       operand is a genuine postfix designator whose symbol is
+       the base variable's own live symbol (measured). */
+    if (!arrays_only && sv->sym
+        && (sv->sym->type.t & VT_ARRAY)
+        && !(sv->type.t & VT_ARRAY)
+        && sv->sym->a.is_register)
+        tcc_error("address of register variable '%s' requested",
+                  get_tok_str(sv->sym->v, NULL));
+}
+
 /* get address of vtop (vtop MUST BE an lvalue) */
 ST_FUNC void gaddrof(void)
 {
+    /* F48: an array operand reaching for its address decays --
+       except inside the subscript machinery itself */
+    if (!reg_subscript_op)
+        check_reg_addr(vtop, 1);
     vtop->r &= ~VT_LVAL;
     /* tricky: if saved lvalue, then we can go back to lvalue */
     if ((vtop->r & VT_VALMASK) == VT_LLOCAL)
@@ -1944,6 +1991,7 @@ ST_FUNC int gv(int rc)
 {
     int r, r2, r_ok, r2_ok, rc2, bt;
     int bit_pos, bit_size, size, align;
+
 
     /* NOTE: get_reg can modify vstack[] */
     if (vtop->type.t & VT_BITFIELD) {
@@ -4304,6 +4352,16 @@ static void gen_opcx(int op)
    type is stored in DEST if non-null (except for pointer plus/minus) . */
 static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
 {
+    /* F48: combining a register array operand with anything --
+       a binary operator, a comparison, the conditional -- decays
+       it to a pointer, which takes its address.  gen_op and
+       expr_cond hand over the raw designators; the synthetic
+       operands of the internal recursive calls are memset to
+       zero (sym NULL) and cannot fire this. */
+    if (!reg_subscript_op) {
+        check_reg_addr(op1, 1);
+        check_reg_addr(op2, 1);
+    }
     CType *type1, *type2, type;
     int t1, t2, bt1, bt2;
     int ret = 1;
@@ -5629,6 +5687,17 @@ static void gen_cast_s(int t)
 /* cast 'vtop' to 'type'. Casting to bitfields is forbidden. */
 static void gen_cast(CType *type)
 {
+    /* F48: casting a register array to a pointer type decays it,
+       which takes its address */
+    if ((vtop->type.t & VT_ARRAY)
+        && ((vtop->r & VT_VALMASK) == VT_CONST
+            || (vtop->r & VT_VALMASK) == VT_LOCAL
+            || (vtop->r & VT_VALMASK) == VT_LLOCAL)
+        && vtop->sym
+        && vtop->sym->a.is_register
+        && (type->t & VT_BTYPE) == VT_PTR)
+        tcc_error("address of register variable '%s' requested",
+                  get_tok_str(vtop->sym->v, NULL));
     int sbt, dbt, sf, df, c;
     int dbt_bt, sbt_bt, ds, ss, bits, trunc;
 
@@ -7757,6 +7826,7 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             next();
             break;
         case TOK_REGISTER:
+            register_seen = 1; /* F48 */
             next();
             break;
         case TOK_AUTO:
@@ -8111,6 +8181,11 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
                 /* these symbols may be evaluated for VLArrays (see below, under
                    nocode_wanted) Example: int func(int a, int b[++a]); */
                 s = sym_push(n, &pt, VT_LOCAL|VT_LVAL, 0);
+                /* F48: a 'register' parameter keeps the stamp */
+                if (register_seen) {
+                    s->a.is_register = 1;
+                    register_seen = 0;
+                }
                 *plast = s;
                 plast = &s->next;
                 if (tok == ')')
@@ -8961,6 +9036,8 @@ ST_FUNC void unary(void)
         if ((vtop->type.t & VT_BTYPE) != VT_FUNC &&
             !(vtop->type.t & (VT_ARRAY | VT_VLA)))
             test_lvalue();
+        /* F48: address of a register variable (PQ-27) */
+        check_reg_addr(vtop, 0);
         if (vtop->sym)
           vtop->sym->a.addrtaken = 1;
         mk_pointer(&vtop->type);
@@ -9522,7 +9599,14 @@ special_math_val:
         } else if (tok == '[') {
             next();
             gexpr();
+            /* F48: the '+' forming the element address is the
+               subscript machinery itself, not a decay of the
+               array operand -- subscripting a register array is
+               legal (gcc accepts; clang rejects; phcc follows
+               gcc, the F5/F7 precedent for oracle splits) */
+            reg_subscript_op = 1;
             gen_op('+');
+            reg_subscript_op = 0;
             indir();
             skip(']');
         } else if (tok == '(') {
@@ -13038,7 +13122,8 @@ static void decl_constexpr_init(CType *type, AttributeDef *ad, int r, int v, int
 
 static int decl(int l)
 {
-    int v, has_init, r, oldint, has_btype, this_c23_auto, this_constexpr;
+    int v, has_init, r, oldint, has_btype, this_c23_auto, this_constexpr,
+        this_register; /* F48 */
     CType type, btype;
     Sym *sym, *sa;
     AttributeDef ad, adbase;
@@ -13058,6 +13143,9 @@ static int decl(int l)
         /* F43: same discipline for the constexpr flag */
         this_constexpr = constexpr_seen;
         constexpr_seen = 0;
+        /* F48: same discipline for the register flag */
+        this_register = register_seen;
+        register_seen = 0;
         if (this_constexpr && l == VT_CMP)
             tcc_error("'constexpr' may only be used for a variable");
         if (!has_btype) {
@@ -13253,6 +13341,10 @@ static int decl(int l)
 				  get_tok_str(v, NULL));
 		    convert_parameter_type(&type);
 		    sym->type = type;
+		    /* F48: an old-style 'register' parameter keeps
+		       the stamp */
+		    if (this_register)
+		        sym->a.is_register = 1;
 		} else if (type.t & VT_TYPEDEF) {
                     /* save typedefed type  */
                     /* XXX: test storage specifiers ? */
@@ -13353,6 +13445,21 @@ static int decl(int l)
                    the jump-scope registry (PQ-26) */
                 if (l == VT_LOCAL && type_is_vm(&type))
                     vm_push();
+                /* F48: 'register' at file scope is rejected by
+                   both oracles; a block-scope object keeps the
+                   stamp its checks read */
+                if (this_register && l == VT_CONST
+                    && !(type.t & VT_TYPEDEF)
+                    && (type.t & VT_BTYPE) != VT_FUNC)
+                    tcc_error("illegal storage class on file-scoped variable '%s'",
+                              get_tok_str(v, NULL));
+                if (this_register && l == VT_LOCAL
+                    && !(type.t & VT_TYPEDEF)
+                    && (type.t & VT_BTYPE) != VT_FUNC) {
+                    Sym *rs = sym_find(v);
+                    if (rs && rs->sym_scope == local_scope)
+                        rs->a.is_register = 1;
+                }
                 if (tok != ',') {
                     if (l == VT_JMP)
                         return has_init ? v : 1;

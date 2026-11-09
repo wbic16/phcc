@@ -514,7 +514,8 @@ struct SymAttr {
     nodebug     : 1,
     constexpr_obj : 1, /* F43: a C23 constexpr object; unary() reads
                           its recorded constant in constant contexts */
-    xxxx        : 1; /* not used */
+    is_register : 1; /* F48: declared with 'register' (PQ-27); the
+                          address-of and decay checks read it */
 };
 
 /* function attributes or temporary attributes for parsing */
