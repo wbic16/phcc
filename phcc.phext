@@ -366885,7 +366885,7 @@ scroll	1.1.1/10.2.5/1.1.1	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 scroll	1.1.1/10.2.6/1.1.1	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0
 scroll	1.1.1/10.2.7/1.1.1	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	0
 scroll	1.1.1/10.2.7/1.2.1	f2b5599acf60ece1e1d03d253eeaf1db74d775e90c1dec7cf84ff4616be620a3	20017
-scroll	1.1.1/10.2.7/1.2.2	ec07cb27ffd72691ca7f5c9286355fe931c64fbf88aa3a5a9fb11b473bf443e9	8391
+scroll	1.1.1/10.2.7/1.2.2	0081f7bec82a793c27aed3689ae93ac7b72008f42038919d62dc42c55c0b3608	11155
 scroll	1.1.1/10.2.7/1.2.3	7a2d86d42f252503aaa1b0053b06fcde6d070b16d23ffe8621ecb8ab8cf99683	4660
 scroll	1.1.1/10.2.7/1.2.4	e1cd8eb4d507d76b629bd31ce4d77b0d19289ce6edfc36cd325f9793286ccaf5	1846
 scroll	1.1.1/10.2.7/1.2.5	be8915b8be03dfe97a80e7d90eed5cd0d7981d945c195d347b5cbb7fd48213ea	1486
@@ -993694,6 +993694,54 @@ kind - __udivmoddi4's three ensures and ladder asserts, __divdi3's
 auxiliary W_div, and the shift family's open goals, exactly as the
 per-function lines above record them. The tier reading is unchanged -
 T3 is NOT granted for this artifact: 26 VCs remain undischarged.
+
+h8-escalation (2026-11-08, proof-escalation pass closing the
+Item 11 residue deferred in the d7-port note above): the 300 s
+escalation and the minimal-context lemma retries have now run,
+on the h8 artifact at 1.1.1/10.2.7/1.2.1 (contracts-sha256
+f2b5599a... — the artifact is unchanged by this pass; no contract
+was modified). Method: Frama-C 28.1 WP with alt-ergo 2.5.3 +
+z3 4.8.12 + cvc5 1.1.2, three-prover portfolio at 120 s/goal
+plus a 300 s escalation round, all on aletheia-core under the
+thermal duty-cycle discipline (pause >74 C, resume <65 C);
+evidence bundle esc-logs-2026-11-08.tar.gz (ranch
+phcc-slice2h-work/proofs). Result, best portfolio union:
+273/304 VCs discharged, 31 open — __udivmoddi4 153/174,
+__divdi3 32/33, __moddi3 29/29, __udivdi3 9/9, __umoddi3 8/8,
+__ashldi3 14/16, __ashrdi3 14/17, __lshrdi3 14/18. The
+denominators differ from the header counts above (271/297):
+the h7/h8 revisions added 6 goals to __udivmoddi4's schedule
+(168 -> 174), so the two bases are not directly comparable;
+the header fields stand as issued on the h6 basis and are not
+restated here. Named-goal delta against the h6 basis:
+DISCHARGED E_msb (__udivmoddi4, z3 at 120 s in the h8 context)
+and __ashldi3 rte_division_by_zero (z3 at 120 s); RECOVERED
+__lshrdi3 rte_division_by_zero (z3 at 300 s; open in both h8
+120 s solo runs); LOST E_hi (proved in the h6 portfolio, open
+in every h8 run — three provers at 120 s, z3 + alt-ergo at
+300 s; the added DivFacts weight is the plausible mechanism).
+Net named delta: +1. The branch-E ladder (21 goals including
+the three ensures) is a structural wall, not a time problem:
+its open set is byte-identical at 120 s and 300 s under both
+z3 and alt-ergo, and __divdi3's W_div timed out at 300 s under
+all three provers. pow32 was not discharged in any context
+(minimal, bridge, or the full DivFacts context), so
+divpow_bound and sumbound gain no admission and no h9 was
+built; divcomp and modcomp stand on their Wave D7 standalone
+discharge. (cvc5 at 300 s on __udivmoddi4 was deliberately not
+run: its 120 s proved set was a strict subset of the
+z3 + alt-ergo union, and both stronger provers showed
+byte-identical open sets across the 120 -> 300 s step.) Four
+of the 31 open goals are genuinely FALSE, with z3
+countermodels: rte_shift_4 and rte_signed_overflow_3 on
+__ashrdi3 and __lshrdi3 — the artifact's un-cast transcription
+of the signed left-shift of the high word, exactly the F1 UB
+site; they encode the pre-F1 source, and no prover or timeout
+can discharge them without changing the modelled body.
+Closing them is a re-transcription decision (model the F1
+cast), not a prover problem, and is out of this pass's scope.
+The tier reading is unchanged — T3 NOT GRANTED: full
+discharge was not reached.
 # assumption ledger — lib/libtcc1.c (Book 7, Ch 1), Slice 2 + hardening pass
 # Mirrored index lives in Meta; this address-local copy is authoritative
 # (design B.1/B.2). Every entry names what is assumed rather than proved.
