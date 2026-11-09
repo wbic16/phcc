@@ -3769,6 +3769,76 @@ tooling's preset 9-extreme stream — a different encoder setting for
 the same format, not the library seal's output. Tree: `make test`
 ALL TESTS PASSED; conformance spot 332/333 (diverge set exactly
 `[a_pp_018]`, 0 oracle splits); static gate cells 3/3.
+## F46 — codegen: initial-exec TLS for symbols not defined in the TU (PQ-25, codegen half)
+
+Wave D10. `x86_64-gen.c` emitted the local-exec form
+(`%fs:sym@TPOFF32`) for every TLS access, including symbols only
+declared `extern` in the translation unit.  The local-exec offset
+of an imported TLS object is not known until the dynamic link, so
+the form is unusable whenever the defining object is a DSO: GNU
+ld refuses the object outright ("unresolvable R_X86_64_TPOFF32
+relocation against symbol ..." in an executable link, "can not
+be used when making a shared object" in a `-shared` link), and
+phcc's own linker could not resolve a directly referenced TLS
+import either (an executable link against a DSO failed with
+"unresolved reference to 'tls_var'"; the `-shared` form was
+F37's named error).  The linker was never the missing half —
+F22/F30 made it IE-complete, and a gcc-compiled GOTTPOFF
+accessor has always linked and run through it; the defect was
+purely that phcc's code generator never emitted the GOT form.
+
+Fix, all in `x86_64-gen.c`: `tls_sym_defined()` applies the ELF
+definedness test (the symbol has a section slot and its ELF
+entry is not SHN_UNDEF; not-yet-defined counts as undefined,
+which is the safe direction because the initial-exec form is
+also correct for executable-defined symbols).  Wherever an
+operand naming an undefined TLS symbol would have taken the
+local-exec form, the address is now computed with the
+initial-exec model — `gen_tls_ie_addr()`: `movq
+sym@gottpoff(%rip), %r; addq %fs:0, %r` — and the access
+continues as a plain indirect one: (1) `load()` rewrites an
+undefined-TLS lvalue before its operand form is chosen,
+mirroring its GOT pass for ordinary variables; (2) `store()`
+materializes the address in %r11, addend included, mirroring
+its GOT pass; (3) `load()`'s address-of case emits the IE
+sequence directly, folding a nonzero addend as an immediate
+add.  Symbols defined in the TU keep the local-exec form
+unchanged, and `gen_modrm_impl`'s `%fs` operand form now only
+ever receives defined symbols from C code paths.
+
+Receipts (the PQ-25 matrix, oracles gcc 13.3 / clang 18, every
+cell runtime-verified): the eight cells that failed at base —
+a phcc object against a gcc DSO under GNU ld, phcc-linked
+executables against gcc- and phcc-built DSOs, a phcc-built DSO
+accessor under both linkers, address-of against a DSO, and a
+two-thread accessor against a DSO — now link and run with
+output identical to the gcc oracle, including per-thread values
+(each worker thread sees its own copy; the main thread's copy
+is untouched), and the dlopen cell that previously had no valid
+DSO to open now runs.  The accessor object's relocation census
+is `R_X86_64_GOTTPOFF` only; no TPOFF32 remains for imported
+symbols.  All previously working cells are unchanged: cross-TU
+executable links under both linkers, defined-in-TU local-exec
+(executable, DSO, and static forms), a gcc GD accessor linked
+by phcc (F30), a gcc IE accessor linked by phcc (F22), static
+cross-TU links, mixed defined/extern TUs, and a symbol used
+before its definition in the same TU (initial-exec at the use,
+local-exec after — both correct).  The dlopen receipt carries
+the platform's own caveat: initial-exec in a dlopen'd module
+relies on glibc's surplus static TLS space, and phcc does not
+claim the general-dynamic model — GD codegen remains
+unimplemented, as before, and gcc-compiled GD objects remain
+the route for it.  `make test`: ALL TESTS PASSED; conformance
+332/333 with the diverge set exactly [a_pp_018]; the gate's
+gawk +MPFR spot (configure under the compiler under test,
+`make check`) is receipted in the wave record.
+
+Residue, named: an inline-asm operand naming an imported TLS
+variable still reaches `gen_modrm_impl` directly and emits the
+local-exec form, which both linkers refuse loudly (never
+silently) — asm operands do not pass through
+`load()`/`store()`, and giving them the IE rewrite is a
+separate, larger change to the asm operand machinery.
 
 ## Maintenance rule
 

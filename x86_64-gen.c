@@ -319,6 +319,41 @@ static void gen_gotpcrel(int r, Sym *sym, int c)
     }
 }
 
+/* F46: TLS definedness for code generation.  The local-exec form
+   (%fs:sym@TPOFF) is only valid when the symbol is defined in this
+   translation unit; an imported TLS object's offset is not known
+   until the dynamic link, so undefined symbols must be reached
+   through the GOT (initial-exec).  Definedness is the ELF test
+   tccgen.c uses for TLS definitions; sym->c == 0 (no section slot
+   yet) counts as undefined, which is the safe direction: the
+   initial-exec form is also correct for executable-defined
+   symbols. */
+static int tls_sym_defined(Sym *s)
+{
+    return s && s->c && elfsym(s)->st_shndx != SHN_UNDEF;
+}
+
+/* F46: emit the initial-exec address computation for a TLS symbol
+   into register r:
+       movq sym@gottpoff(%rip), %r
+       addq %fs:0, %r
+   The GOT entry receives the symbol's offset in the initial TLS
+   block; adding the thread pointer (%fs:0) yields its address.
+   Valid whether the symbol is defined by the executable or
+   imported from a DSO. */
+static void gen_tls_ie_addr(int r, Sym *sym)
+{
+    orex(1, 0, r, 0x8b);              /* movq disp(%rip), %r */
+    o(0x05 + REG_VALUE(r) * 8);
+    greloca(cur_text_section, sym, ind, R_X86_64_GOTTPOFF, -4);
+    gen_le32(0);
+    o(0x64);                          /* fs: */
+    orex(1, 0, r, 0x03);              /* addq %fs:0, %r */
+    o(0x04 + REG_VALUE(r) * 8);       /* modrm: [sib] | reg */
+    o(0x25);                          /* sib: disp32 only */
+    gen_le32(0);
+}
+
 /* generate a modrm reference. 'op_reg' contains the additional 3
    opcode rsp. second register bits */
 static void gen_modrm_impl(int opcode, int ll, int op_reg_0, int r, Sym *sym, int c)
@@ -417,6 +452,21 @@ void load(int r, SValue *sv)
         gen_modrm64(0x8b, tr, fr, sv->sym, 0);
 
         /* load from the temporal register */
+        fr = tr | VT_LVAL;
+    }
+
+    /* F46: an imported TLS lvalue cannot use the local-exec %fs
+       form (see tls_sym_defined): compute its address with the
+       initial-exec model and continue with a plain indirect
+       lvalue, mirroring the GOT pass above.  The result register
+       is the temporal for integer-class loads; float loads get a
+       separate integer register. */
+    if ((fr & (VT_VALMASK|VT_SYM|VT_LVAL)) == (VT_CONST|VT_SYM|VT_LVAL)
+        && (sv->sym->type.t & VT_TLS) && !tls_sym_defined(sv->sym)) {
+        int tr = r | TREG_MEM;
+        if (is_float(ft))
+            tr = get_reg(RC_INT) | TREG_MEM;
+        gen_tls_ie_addr(REG_VALUE(tr), sv->sym);
         fr = tr | VT_LVAL;
     }
 #endif
@@ -531,11 +581,19 @@ void load(int r, SValue *sv)
                 gen_modrm64(0x8d, r, fr, sv->sym, fc);
 #else
                 if (sv->sym->type.t & VT_TLS) {
-                    /* mov fs:0, r */
-                    o(0x64), gen_modrm64(0x8b, r, VT_CONST, NULL, 0);
-                    /* add $tpoff,r */
-                    orex(1,0,r,0x81), oad(0xC0 | REG_VALUE(r), 0);
-                    greloca(cur_text_section, sv->sym, ind - 4, R_X86_64_TPOFF32, fc);
+                    if (!tls_sym_defined(sv->sym)) {
+                        /* F46: imported TLS: initial-exec address */
+                        gen_tls_ie_addr(r, sv->sym);
+                        if (fc) {
+                            orex(1,0,r,0x81), oad(0xC0 | REG_VALUE(r), fc);
+                        }
+                    } else {
+                        /* mov fs:0, r */
+                        o(0x64), gen_modrm64(0x8b, r, VT_CONST, NULL, 0);
+                        /* add $tpoff,r */
+                        orex(1,0,r,0x81), oad(0xC0 | REG_VALUE(r), 0);
+                        greloca(cur_text_section, sv->sym, ind - 4, R_X86_64_TPOFF32, fc);
+                    }
                 } else if (sv->sym->type.t & VT_STATIC) {
                     orex(1,0,r,0x8d);
                     o(0x05 + REG_VALUE(r) * 8); /* lea xx(%rip), r */
@@ -647,6 +705,20 @@ void store(int r, SValue *v)
     }
 
 #ifndef TCC_TARGET_PE
+    /* F46: an imported TLS destination cannot use the local-exec
+       %fs form: materialize its address (initial-exec) in %r11,
+       addend included, and store through it, as the GOT pass
+       below does for ordinary variables. */
+    if ((fr & (VT_VALMASK|VT_SYM)) == (VT_CONST|VT_SYM)
+        && (v->sym->type.t & VT_TLS) && !tls_sym_defined(v->sym)) {
+        gen_tls_ie_addr(TREG_R11, v->sym);
+        if (fc) {
+            orex(1, TREG_R11, 0, 0x81);
+            o(0xc0 + REG_VALUE(TREG_R11));
+            gen_le32(fc);
+        }
+        fr = TREG_R11 | VT_LVAL;
+    }
     /* we need to access the variable via got */
     if ((fr & (VT_VALMASK|VT_SYM)) == (VT_CONST|VT_SYM)
         && !(v->sym->type.t & (VT_STATIC|VT_TLS))) {
