@@ -3840,6 +3840,71 @@ silently) — asm operands do not pass through
 `load()`/`store()`, and giving them the IE rewrite is a
 separate, larger change to the asm operand machinery.
 
+## F47 — parser: jumps into the scope of a variably-modified type are rejected (PQ-26)
+
+Wave D10. TCC materializes a VLA when control flows through its
+declaration and restores the stack on scope exit, so a goto or
+switch dispatch that enters a variably-modified scope sideways
+skips both — silently producing code whose stack bookkeeping
+never ran (the filed reproducer jumped over a live VLA
+declaration into its scope and read the array). Both oracles
+reject every such shape as a constraint violation (C11
+6.8.6.1/6.8.4.2); TCC accepted all of them.
+
+Fix, all in `tccgen.c`: a per-function registry of the
+variably-modified declarators in scope. `decl()` registers
+every block-scope declarator — object or typedef, since a
+jump entering only a VM typedef's scope is rejected by both
+oracles too — whose type is variably modified (`type_is_vm`
+walks the array/pointer spine for `VT_VLA`, so pointers to
+VLAs, VM typedefs, and VLAs in element types all register).
+Scopes record the registry height on entry (`new_scope`,
+`new_scope_s`) and truncate back on exit (`prev_scope`,
+`prev_scope_s`), so the registry at any parse point is exactly
+that point's environment. A label records the registry at its
+definition; a goto is rejected unless the label's environment
+is a subset of the goto's own environment — checked at the
+goto when the label is already defined, and at the label's
+definition against every recorded goto otherwise, so forward
+and backward jumps are covered uniformly. `struct switch_t`
+snapshots the registry at the switch head; a case or default
+label is rejected unless its environment is a subset of the
+snapshot. The errors use the oracles' wording ("jump into
+scope of identifier with variably modified type"; "switch
+jumps into scope of identifier with variably modified type").
+All checks are parse-time, so they fire identically in dead
+code, as the oracles' do. Parameters are not registered: their
+scope is the whole function body, so no jump can enter it
+sideways. Registry state is reset at each function definition
+and released when its body finishes — the testsuite's memory
+checker caught the first cut keeping the last function's
+records, and the lifecycle is entry-and-exit now. The existing
+`vla_restore`/`vla_leave` stack machinery is untouched; this
+is a legality check, not a codegen change.
+
+Receipts: a 22-shape oracle corpus (the D7-filed reproducer
+plus variants: backward and forward jumps, jumps out of nested
+blocks, VM pointers, VM typedefs with and without objects, a
+VLA in an element type, for-body scopes, switch dispatch into
+the body and into inner-block scopes, a VM declaration before
+the first case label in a switch body, a sibling-block label,
+and the legal controls — label before the declaration,
+jumps within/out of/over a scope, an ordinary initialized
+variable, loop re-entry, case labels outside the VM block, a
+case label before the declaration in its block). After the
+fix phcc agrees with the gcc/clang consensus on all 22, and
+every accepted program runs with oracle-identical results.
+`make test`: ALL TESTS PASSED (tcctest.c's own goto traffic is
+legal and still compiles). Conformance 332/333 with the
+diverge set exactly [a_pp_018].
+
+Residue, named and measured: computed goto and label values
+(`&&label`) are an oracle split — gcc accepts a computed
+jump into a VM scope, clang rejects it. PHCC follows gcc
+(accepts), as with the F48 subscript split; plain goto and
+switch dispatch, the shapes the standard names, are fully
+checked.
+
 ## Maintenance rule
 
 Every future phcc change lands as: (1) a commit, (2) a row or edit in

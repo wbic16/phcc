@@ -158,6 +158,10 @@ static struct switch_t {
     struct scope *scope;
     struct switch_t *prev;
     SValue sv;
+    /* F47: snapshot of the variably-modified registry at the
+       switch head; case/default labels check against it */
+    int vm_n;
+    int *vm_ids;
 } *cur_switch; /* current switch */
 
 #define MAX_TEMP_LOCAL_VARIABLE_NUMBER 8
@@ -171,6 +175,7 @@ static int nb_temp_local_vars;
 
 static struct scope {
     struct scope *prev;
+    int vm_h; /* F47: VM registry height at scope entry */
     struct { int loc, locorig, num; } vla;
     struct { Sym *s; int n; } cl;
     int *bsym, *csym;
@@ -10310,6 +10315,7 @@ static int gcase(struct case_t **base, int len, int dsym)
 static void end_switch(void)
 {
     struct switch_t *sw = cur_switch;
+    tcc_free(sw->vm_ids);
     dynarray_reset(&sw->p, &sw->n);
     cur_switch = sw->prev;
     tcc_free(sw);
@@ -10398,6 +10404,145 @@ static void block_cleanup(struct scope *o)
 }
 
 /* ------------------------------------------------------------------------- */
+/* F47: variably-modified scope registry (PQ-26).
+
+   C11 6.8.6.1/6.8.4.2: a goto or switch dispatch must not jump
+   into the scope of an identifier with a variably modified type.
+   TCC materializes a VLA when control flows through its
+   declaration, so entering the scope sideways leaves the scope's
+   stack bookkeeping unexecuted -- both oracles (gcc and clang)
+   reject every such shape, and the honest behaviour is the same
+   named rejection.
+
+   The registry is the stack of serial ids of VM declarators
+   (objects AND typedefs -- a jump entering only a VM typedef's
+   scope is rejected by both oracles) currently in scope for the
+   function being parsed.  Scopes record the registry height at
+   entry and truncate back to it on exit, so at any parse point
+   the registry is exactly the environment of that point.
+
+   A label's environment is the registry at its definition; a
+   goto is legal iff the label's environment is a subset of the
+   goto's own environment (everything the jump enters was
+   already in scope where the jump leaves).  The check runs at
+   the goto when the label is already defined, and at the label
+   definition against every goto recorded for it otherwise, so
+   forward and backward jumps are covered uniformly.  A switch
+   snapshots the registry at its head; a case/default label is
+   legal iff its own environment is a subset of the snapshot.
+   All checks are parse-time, so they fire identically in dead
+   code (nocode_wanted), as the oracles' do. */
+
+static int *vm_stack;   /* serial ids of in-scope VM declarators */
+static int vm_n, vm_cap, vm_serial;
+
+typedef struct VMJump {
+    int label;          /* label token */
+    int n;
+    int *ids;           /* environment copy */
+    struct VMJump *next;
+} VMJump;
+static VMJump *vm_defs, *vm_gotos;
+
+static int type_is_vm(CType *t)
+{
+    for (;;) {
+        if (t->t & VT_VLA)
+            return 1;
+        if ((t->t & VT_BTYPE) == VT_ARRAY || (t->t & VT_BTYPE) == VT_PTR)
+            t = pointed_type(t);
+        else
+            return 0;
+    }
+}
+
+static void vm_push(void)
+{
+    if (vm_n == vm_cap) {
+        vm_cap = vm_cap ? vm_cap * 2 : 32;
+        vm_stack = tcc_realloc(vm_stack, vm_cap * sizeof(int));
+    }
+    vm_stack[vm_n++] = ++vm_serial;
+}
+
+static int *vm_env_copy(const int *ids, int n)
+{
+    int *p = tcc_malloc(n * sizeof(int));
+    if (n)
+        memcpy(p, ids, n * sizeof(int));
+    return p;
+}
+
+static int vm_subset(const int *sub, int nsub, const int *super, int nsup)
+{
+    int i, j;
+    for (i = 0; i < nsub; i++) {
+        for (j = 0; j < nsup; j++)
+            if (sub[i] == super[j])
+                break;
+        if (j == nsup)
+            return 0;
+    }
+    return 1;
+}
+
+static void vm_jump_record(VMJump **list, int label)
+{
+    VMJump *r = tcc_malloc(sizeof *r);
+    r->label = label;
+    r->n = vm_n;
+    r->ids = vm_env_copy(vm_stack, vm_n);
+    r->next = *list;
+    *list = r;
+}
+
+static VMJump *vm_find(VMJump *list, int label)
+{
+    for (; list; list = list->next)
+        if (list->label == label)
+            return list;
+    return NULL;
+}
+
+static void vm_free_jumps(VMJump **list)
+{
+    VMJump *r = *list;
+    while (r) {
+        VMJump *nx = r->next;
+        tcc_free(r->ids);
+        tcc_free(r);
+        r = nx;
+    }
+    *list = NULL;
+}
+
+/* reset all registry state at each function definition */
+static void vm_reset(void)
+{
+    vm_n = 0;
+    vm_free_jumps(&vm_defs);
+    vm_free_jumps(&vm_gotos);
+}
+
+static void vm_goto(int label)
+{
+    VMJump *d = vm_find(vm_defs, label);
+    if (d && !vm_subset(d->ids, d->n, vm_stack, vm_n))
+        tcc_error("jump into scope of identifier with variably modified type");
+    vm_jump_record(&vm_gotos, label);
+}
+
+static void vm_define(int label)
+{
+    VMJump *g;
+    for (g = vm_gotos; g; g = g->next)
+        if (g->label == label
+            && !vm_subset(vm_stack, vm_n, g->ids, g->n))
+            tcc_error("jump into scope of identifier with variably modified type");
+    vm_jump_record(&vm_defs, label);
+}
+
+/* ------------------------------------------------------------------------- */
 /* VLA */
 
 static void vla_restore(int loc)
@@ -10427,6 +10572,8 @@ static void new_scope(struct scope *o)
     cur_scope = o;
     cur_scope->vla.num = 0;
 
+    o->vm_h = vm_n;
+
     /* record local declaration stack position */
     o->lstk = local_stack;
     o->llstk = local_label_stack;
@@ -10435,6 +10582,7 @@ static void new_scope(struct scope *o)
 
 static void prev_scope(struct scope *o, int is_expr)
 {
+    vm_n = o->vm_h;
     vla_leave(o->prev);
 
     if (o->cl.s != o->prev->cl.s)
@@ -10474,11 +10622,13 @@ static void leave_scope(struct scope *o)
 static void new_scope_s(struct scope *o)
 {
     o->lstk = local_stack;
+    o->vm_h = vm_n;
     ++local_scope;
 }
 
 static void prev_scope_s(struct scope *o)
 {
+    vm_n = o->vm_h;
     sym_pop(&local_stack, o->lstk, 0);
     --local_scope;
 }
@@ -10824,6 +10974,9 @@ again:
             tcc_error("switch value not an integer");
         skip(')');
         sw->sv = *vtop--; /* save switch value */
+        /* F47: registry snapshot at the switch head */
+        sw->vm_n = vm_n;
+        sw->vm_ids = vm_env_copy(vm_stack, vm_n);
         a = 0;
         b = gjmp(0); /* jump to first case */
         lblock(&a, NULL);
@@ -10852,6 +11005,9 @@ again:
         struct case_t *cr;
         if (!cur_switch)
             expect("switch");
+        /* F47: dispatch must not enter a VM scope (PQ-26) */
+        if (!vm_subset(vm_stack, vm_n, cur_switch->vm_ids, cur_switch->vm_n))
+            tcc_error("switch jumps into scope of identifier with variably modified type");
         cr = tcc_malloc(sizeof(struct case_t));
         dynarray_add(&cur_switch->p, &cur_switch->n, cr);
         t = cur_switch->sv.type.t;
@@ -10872,6 +11028,9 @@ again:
     } else if (t == TOK_DEFAULT) {
         if (!cur_switch)
             expect("switch");
+        /* F47: dispatch must not enter a VM scope (PQ-26) */
+        if (!vm_subset(vm_stack, vm_n, cur_switch->vm_ids, cur_switch->vm_n))
+            tcc_error("switch jumps into scope of identifier with variably modified type");
         if (cur_switch->def_sym)
             tcc_error("too many 'default'");
         cur_switch->def_sym = cur_switch->nocode_wanted ? -1 : gind();
@@ -10889,6 +11048,7 @@ again:
             ggoto();
 
         } else if (tok >= TOK_UIDENT) {
+            vm_goto(tok); /* F47 */
 	    s = label_find(tok);
 	    /* put forward definition if needed */
             if (!s)
@@ -10939,6 +11099,7 @@ again:
                 s = label_push(&global_label_stack, t, LABEL_DEFINED);
             }
             s->jind = gind();
+            vm_define(t); /* F47 */
             s->cleanupstate = cur_scope->cl.s;
 
     block_after_label:
@@ -12487,6 +12648,7 @@ static void gen_function(Sym *sym)
 {
     struct scope f = { 0 };
 
+    vm_reset(); /* F47 */
     cur_scope = root_scope = &f;
     nocode_wanted = 0;
 
@@ -12528,6 +12690,7 @@ static void gen_function(Sym *sym)
     tcc_debug_prolog_epilog(tcc_state, 0);
     func_vla_arg(sym);
     block(0);
+    vm_reset(); /* F47: release this function's jump records */
     gsym(rsym);
     nocode_wanted = 0;
     tcc_debug_end_scope(NULL, !func_var);
@@ -13185,6 +13348,11 @@ static int decl(int l)
                                         esym->st_value, esym->st_size, 1);
                     }
                 }
+                /* F47: a block-scope declarator (object or
+                   typedef) with a variably modified type enters
+                   the jump-scope registry (PQ-26) */
+                if (l == VT_LOCAL && type_is_vm(&type))
+                    vm_push();
                 if (tok != ',') {
                     if (l == VT_JMP)
                         return has_init ? v : 1;
