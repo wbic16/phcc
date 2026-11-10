@@ -10,8 +10,8 @@ platforms where no decoration is needed.
 On Linux (what `verify_examples.sh` runs):
 
 ```sh
-tcc -shared -o libtwice.so dll.c
-tcc -o app main.c -L. -ltwice
+phcc -shared -o libtwice.so dll.c
+phcc -o app main.c -L. -ltwice
 LD_LIBRARY_PATH=. ./app     # twice(21) = 42
 ```
 
@@ -20,8 +20,8 @@ from Linux, with a cross compiler (see `docs/BUILDING.md` for
 `make cross-x86_64-win32`):
 
 ```sh
-x86_64-win32-tcc -shared -o twice.dll dll.c   # no .def file needed
-x86_64-win32-tcc -o app.exe main.c twice.dll
+x86_64-win32-phcc -shared -o twice.dll dll.c   # no .def file needed
+x86_64-win32-phcc -o app.exe main.c twice.dll
 ```
 
 The Windows form is **compile-verified, not run-verified, here**:

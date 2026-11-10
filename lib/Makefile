@@ -10,8 +10,8 @@ X = $(if $(CROSS_TARGET),$(CROSS_TARGET)-)
 XCFG = $(or $(findstring -win,$T),-unx)
 S = $(if $(findstring yes,$(SILENT)),@$(info * $@))
 
-TCC = $(TOP)/$(X)tcc$(EXESUF)
-XTCC ?= $(TOP)/$(X)tcc$(EXESUF)
+TCC = $(TOP)/$(X)phcc$(EXESUF)
+XTCC ?= $(TOP)/$(X)phcc$(EXESUF)
 XCC = $(XTCC)
 XAR = $(XTCC) -ar
 XFLAGS-unx = -B$(TOPSRC)

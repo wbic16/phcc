@@ -13,19 +13,19 @@ make
 make test          # expect: ALL TESTS PASSED
 ```
 
-That produces `./tcc` — the compiler. Two ways to use it:
+That produces `./phcc` — the compiler. Two ways to use it:
 
-- **In-tree:** `./tcc -B. …` — the `-B.` tells the uninstalled
+- **In-tree:** `./phcc -B. …` — the `-B.` tells the uninstalled
   binary where its own headers and runtime (`libtcc1`) live: the
   build tree. Every example in `examples/` is verified this way.
 - **Installed:** `make install` (default prefix `/usr/local`;
   choose another with `./configure --prefix=DIR`). An installed
-  `tcc` needs no `-B`.
+  `phcc` needs no `-B`.
 
 Quick smoke test, in-tree:
 
 ```sh
-./tcc -B. -run examples/hello/hello.c    # Hello, world!
+./phcc -B. -run examples/hello/hello.c    # Hello, world!
 ```
 
 ## Windows
@@ -61,17 +61,17 @@ The Makefile builds cross compilers that target Windows PE from a
 Linux build tree:
 
 ```sh
-make cross-x86_64-win32    # builds x86_64-win32-tcc + its libtcc1.a
-make cross-i386-win32      # builds i386-win32-tcc + its libtcc1.a
+make cross-x86_64-win32    # builds x86_64-win32-phcc + its libtcc1.a
+make cross-i386-win32      # builds i386-win32-phcc + its libtcc1.a
 make cross                 # all supported cross targets
 ```
 
-The resulting `x86_64-win32-tcc` / `i386-win32-tcc` binaries
+The resulting `x86_64-win32-phcc` / `i386-win32-phcc` binaries
 compile and link PE executables and DLLs, e.g. the
 `examples/dll/` project:
 
 ```sh
-x86_64-win32-tcc -shared -o twice.dll dll.c
+x86_64-win32-phcc -shared -o twice.dll dll.c
 ```
 
 These cross builds were exercised end-to-end (compile + link +

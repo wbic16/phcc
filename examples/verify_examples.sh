@@ -39,14 +39,14 @@ echo "host:      $(uname -srm)"
 echo "tree:      $ROOT"
 
 # --- build phcc from this tree -------------------------------------
-if [ ! -x "$ROOT/tcc" ]; then
+if [ ! -x "$ROOT/phcc" ]; then
     echo "building phcc (./configure && make) ..."
     ( cd "$ROOT" && ./configure > "$WORK/configure.log" 2>&1 \
       && make > "$WORK/make.log" 2>&1 ) \
         || { echo "FAIL  phcc build (see $WORK logs)"; exit 1; }
 fi
-PHCC="$ROOT/tcc -B$ROOT"
-echo "phcc:      $($ROOT/tcc --version | head -n 1)"
+PHCC="$ROOT/phcc -B$ROOT"
+echo "phcc:      $($ROOT/phcc --version | head -n 1)"
 
 COMPILERS="phcc"
 for c in gcc clang; do

@@ -3,7 +3,7 @@
 # The compiler is a variable on purpose: the same Makefile drives
 # phcc, gcc and clang —
 #   make                    (system default compiler)
-#   make CC=tcc             (phcc; add -B<tree> when running in-tree)
+#   make CC=phcc             (add -B<tree> when running in-tree)
 #   make CC=gcc / CC=clang
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall

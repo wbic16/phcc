@@ -262,7 +262,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #endif
 
 #if !defined CONFIG_TCCDIR && !defined _WIN32
-# define CONFIG_TCCDIR "/usr/local/lib/tcc"
+# define CONFIG_TCCDIR "/usr/local/lib/phcc"
 #endif
 
 #ifdef CONFIG_TRIPLET

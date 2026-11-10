@@ -27,7 +27,7 @@ python3 tools/phcc unpack --phext /tmp/project.phext --out /tmp/elsewhere
 
 # 4. Build and run what came out of the phext.
 cd /tmp/elsewhere/examples/phext-pack
-tcc -o app main.c greet.c
+phcc -o app main.c greet.c
 ./app            # Hello from inside the phext!
 ```
 

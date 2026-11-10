@@ -270,7 +270,7 @@ static void *default_reallocator(void *ptr, unsigned long size)
     else {
         ptr1 = realloc(ptr, size);
         if (!ptr1) {
-            fprintf(stderr, "tcc: memory full\n");
+            fprintf(stderr, "phcc: memory full\n");
             exit (1);
         }
     }
@@ -689,7 +689,7 @@ static void error1(int mode, const char *fmt, va_list ap)
     } else if (s1->current_filename) {
         cstr_printf(&cs, "%s: ", s1->current_filename);
     } else {
-        cstr_printf(&cs, "tcc: ");
+        cstr_printf(&cs, "phcc: ");
     }
     cstr_printf(&cs, mode == ERROR_WARN ? "warning: " : "error: ");
     if (pp_expr > 1)

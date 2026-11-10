@@ -23,12 +23,12 @@ The compiler is the Makefile's `CC` variable, so the identical
 build runs under every compiler the examples support:
 
 ```sh
-make CC=tcc     # phcc
+make CC=phcc
 make CC=gcc
 make CC=clang
 ```
 
 (`verify_examples.sh` runs all three and diffs the output against
 `expected.txt`. When it drives phcc from the build tree it passes
-`CC="tcc -B<tree>"` so the in-tree compiler finds its own headers
+`CC="phcc -B<tree>"` so the in-tree compiler finds its own headers
 and runtime.)

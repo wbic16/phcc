@@ -1,4 +1,4 @@
-#!/usr/local/bin/tcc -run
+#!/usr/local/bin/phcc -run
 #include <tcclib.h>
 
 int main()

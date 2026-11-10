@@ -49,7 +49,7 @@ static unsigned long le2belong(unsigned long ul) {
 }
 
 static int ar_usage(int ret) {
-    fprintf(stderr, "usage: tcc -ar [crstvx] lib [files]\n");
+    fprintf(stderr, "usage: phcc -ar [crstvx] lib [files]\n");
     fprintf(stderr, "create library ([abdiopN] not supported).\n");
     return ret;
 }
@@ -120,14 +120,14 @@ ST_FUNC int tcc_tool_ar(int argc, char **argv)
     if (extract || table) {
         if ((fh = fopen(argv[i_lib], "rb")) == NULL)
         {
-            fprintf(stderr, "tcc: ar: can't open file %s\n", argv[i_lib]);
+            fprintf(stderr, "phcc: ar: can't open file %s\n", argv[i_lib]);
             goto finish;
         }
         fread(stmp, 1, 8, fh);
 	if (memcmp(stmp,ARMAG,8))
 	{
 no_ar:
-            fprintf(stderr, "tcc: ar: not an ar archive %s\n", argv[i_lib]);
+            fprintf(stderr, "phcc: ar: not an ar archive %s\n", argv[i_lib]);
             goto finish;
 	}
 	while (fread(&arhdr, 1, sizeof(arhdr), fh) == sizeof(arhdr)) {
@@ -152,7 +152,7 @@ no_ar:
 		if (extract) {
 		    if ((fo = fopen(arhdr.ar_name, "wb")) == NULL)
 		    {
-			fprintf(stderr, "tcc: ar: can't create file %s\n",
+			fprintf(stderr, "phcc: ar: can't create file %s\n",
 				arhdr.ar_name);
 		        tcc_free(buf);
 			goto finish;
@@ -175,7 +175,7 @@ finish:
 
     if ((fh = fopen(argv[i_lib], "wb")) == NULL)
     {
-        fprintf(stderr, "tcc: ar: can't create file %s\n", argv[i_lib]);
+        fprintf(stderr, "phcc: ar: can't create file %s\n", argv[i_lib]);
         goto the_end;
     }
     created_file = argv[i_lib];
@@ -183,7 +183,7 @@ finish:
     sprintf(tfile, "%s.tmp", argv[i_lib]);
     if ((fo = fopen(tfile, "wb+")) == NULL)
     {
-        fprintf(stderr, "tcc: ar: can't create temporary file %s\n", tfile);
+        fprintf(stderr, "phcc: ar: can't create temporary file %s\n", tfile);
         goto the_end;
     }
 
@@ -199,7 +199,7 @@ finish:
             continue;
         }
         if ((fi = fopen(argv[i_obj], "rb")) == NULL) {
-            fprintf(stderr, "tcc: ar: can't open file %s \n", argv[i_obj]);
+            fprintf(stderr, "phcc: ar: can't open file %s \n", argv[i_obj]);
             goto the_end;
         }
         if (verbose)
@@ -216,7 +216,7 @@ finish:
         ehdr = (ElfW(Ehdr) *)buf;
         if (ehdr->e_ident[4] != ELFCLASSW)
         {
-            fprintf(stderr, "tcc: ar: Unsupported Elf Class: %s\n", argv[i_obj]);
+            fprintf(stderr, "phcc: ar: Unsupported Elf Class: %s\n", argv[i_obj]);
             goto the_end;
         }
 
@@ -400,7 +400,7 @@ ST_FUNC int tcc_tool_impdef(int argc, char **argv)
     if (0 == infile[0]) {
 usage:
         fprintf(stderr,
-            "usage: tcc -impdef library.dll [-v] [-o outputfile]\n"
+            "usage: phcc -impdef library.dll [-v] [-o outputfile]\n"
             "create export definition file (.def) from dll\n"
             );
         goto the_end;
@@ -421,7 +421,7 @@ usage:
 #endif
     ret = tcc_get_dllexports(file, &p);
     if (ret || !p) {
-        fprintf(stderr, "tcc: impdef: %s '%s'\n",
+        fprintf(stderr, "phcc: impdef: %s '%s'\n",
             ret == -1 ? "can't find file" :
             ret ==  1 ? "can't read symbols" :
             ret ==  0 ? "no symbols found in" :
@@ -435,7 +435,7 @@ usage:
 
     op = fopen(outfile, "wb");
     if (NULL == op) {
-        fprintf(stderr, "tcc: impdef: could not create output file: %s\n", outfile);
+        fprintf(stderr, "phcc: impdef: could not create output file: %s\n", outfile);
         goto the_end;
     }
 
@@ -489,7 +489,7 @@ the_end:
 
 ST_FUNC int tcc_tool_cross(char **argv, int option)
 {
-    fprintf(stderr, "tcc -m%d not implemented\n", option);
+    fprintf(stderr, "phcc -m%d not implemented\n", option);
     return 1;
 }
 
@@ -557,7 +557,7 @@ ST_FUNC int tcc_tool_cross(char **argv, int target)
 #ifdef TCC_TARGET_PE
         "-win32"
 #endif
-        "-tcc"
+        "-phcc"
 #ifdef _WIN32
         ".exe"
 #endif
@@ -565,7 +565,7 @@ ST_FUNC int tcc_tool_cross(char **argv, int target)
 
     if (strcmp(a0, program))
         execvp(argv[0] = program, argv);
-    fprintf(stderr, "tcc: could not run '%s'\n", program);
+    fprintf(stderr, "phcc: could not run '%s'\n", program);
     return 1;
 }
 

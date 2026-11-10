@@ -4,7 +4,7 @@
 command line, or stdin when no argument is given:
 
 ```sh
-tcc -o wordfreq wordfreq.c
+phcc -o wordfreq wordfreq.c
 ./wordfreq < input.txt     # count words from stdin
 ./wordfreq input.txt       # same output, file as argument
 ```

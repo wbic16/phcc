@@ -30,14 +30,14 @@
 
 static const char help[] =
     "Tiny C Compiler "TCC_VERSION" - Copyright (C) 2001-2006 Fabrice Bellard\n"
-    "Usage: tcc [options...] [-o outfile] [-c] infile(s)...\n"
-    "       tcc [options...] -run infile (or --) [arguments...]\n"
+    "Usage: phcc [options...] [-o outfile] [-c] infile(s)...\n"
+    "       phcc [options...] -run infile (or --) [arguments...]\n"
     "General options:\n"
     "  -c           compile only - generate an object file\n"
     "  -o outfile   set output filename\n"
     "  -run         run compiled source\n"
-    "  -fflag       set or reset (with 'no-' prefix) 'flag' (see tcc -hh)\n"
-    "  -Wwarning    set or reset (with 'no-' prefix) 'warning' (see tcc -hh)\n"
+    "  -fflag       set or reset (with 'no-' prefix) 'flag' (see phcc -hh)\n"
+    "  -Wwarning    set or reset (with 'no-' prefix) 'warning' (see phcc -hh)\n"
     "  -w           disable all warnings\n"
     "  -v --version show version\n"
     "  -vv          show search paths or loaded files\n"
@@ -59,7 +59,7 @@ static const char help[] =
     "  -rdynamic    export all global symbols to dynamic linker\n"
     "  -shared      generate a shared library/dll\n"
     "  -soname      set name for shared library to be used at runtime\n"
-    "  -Wl,-opt[=val]  set linker option (see tcc -hh)\n"
+    "  -Wl,-opt[=val]  set linker option (see phcc -hh)\n"
     "Debugger options:\n"
     "  -g           generate stab runtime debug info\n"
     "  -gdwarf[-x]  generate dwarf runtime debug info\n"
@@ -75,7 +75,7 @@ static const char help[] =
     "Misc. options:\n"
     "  -std=version define __STDC_VERSION__ according to version (c99/c11/c17/c23; c23 also selects C23 mode)\n"
     "  -x[c|a|b|n]  specify type of the next infile (C,ASM,BIN,NONE)\n"
-    "  -Bdir        set tcc's private include/library dir\n"
+    "  -Bdir        set phcc's private include/library dir\n"
     "  -M[M]D       generate make dependency file [ignore system files]\n"
     "  -M[M]        as above but no other output\n"
     "  -MF file     specify dependency file name\n"
@@ -83,9 +83,9 @@ static const char help[] =
     "  -m32/64      defer to i386/x86_64 cross compiler\n"
 #endif
     "Tools:\n"
-    "  create library  : tcc -ar [crstvx] lib [files]\n"
+    "  create library  : phcc -ar [crstvx] lib [files]\n"
 #ifdef TCC_TARGET_PE
-    "  create def file : tcc -impdef lib.dll [-v] [-o lib.def]\n"
+    "  create def file : phcc -impdef lib.dll [-v] [-o lib.def]\n"
 #endif
     "Discussion & bug reports:\n"
     "  https://lists.nongnu.org/mailman/listinfo/tinycc-devel\n"
@@ -149,7 +149,7 @@ static const char help2[] =
     "  -subsystem=[console/windows]  set PE subsystem\n"
     "  -oformat=[pe-* binary]        set executable output format\n"
     "Predefined macros:\n"
-    "  tcc -E -dM - < nul\n"
+    "  phcc -E -dM - < nul\n"
 #else
     "  -rpath=                       set dynamic library search path\n"
     "  -enable-new-dtags             set DT_RUNPATH instead of DT_RPATH\n"
@@ -163,13 +163,13 @@ static const char help2[] =
     "  -oformat=[elf32/64-* binary]  set executable output format\n"
     "  -init= -fini= -Map= -as-needed -O -z= (ignored)\n"
     "Predefined macros:\n"
-    "  tcc -E -dM - < /dev/null\n"
+    "  phcc -E -dM - < /dev/null\n"
 #endif
     "See also the manual for more details.\n"
     ;
 
 static const char version[] =
-    "tcc version "TCC_VERSION
+    "phcc version "TCC_VERSION
 #ifdef TCC_GITHASH
     " "TCC_GITHASH
 #endif

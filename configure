@@ -190,10 +190,10 @@ Standard options:
 			   [same as prefix]
   --bindir=DIR             user executables in DIR [EPREFIX/bin]
   --libdir=DIR             object code libraries in DIR [EPREFIX/lib]
-  --tccdir=DIR             installation directory [EPREFIX/lib/tcc]
+  --tccdir=DIR             installation directory [EPREFIX/lib/phcc]
   --includedir=DIR         C header files in DIR [PREFIX/include]
   --sharedir=DIR           documentation root DIR [PREFIX/share]
-  --docdir=DIR             documentation in DIR [SHAREDIR/doc/tcc]
+  --docdir=DIR             documentation in DIR [SHAREDIR/doc]
   --mandir=DIR             man documentation in DIR [SHAREDIR/man]
   --infodir=DIR            info documentation in DIR [SHAREDIR/info]
    -q                      be quiet
@@ -210,7 +210,7 @@ Advanced options (experts only):
   --disable-static         make libtcc.so instead of libtcc.a
   --enable-static          make libtcc.a instead of libtcc.dll (win32)
   --disable-rpath          disable use of -rpath with libtcc.so
-  --with-selinux           use mmap for executable memory (tcc -run)
+  --with-selinux           use mmap for executable memory (phcc -run)
   --enable-cross           build all cross compilers (see also 'make help')
 
   --sysincludepaths=...    specify system include paths, colon separated
@@ -218,7 +218,7 @@ Advanced options (experts only):
   --crtprefix=...          specify locations of crt?.o, colon separated
   --elfinterp=...          specify elf interpreter
   --triplet=...            specify system library/include directory triplet
-  --tcc-switches=...       specify implicit switches passed to tcc
+  --tcc-switches=...       specify implicit switches passed to phcc
 
   --config-uClibc,-musl    enable system specific configurations
   --config-mingw32[=yes|no] build on windows using msys, busybox, etc.
@@ -229,7 +229,7 @@ Advanced options (experts only):
   --config-new_dtags=yes   use new ELF DTAGs (DT_RUNPATH instead of DT_RPATH)
   --config-codesign=no     do not use codesign on apple to sign executables
   --config-dwarf=x         use dwarf debug info instead of stabs (x=2..5)
-  --config-pie             let tcc generate position independent executables
+  --config-pie             let phcc generate position independent executables
 
 Cross build options (experimental):
   --cpu=CPU                target CPU [$cpu]
@@ -412,7 +412,7 @@ case $targetos in
   WIN32)
     mingw32="yes"
     confvars="WIN32 $confvars"  # WIN32 intentionally first (commit 729918ef)
-    default prefix "C:/Program Files/tcc"
+    default prefix "C:/Program Files/phcc"
     default tccdir "${prefix}"
     default bindir "${tccdir}"
     default docdir "${tccdir}/doc"
@@ -438,7 +438,7 @@ if test "$mingw32" = "no"; then
   default execprefix   "${prefix}"
   default libdir       "${execprefix}/lib"
   default bindir       "${execprefix}/bin"
-  default tccdir       "${libdir}/tcc"
+  default tccdir       "${libdir}/phcc"
   default includedir   "${prefix}/include"
   default sharedir     "${prefix}/share"
   default docdir       "${sharedir}/doc"
@@ -557,7 +557,7 @@ fcho() { if test -n "$2"; then echo "$1$2"; fi }
 
 if test -z "$quiet"; then
 fcho "Binary directory    " "$bindir"
-fcho "TinyCC directory    " "$tccdir"
+fcho "phcc directory      " "$tccdir"
 fcho "Library directory   " "$libdir"
 fcho "Include directory   " "$includedir"
 fcho "Manual directory    " "$mandir"

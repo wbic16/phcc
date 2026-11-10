@@ -21,11 +21,11 @@ because the small voice in the room is usually the true one.
 git clone https://github.com/wbic16/phcc.git
 cd phcc
 ./configure && make
-./tcc -B. -run examples/hello/hello.c     # Hello, world!
-./tcc -B. -o hello examples/hello/hello.c && ./hello
+./phcc -B. -run examples/hello/hello.c     # Hello, world!
+./phcc -B. -o hello examples/hello/hello.c && ./hello
 ```
 
-(`make install` if you want `tcc` on your PATH without the `-B.`;
+(`make install` if you want `phcc` on your PATH without the `-B.`;
 the `-B.` points the uninstalled binary at its own build tree.
 `make test` runs the upstream test suite — expect
 `ALL TESTS PASSED`. Windows and cross builds: `docs/BUILDING.md`.)

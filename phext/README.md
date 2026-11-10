@@ -26,7 +26,7 @@ counted as a break inside scroll text.
 ```sh
 cd tests
 make test            # builds with $(CC) (default cc) and runs the suite
-make CC=../../tcc TCCFLAGS=-B../..   # dogfood: build the suite with phcc itself
+make CC=../../phcc TCCFLAGS=-B../..   # dogfood: build the suite with phcc itself
 ```
 
 The test binary takes the fixture directory as an optional argument

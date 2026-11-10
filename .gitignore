@@ -15,10 +15,10 @@
 .gdb_history
 a.out
 tcc_g
-tcc
-tcc_c
-tcc_p
-*-tcc
+phcc
+phcc_c
+phcc_p
+*-phcc
 libtcc*.def
 .slurp*
 

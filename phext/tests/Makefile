@@ -4,9 +4,9 @@
 #   make test-xz    build and run the suite with the xz seal compiled in
 #                   (PHEXT_WITH_XZ, links -llzma; the seal tests run in
 #                   this build - see PARITY.md D-7)
-#   make CC=../../tcc TCCFLAGS=-B../..   build with phcc itself
+#   make CC=../../phcc TCCFLAGS=-B../..   build with phcc itself
 #                                        (dogfood; build phcc first —
-#                                         -B points tcc at its own tree)
+#                                         -B points phcc at its own tree)
 CC ?= cc
 CFLAGS ?= -std=c99 -Wall -Wextra -O2
 TESTDIR := $(CURDIR)

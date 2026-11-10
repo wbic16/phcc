@@ -77,16 +77,16 @@ else
  endif
 endif
 
-# run local version of tcc with local libraries and includes
+# run local version of phcc with local libraries and includes
 TCCFLAGS-unx = -B$(TOP) -I$(TOPSRC)/include -I$(TOPSRC) -I$(TOP)
 TCCFLAGS-win = -B$(TOPSRC)/win32 -I$(TOPSRC)/include -I$(TOPSRC) -I$(TOP) -L$(TOP)
 TCCFLAGS = $(TCCFLAGS$(CFG))
-TCC_LOCAL = $(TOP)/tcc$(EXESUF)
+TCC_LOCAL = $(TOP)/phcc$(EXESUF)
 TCC = $(TCC_LOCAL) $(TCCFLAGS)
 
-# run tests with the installed tcc instead
+# run tests with the installed phcc instead
 ifdef TESTINSTALL
-  TCC_LOCAL = $(bindir)/tcc
+  TCC_LOCAL = $(bindir)/phcc
   TCCFLAGS-unx = -I$(TOP)
   TCCFLAGS-win = -B$(bindir) -I$(TOP)
   -LTCC = $(libdir)/$(LIBTCC) $(LINK_LIBTCC)
@@ -126,7 +126,7 @@ ifeq ($(INCLUDED),no)
 # --------------------------------------------------------------------------
 # running top Makefile
 
-PROGS = tcc$(EXESUF)
+PROGS = phcc$(EXESUF)
 TCCLIBS = $(LIBTCCDEF) $(LIBTCC) $(LIBTCC1)
 TCCDOCS = tcc.1 tcc-doc.html tcc-doc.info
 
@@ -140,14 +140,14 @@ TCC_X += riscv64 arm64-osx
 # cross libtcc1.a targets to build
 LIBTCC1_X = $(filter-out c67,$(TCC_X))
 
-PROGS_CROSS = $(foreach X,$(TCC_X),$X-tcc$(EXESUF))
+PROGS_CROSS = $(foreach X,$(TCC_X),$X-phcc$(EXESUF))
 LIBTCC1_CROSS = $(foreach X,$(LIBTCC1_X),$X-libtcc1.a)
 
 # build cross compilers & libs
 cross: $(LIBTCC1_CROSS) $(PROGS_CROSS)
 
 # build specific cross compiler & lib
-cross-%: %-tcc$(EXESUF) %-libtcc1.a ;
+cross-%: %-phcc$(EXESUF) %-libtcc1.a ;
 
 install: ; @$(MAKE) --no-print-directory  install$(CFG)
 install-strip: ; @$(MAKE) --no-print-directory  install$(CFG) CONFIG_strip=yes
@@ -246,7 +246,7 @@ LIBTCC_OBJ += $(X)phext.o
 $(X)phext.o : phext/phext.c phext/phext.h
 	$S$(CC) -o $@ -c $< $(addsuffix ,$(DEFINES) $(CFLAGS))
 endif
-# native tcc always made from tcc.o and libtcc.[so|a]
+# native phcc always made from tcc.o and libtcc.[so|a]
 tcc.o : DEFINES += -DONE_SOURCE=0
 
 GITHASH:=$(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo no)
@@ -276,25 +276,25 @@ $(X)%.o : %.c $(LIBTCC_INC)
 $(X)tcc.o : tcctools.c
 $(X)tcc.o : DEFINES += $(DEF_GITHASH)
 
-# Host Tiny C Compiler
-tcc$(EXESUF): tcc.o $(LIBTCC)
+# Host phcc
+phcc$(EXESUF): tcc.o $(LIBTCC)
 	$S$(CC) -o $@ $^ $(addsuffix ,$(LIBS) $(LDFLAGS) $(LINK_LIBTCC))
 
-# Cross Tiny C Compilers
+# Cross phcc compilers
 # (the TCCDEFS_H dependency is only necessary for parallel makes,
-# ala 'make -j x86_64-tcc i386-tcc tcc', which would create multiple
+# ala 'make -j x86_64-phcc i386-phcc phcc', which would create multiple
 # c2str.exe and tccdefs_.h files in parallel, leading to access errors.
 # This forces it to be made only once.  Make normally tracks multiple paths
 # to the same goals and only remakes it once, but that doesn't work over
 # sub-makes like in this target)
-%-tcc$(EXESUF): $(TCCDEFS_H) FORCE
+%-phcc$(EXESUF): $(TCCDEFS_H) FORCE
 	@$(MAKE) --no-print-directory $@ CROSS_TARGET=$* ONE_SOURCE=$(or $(ONE_SOURCE),yes)
 
-$(CROSS_TARGET)-tcc$(EXESUF): $(TCC_FILES)
+$(CROSS_TARGET)-phcc$(EXESUF): $(TCC_FILES)
 	$S$(CC) -o $@ $^ $(LIBS) $(LDFLAGS)
 
 # profiling version
-tcc_p$(EXESUF): $($T_FILES)
+phcc_p$(EXESUF): $($T_FILES)
 	$S$(CC) -o $@ $< $(DEFINES) $(CFLAGS_P) $(LIBS_P) $(LDFLAGS_P)
 
 # static libtcc library
@@ -327,16 +327,16 @@ libtcc.dll : $(LIBTCC_OBJ)
 libtcc.dll : DEFINES += -DLIBTCC_AS_DLL
 
 # import file for windows libtcc.dll
-libtcc.def : libtcc.dll tcc$(EXESUF)
+libtcc.def : libtcc.dll phcc$(EXESUF)
 	$S$(XTCC) -impdef $< -o $@
-XTCC ?= ./tcc$(EXESUF)
+XTCC ?= ./phcc$(EXESUF)
 
 # TinyCC runtime libraries
-libtcc1.a : tcc$(EXESUF) FORCE
+libtcc1.a : phcc$(EXESUF) FORCE
 	@$(MAKE) -C lib
 
 # Cross libtcc1.a
-%-libtcc1.a : %-tcc$(EXESUF) FORCE
+%-libtcc1.a : %-phcc$(EXESUF) FORCE
 	@$(MAKE) -C lib CROSS_TARGET=$*
 
 .PRECIOUS: %-libtcc1.a
@@ -380,14 +380,14 @@ IF = $(if $1,$(IM) mkdir -p $2 && $(INSTALL) $1 $2)
 IFw = $(call IF,$(wildcard $1),$2)
 IR = $(IM) mkdir -p $2 && cp -r $1/. $2
 IM = @echo "-> $2 : $1" ;
-BINCHECK = $(if $(wildcard $(PROGS) *-tcc$(EXESUF)),,@echo "Makefile: nothing found to install" && exit 1)
+BINCHECK = $(if $(wildcard $(PROGS) *-phcc$(EXESUF)),,@echo "Makefile: nothing found to install" && exit 1)
 
 EXTRA_O = runmain.o bt-exe.o bt-dll.o bt-log.o bcheck.o bcheck_run.o
 
 # install progs & libs
 install-unx:
 	$(call BINCHECK)
-	$(call IBw,$(PROGS) *-tcc,"$(bindir)")
+	$(call IBw,$(PROGS) *-phcc,"$(bindir)")
 	$(call IFw,$(LIBTCC1) $(EXTRA_O) $(LIBTCC1_U),"$(tccdir)")
 	$(call IF,$(TOPSRC)/include/*.h $(TOPSRC)/tcclib.h,"$(tccdir)/include")
 	$(call $(if $(findstring .so,$(LIBTCC)),IBw,IFw),$(LIBTCC),"$(libdir)")
@@ -477,22 +477,22 @@ tests2.%:
 testspp.%:
 	@$(MAKE) -C tests/pp $@
 # run tests with code coverage
-tcov-tes% : tcc_c$(EXESUF)
+tcov-tes% : phcc_c$(EXESUF)
 	@rm -f $<.tcov
 	@$(MAKE) --no-print-directory TCC_LOCAL=$(CURDIR)/$< tes$*
-tcc_c$(EXESUF): $($T_FILES)
+phcc_c$(EXESUF): $($T_FILES)
 	$S$(TCC) tcc.c -o $@ -ftest-coverage $(DEFINES) $(LIBS)
 # run tests with sanitize option
-sani-tes% : tcc_s$(EXESUF)
+sani-tes% : phcc_s$(EXESUF)
 	@$(MAKE) --no-print-directory TCC_LOCAL=$(CURDIR)/$< tes$*
-tcc_s$(EXESUF): $($T_FILES)
+phcc_s$(EXESUF): $($T_FILES)
 	$S$(CC) tcc.c -o $@ -fsanitize=address,undefined $(DEFINES) $(CFLAGS) $(LDFLAGS) $(LIBS)
-# test the installed tcc instead
+# test the installed phcc instead
 test-install: $(TCCDEFS_H)
 	@$(MAKE) -C tests TESTINSTALL=yes #_all
 
 clean:
-	@rm -f tcc *-tcc tcc_p tcc_c tcc_s
+	@rm -f phcc *-phcc phcc_p phcc_c phcc_s
 	@rm -f tags ETAGS *.o *.a *.so* *.out *.log lib*.def *.exe *.dll
 	@rm -f a.out *.dylib *_.h *.pod *.tcov
 	@$(MAKE) -s -C lib $@
@@ -522,11 +522,11 @@ help:
 	@echo "make testspp.all / make testspp.17"
 	@echo "   run all/single test(s) from tests/pp"
 	@echo "make tcov-test / tcov-tests2.37 / tcov-testspp.17"
-	@echo "   run tests as above with code coverage. After test(s) see tcc_c$(EXESUF).tcov"
+	@echo "   run tests as above with code coverage. After test(s) see phcc_c$(EXESUF).tcov"
 	@echo "make sani-test / sani-tests2.37 / sani-testspp.17"
 	@echo "   run tests as above with sanitize option."
 	@echo "make test-install"
-	@echo "   run tests with the installed tcc"
+	@echo "   run tests with the installed phcc"
 	@echo "Other supported make targets:"
 	@echo "   install install-strip uninstall doc [dist]clean tags ETAGS tar help"
 	@echo "Custom configuration:"

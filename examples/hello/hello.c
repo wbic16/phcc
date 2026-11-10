@@ -1,9 +1,9 @@
 /* hello.c — the smallest phcc program.
  *
  * Build and run:
- *   tcc -o hello hello.c && ./hello
+ *   phcc -o hello hello.c && ./hello
  * Or skip the build entirely (see README.md):
- *   tcc -run hello.c
+ *   phcc -run hello.c
  */
 #include <stdio.h>
 
