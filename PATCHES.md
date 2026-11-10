@@ -128,6 +128,34 @@ structure; the fork's intent is carried, never dropped silently).
   wave boundaries only, no cron; syncs land by cherry-pick while the
   touched paths stay fork-clean.
 
+- **U2 — arm64-asm.c, arm64-tok.h (upstream sync #2, 2026-11-09).**
+  Upstream moved exactly one commit past the U1 pin: `aade7baf`
+  (Raven, 2026-11-09) 'arm64-asm: add wfe, wfi, wfet, wfit'. Pure
+  additions (2 files, +43/−0): the built-in arm64 assembler gains
+  the wait instructions — `wfe`/`wfi` (no operand) and the ARMv8.7
+  `wfet`/`wfit` (one register operand) — with new encoding
+  constants `ARM64_WFE` / `ARM64_WFI` / `ARM64_WFET` / `ARM64_WFIT`
+  in arm64-tok.h. Classification: arm64 assembler feature addition;
+  no PATCHES hot file touched (tccelf.c, tccgen.c, tccpp.c,
+  libtcc.c, tcc.h, tccdbg.c, lib/libtcc1.c all untouched); no
+  correctness fix. Fork state at both touched paths was
+  byte-identical to the U1 pin (SHA-256 checked against a pristine
+  `70adbb12` checkout; no F-entry touches arm64-asm.c or
+  arm64-tok.h), so the commit cherry-picked with zero conflicts.
+  Base pin moves `70adbb12` → `aade7baf`. Receipts on the landed
+  tree: clean build including `make cross-arm64`; make test ALL
+  TESTS PASSED; conformance spot 332/333 with diverge set exactly
+  [a_pp_018] and 0 oracle splits; the three standing static gate
+  cells green (static hello with 23 IRELATIVE entries and bounds
+  matching the .rela.plt range [0x404510, 0x404738) in the first
+  LOAD exactly, r_offsets 23/23 in .got; static Lua byte-identical;
+  static phccbox byte-identical, awk 42); arm64 encoding proof —
+  the tree's arm64-phcc assembles wfe / wfi / wfet x5 / wfit x6 to
+  d503205f / d503207f / d5031005 / d5031026, byte-identical to
+  aarch64 GAS (which needs -march=armv8.7-a for the WFxT pair).
+  The upstream source carry (upstream.phext.xz) was re-sealed at
+  the new pin in the same stack; see UPSTREAM.md.
+
 ## Post-rebase fork changes
 
 - **F1 — lib/libtcc1.c: unsigned cast before high-word left shift in
