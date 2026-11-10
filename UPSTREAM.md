@@ -10,10 +10,10 @@ measurable against the original. Will's direction, 2026-11-09:
 ## The pin
 
 - Upstream: https://github.com/TinyCC/tinycc.git (branch `mob`)
-- Commit: `70adbb129760b77e3bdfec447c1f986def763f2c`
-- Date: 2026-11-07T14:43:30+03:00
-- Subject: "arm64: fix sp offsets of 4096 and more in arm64_spoff"
-  (Alexander Medvednikov; the fork's cherry-pick is PATCHES.md entry U1)
+- Commit: `aade7bafb59641660bc9a0e21ad0a9a4a1ed346e`
+- Date: 2026-11-09T02:44:01-06:00
+- Subject: "arm64-asm: add wfe, wfi, wfet, wfit"
+  (Raven; the fork's cherry-pick is PATCHES.md entry U2)
 
 ## Lineage
 
@@ -23,13 +23,18 @@ measurable against the original. Will's direction, 2026-11-09:
 - The modernization rebase (Slice 0) moved the base to
   `c638ddfb593214813aa33536fb993b9a45d23793` — upstream **0.9.28rc**.
 - Upstream sync #1 (PATCHES.md **U1**, 2026-11-08) advanced the base
-  pin by exactly one upstream commit to **70adbb12**, the pin this
-  carry seals. Upstream drift checks at every wave boundary since
-  have found upstream still at this commit.
+  pin by exactly one upstream commit to **70adbb12**. The carry was
+  first sealed at that pin (seal 798,620 bytes, SHA-256
+  `5e98c6d163430874c9287ff101a964149b4e142a3a12a962604b54d439d3eec8`).
+- Upstream sync #2 (PATCHES.md **U2**, 2026-11-09) advanced the pin
+  by exactly one further commit to **aade7baf** — an arm64 assembler
+  feature addition (the wait instructions `wfe`/`wfi`/`wfet`/`wfit`),
+  touching no hot file and carrying no correctness fix — and this
+  carry was re-sealed at the new pin in the same stack.
 
 ## The carry (file grain, tools/upstream_carry.py)
 
-- **558 files, 4,557,444 bytes**, every file placed as one scroll
+- **558 files, 4,558,543 bytes**, every file placed as one scroll
   with a placement manifest inside the phext (path, coordinate,
   SHA-256 of the original bytes, size, git mode, encoding).
 - **Binary scrolls: none.** Every file in the pinned tree is valid
@@ -43,10 +48,10 @@ measurable against the original. Will's direction, 2026-11-09:
 ## Hashes
 
 - `upstream.phext` (plain; **does not ship** — generated on demand):
-  4,631,003 bytes,
-  SHA-256 `54d69d4b2bd056e9438746c5fdc8f65e8e85b4f3be13be559acb3ad9f9586a5a`
-- `upstream.phext.xz` (the seal; **ships**): 798,620 bytes,
-  SHA-256 `5e98c6d163430874c9287ff101a964149b4e142a3a12a962604b54d439d3eec8`
+  4,632,084 bytes,
+  SHA-256 `8bfa7b37dc3a5cfcd66c425894ee44b9e1573348afb8987577c2db1344fe44d0`
+- `upstream.phext.xz` (the seal; **ships**): 798,716 bytes,
+  SHA-256 `ffe4986dcd3298e4c4641d852c2d924c4f2958191f9259f6d34d932454949230`
 - Seal recipe: the repository's own `phcc seal`
   (tools/phcc_builds.py — xz stream, CRC64 check, preset 9 extreme),
   the same recipe that seals phcc.phext.
@@ -55,9 +60,9 @@ measurable against the original. Will's direction, 2026-11-09:
 
 ```sh
 git clone https://github.com/TinyCC/tinycc.git tinycc-upstream
-git -C tinycc-upstream checkout 70adbb129760b77e3bdfec447c1f986def763f2c
+git -C tinycc-upstream checkout aade7bafb59641660bc9a0e21ad0a9a4a1ed346e
 python3 tools/upstream_carry.py build --repo tinycc-upstream \
-    --pin 70adbb129760b77e3bdfec447c1f986def763f2c \
+    --pin aade7bafb59641660bc9a0e21ad0a9a4a1ed346e \
     --out upstream.phext --stats upstream-stats.json
 python3 tools/phcc seal --phext upstream.phext --out upstream.phext.xz
 ```
@@ -72,7 +77,8 @@ python3 tools/upstream_carry.py unpack --phext upstream-check.phext \
 # unpack re-verifies every file's SHA-256 against the manifest
 ```
 
-Measured at the carry's creation (2026-11-09, rock-mountain):
+Measured at the re-seal (2026-11-09, aletheia-core; the creation
+measurement of 2026-11-09 on rock-mountain read identically):
 unseal reproduces the plain phext byte-identically; unpack writes
 **558/558 files, every file SHA-256-verified, 0 failures**; an
 independent `diff -r` of the unpacked tree against a second fresh
