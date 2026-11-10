@@ -1,0 +1,7 @@
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <limits.h>
+struct S { float f; double d; void *p; };
+int main(void){ printf("%zu %zu\n", sizeof(struct S), _Alignof(struct S)); return 0; }
