@@ -81,3 +81,28 @@ with PE inspection (`examples/dll/` is that shape at toy scale);
 no PE binary has been executed by this project, and no document
 here claims otherwise. A three-compiler conformance claim exists
 only when a current attestation does.
+
+### Running the attestation
+
+The tooling lives in `windows/attestation/` in this repo:
+`attestation.ps1`, the 289 Tier A probe sources, and `expected.json`
+(the oracle expectations it compares against). On a Windows host with
+Visual Studio's C++ workload installed, run from that directory:
+
+```
+powershell -ExecutionPolicy Bypass -File .\attestation.ps1
+```
+
+The script finds `cl.exe`, compiles and runs every probe, and writes
+`attestation-receipt.txt` beside itself — `ATTESTED` only when every
+counted probe matches MSVC on compile class, exit code, and stdout
+(stdout is compared modulo the Windows text-mode CRLF translation).
+One probe, `a_pp_018` (`__STDC_VERSION__`), is a named class-(b)
+divergence: it is reported on its own receipt line and excluded from
+the count. Past runs are kept under `windows/attestation/records/` —
+including the 2026-11-09 v1 run, which returned `NOT ATTESTED`
+(3/289) for package reasons, not compiler reasons: captured CRLF
+bytes were hashed against LF expectations, and MSVC's
+`/experimental:c11atomics` flag was not passed.
+`records/FAILURE-ANALYSIS.md` is the full classification; the
+current script is the v2 that fixes both defects.
