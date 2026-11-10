@@ -369,7 +369,7 @@ def place(path):
     if path.startswith("win32/"): return (9, 5)
     if path in ("Makefile", "configure", "conftest.c", ".gitignore",
                 "slurp.sh", "PATCHES.md", "README.md", "BENCHMARKS.md",
-                "texi2pod.pl"): return (10, 1)
+                "UPSTREAM.md", "texi2pod.pl"): return (10, 1)
     if path.startswith("tests/"):
         if "/" not in path[len("tests/"):]: return (10, 2)
         if path.startswith("tests/tests2/"): return (10, 3)
@@ -399,6 +399,17 @@ def place_full(path):
     phase the model reserves for it, not in Source."""
     if path.startswith("docs/"):
         return (9, 2, 1, 1)
+    # Further extension (upstream sync #2 refresh, 2026-11-09): the
+    # Windows attestation set, windows/** — a self-contained tooling
+    # bundle (PowerShell runner, probe corpus, expectations, run
+    # records) that ships verbatim and is executed on Windows, never
+    # compiled into the compiler — goes to the Docs phase beside
+    # docs/**, Book 1, Chapter 2, whole-file like the guides: it is
+    # platform documentation/apparatus, not Source, and its probe
+    # .c files are conformance data, not compiler source, so they
+    # stay out of Volume 3 member segmentation.
+    if path.startswith("windows/"):
+        return (9, 2, 1, 2)
     bc = place(path)
     if bc is None:
         return None
@@ -480,6 +491,7 @@ EXCLUDED = {
     "monolith.phext": "preserved as Volume 1; a phext cannot byte-exactly contain itself as a scroll",
     "phcc.phext": "a phext cannot byte-exactly contain itself as a scroll",
     "phcc.phext.xz": "the generated seal of phcc.phext (xz of the whole phext, produced by `phcc seal`); a generated artifact is never packed into the phext it seals — unseal regenerates the phext, pack consumes the tree",
+    "upstream.phext.xz": "the generated seal of the upstream carry (upstream.phext, produced by tools/upstream_carry.py + `phcc seal`); a generated artifact is never packed — unseal regenerates the carry, pack consumes the tree",
     MANIFEST_NAME: "unpack's verification manifest; regenerated on every unpack",
 }
 
