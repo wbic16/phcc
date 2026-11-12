@@ -28,6 +28,16 @@
 #     reported on their own receipt line and excluded from the agree
 #     denominator. ATTESTED requires all counted probes to agree.
 #
+# v2.1 fix (2026-11-11, records/FIX-2026-11-11-stderr-capture.md): native
+# captures are stderr-safe. With $ErrorActionPreference = "Stop", any
+# stderr line from a native tool becomes a terminating NativeCommandError
+# the moment it is redirected into the pipeline — and cl.exe prints its
+# banner and all diagnostics to stderr. The first v2 run died at the
+# cl-version capture before running a single probe. Every native capture
+# below now runs inside a scoped relaxation of $ErrorActionPreference
+# (saved before, restored after), so stderr can be captured or discarded
+# but never fatal. Receipt format and comparison semantics are v2's.
+#
 # Everything is resolved relative to this script's own path, so the script
 # works identically from a zip extraction or from its in-repo location at
 # windows/attestation/.
@@ -83,15 +93,28 @@ if (Test-Path $vcvars) {
         if ($_ -match "^([^=]+)=(.*)$") { Set-Item -Path ("Env:" + $Matches[1]) -Value $Matches[2] }
     }
 }
+# cl prints its banner to stderr; capture it with the error preference
+# relaxed (see the v2.1 note in the header) so the banner cannot terminate
+# the run as a NativeCommandError.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 $clVersion = (& $cl 2>&1 | Select-Object -First 1)
+$ErrorActionPreference = $prevEAP
+$clVersion = "$clVersion"
 
 # --- signer / commit defaults -------------------------------------------------
 if (-not $Signer) {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $g = git config user.name 2>$null
+    $ErrorActionPreference = $prevEAP
     if ($g) { $Signer = $g } else { $Signer = $env:USERNAME }
 }
 if (-not $PhccCommit) {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $h = git rev-parse HEAD 2>$null
+    $ErrorActionPreference = $prevEAP
     if ($LASTEXITCODE -eq 0 -and $h) { $PhccCommit = $h.Trim() } else { $PhccCommit = "unspecified (pass -PhccCommit)" }
 }
 
@@ -135,9 +158,11 @@ try {
     $canaryExe = Join-Path $work "canary_atomic.exe"
     $canaryObj = Join-Path $work "canary_atomic.obj"
     $canaryOut = ""
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
         $canaryOut = (& $cl /nologo /std:c17 /TC /experimental:c11atomics /Fe:$canaryExe $canarySrc /Fo:$canaryObj 2>&1 | Out-String)
-    } catch { $canaryOut = "$_" }
+    } catch { $canaryOut = "$_" } finally { $ErrorActionPreference = $prevEAP }
     if ($canaryOut -match "unrecognized|unknown option|invalid option|D9002") {
         $atomicsFallback = $true
     } else {
@@ -151,7 +176,10 @@ try {
         $src = Join-Path $Here (Join-Path "probes" $p.file)
         $exe = Join-Path $work ($p.name + ".exe")
         $obj = Join-Path $work ($p.name + ".obj")
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         & $cl @clArgs /Fe:$exe $src /Fo:$obj 2>$null | Out-Null
+        $ErrorActionPreference = $prevEAP
         $compiled = ($LASTEXITCODE -eq 0) -and (Test-Path $exe)
         if ($compiled -ne [bool]$p.expect_compile) {
             $mismatch += "$($p.name) (compile class: msvc=$compiled, expected=$($p.expect_compile))"
