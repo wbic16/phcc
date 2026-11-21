@@ -20,6 +20,7 @@
 
 #define USING_GLOBALS
 #include "tcc.h"
+#include <ctype.h>
 #ifdef CONFIG_TCC_ASM
 
 static Section *last_text_section; /* to handle .previous asm directive */
