@@ -5064,6 +5064,15 @@ invalid:
         }
         /* add symbol */
         name = strtab + sym->st_name;
+#ifndef TCC_TARGET_PE
+        /* F28 versioned references are an ELF concept; PE has no
+           symbol versioning.  The exclusion matters on i386 PE, where
+           the '@N' suffix of an undefined symbol is stdcall
+           argument-size decoration (e.g. the win32 CRT's
+           _SetUnhandledExceptionFilter@4): tccpe.c's import
+           resolution needs the decorated name intact, and splitting
+           it here would register the symbol under its base name with
+           the decoration unrecoverable. */
         if (sym->st_shndx == SHN_UNDEF
             && ELFW(ST_BIND)(sym->st_info) != STB_LOCAL) {
             const char *at = strchr(name, '@');
@@ -5087,6 +5096,7 @@ invalid:
                 continue;
             }
         }
+#endif
         sym_index = set_elf_sym(symtab_section, sym->st_value, sym->st_size,
                                 sym->st_info, sym->st_other,
                                 sym->st_shndx, name);
